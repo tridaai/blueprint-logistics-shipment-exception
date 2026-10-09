@@ -5,10 +5,11 @@ environment variable (see :func:`get_retriever`):
 
 - ``keyword`` (default) — transparent token overlap, deterministic, offline.
 - ``semantic`` — embeds the policy corpus and the query with an embeddings
-  API and ranks by cosine similarity. Embeddings always run through
-  OpenAI (or an OpenAI-compatible endpoint via ``OPENAI_BASE_URL``):
-  Anthropic has no embeddings API, so ``MODEL_BACKEND=anthropic`` still
-  needs ``OPENAI_API_KEY`` for this retriever — the failure message says
+  API and ranks by cosine similarity. Embeddings come from the local
+  Ollama server when ``MODEL_BACKEND=ollama``, otherwise from OpenAI
+  (or an OpenAI-compatible endpoint via ``OPENAI_BASE_URL``): Anthropic
+  has no embeddings API, so ``MODEL_BACKEND=anthropic`` still needs
+  ``OPENAI_API_KEY`` for this retriever — the failure message says
   exactly that when the key is missing.
 - ``hybrid`` — runs both, merges the candidate pools, and applies an
   explicit rerank step: reciprocal-rank score fusion in code (see
@@ -109,14 +110,32 @@ class SemanticRetriever:
     def _build_embeddings_client():
         """Resolve the embeddings client, failing loudly when unusable.
 
-        Embeddings come from OpenAI regardless of the drafting backend —
-        Anthropic offers no embeddings API. That is stated, not hidden:
-        with ``MODEL_BACKEND=anthropic`` (or ``mock``) an ``OPENAI_API_KEY``
-        is still required, and the error says so.
+        Embeddings follow the configured stack:
+
+        - ``MODEL_BACKEND=ollama`` → embeddings from the local Ollama
+          server (``OLLAMA_EMBEDDING_MODEL``, default ``nomic-embed-text``)
+          — fully local, no cloud key.
+        - Otherwise → OpenAI (or an OpenAI-compatible endpoint via
+          ``OPENAI_BASE_URL``), regardless of the drafting backend:
+          Anthropic offers no embeddings API. That is stated, not hidden:
+          with ``MODEL_BACKEND=anthropic`` (or ``mock``) an
+          ``OPENAI_API_KEY`` is still required, and the error says so.
         """
         load_dotenv()
+        backend = (env_str("MODEL_BACKEND") or "mock").lower()
+        timeout = env_float("LLM_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS)
+        if backend == "ollama":
+            try:
+                from openai import OpenAI
+            except ImportError as exc:
+                raise _missing_sdk_error("ollama (embeddings)", "OpenAI") from exc
+            client = OpenAI(
+                api_key="ollama",  # placeholder — Ollama ignores it
+                base_url=env_str("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
+                timeout=timeout,
+            )
+            return client, env_str("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text")
         if not env_str("OPENAI_API_KEY"):
-            backend = (env_str("MODEL_BACKEND") or "mock").lower()
             hint = (
                 f" MODEL_BACKEND={backend} has no embeddings API to use instead —"
                 " drafting and embeddings are separate providers here."
@@ -127,7 +146,8 @@ class SemanticRetriever:
                 "RETRIEVER=semantic needs embeddings, which run through OpenAI, "
                 "but OPENAI_API_KEY is not set." + hint
                 + " Add OPENAI_API_KEY=<your key> to the .env file in the repo root "
-                "(copy .env.example to .env) or export it, or set RETRIEVER=keyword."
+                "(copy .env.example to .env) or export it, set MODEL_BACKEND=ollama "
+                "to embed locally with Ollama, or set RETRIEVER=keyword."
             )
         try:
             from openai import OpenAI
@@ -135,7 +155,7 @@ class SemanticRetriever:
             raise _missing_sdk_error("openai (embeddings)", "OpenAI") from exc
         client_kwargs: dict = {
             "api_key": env_str("OPENAI_API_KEY"),
-            "timeout": env_float("LLM_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS),
+            "timeout": timeout,
         }
         base_url = env_str("OPENAI_BASE_URL")
         if base_url:

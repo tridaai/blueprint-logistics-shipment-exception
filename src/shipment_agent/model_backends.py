@@ -4,7 +4,11 @@ Default = ``MockModelBackend``: deterministic, offline, no API key. This is
 what the tests, the evals, and the default demo run use, so results are
 reproducible.
 
-Optional = OpenAI / Anthropic backends, selected with ``MODEL_BACKEND``.
+Optional = OpenAI / Anthropic / Ollama backends, selected with
+``MODEL_BACKEND``. Ollama is the fully local option: a preset over the
+OpenAI-compatible client pointed at a local Ollama server, no API key.
+Any other OpenAI-compatible hosted provider (LiteLLM, Together, Groq,
+…) works through the plain OpenAI backend + ``OPENAI_BASE_URL``.
 All surfaces (API, CLI, traced demo) honour the same variables — see the
 configuration table in the README. The LLM backends genuinely call the
 provider APIs through the official SDKs (the optional ``llm`` extra) and
@@ -464,6 +468,33 @@ class AnthropicBackend(_BaseLLMBackend):
         return "".join(block.text for block in message.content if block.type == "text")
 
 
+class OllamaBackend(OpenAIBackend):
+    """Local models via Ollama — a preset over the OpenAI-compatible path.
+
+    Ollama serves an OpenAI-compatible API on localhost, so this backend
+    is the OpenAI client pointed at ``OLLAMA_BASE_URL`` (default
+    ``http://localhost:11434/v1``) with a placeholder key — Ollama needs
+    no real API key. The result is a fully local real-LLM mode: pull a
+    model (``ollama pull llama3.1``), set ``MODEL_BACKEND=ollama``, done.
+    Embeddings in semantic/hybrid retrieval also come from Ollama in
+    this mode (see ``retriever.py``).
+    """
+
+    name = "ollama"
+
+    def __init__(self) -> None:
+        try:
+            from openai import OpenAI
+        except ImportError as exc:
+            raise _missing_sdk_error("ollama", "OpenAI") from exc
+        self._client = OpenAI(
+            api_key="ollama",  # placeholder — Ollama ignores it
+            base_url=env_str("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
+            timeout=env_float("LLM_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS),
+        )
+        self._model = env_str("OLLAMA_MODEL", "llama3.1")
+
+
 def get_backend(name: str | None = None) -> ModelBackend:
     """Select a backend by name or the MODEL_BACKEND env var (default: mock).
 
@@ -478,4 +509,8 @@ def get_backend(name: str | None = None) -> ModelBackend:
         return OpenAIBackend()
     if selected == "anthropic":
         return AnthropicBackend()
-    raise ValueError(f"Unknown MODEL_BACKEND: {selected!r} (expected mock | openai | anthropic)")
+    if selected == "ollama":
+        return OllamaBackend()
+    raise ValueError(
+        f"Unknown MODEL_BACKEND: {selected!r} (expected mock | openai | anthropic | ollama)"
+    )
