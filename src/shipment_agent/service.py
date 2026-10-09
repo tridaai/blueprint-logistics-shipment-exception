@@ -41,9 +41,63 @@ class ShipmentService:
         backend = self.backend or get_backend()
         if self.retriever is None:
             self.retriever = get_retriever()
-        result = run_shipment(shipment, backend=backend, retriever=self.retriever)
-        self._get_store().save(ApprovalRecord(result=result))
+        model = (
+            shipment
+            if isinstance(shipment, ShipmentInput)
+            else ShipmentInput.model_validate(shipment)
+        )
+        # Memory: what the store already knows about this consignee and
+        # this lane becomes diagnosis evidence for the new analysis.
+        history = self._history_summary(model)
+        result = run_shipment(
+            model, backend=backend, retriever=self.retriever, history=history
+        )
+        self._get_store().save(
+            ApprovalRecord(result=result, shipment=model.model_dump(mode="json"))
+        )
         return result
+
+    def _history_summary(self, shipment: ShipmentInput) -> dict | None:
+        """Summarise prior analysed shipments for this consignee + lane.
+
+        Counts only priors that themselves had an exception, with the
+        most recent exception types — the diagnosis cites them as
+        evidence ("2 prior exceptions for this consignee in the stored
+        history"). Returns None when there is nothing to remember.
+        """
+        priors = self._get_store().prior_shipments(
+            exclude_shipment_id=shipment.shipment_id
+        )
+        if not priors:
+            return None
+        consignee = shipment.customer_name or next(
+            (
+                d.fields.get("consignee")
+                for d in shipment.documents
+                if d.fields.get("consignee")
+            ),
+            "",
+        )
+        lane = f"{shipment.origin} -> {shipment.destination}"
+
+        def summarize(entries: list[dict]) -> tuple[int, list[str]]:
+            hits = [e for e in entries if e["exception_type"] != "none"]
+            return len(hits), [e["exception_type"] for e in hits[:3]]
+
+        consignee_count, consignee_types = summarize(
+            [e for e in priors if consignee and e["consignee"] == consignee]
+        )
+        lane_count, lane_types = summarize([e for e in priors if e["lane"] == lane])
+        if not consignee_count and not lane_count:
+            return None
+        return {
+            "consignee": consignee,
+            "consignee_count": consignee_count,
+            "consignee_recent_types": consignee_types,
+            "lane": lane,
+            "lane_count": lane_count,
+            "lane_recent_types": lane_types,
+        }
 
     def approve(self, shipment_id: str, approver: str) -> AgentResult:
         store = self._get_store()

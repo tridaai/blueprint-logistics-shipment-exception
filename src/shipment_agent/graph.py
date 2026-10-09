@@ -328,6 +328,7 @@ class AgentState(TypedDict, total=False):
     classification_suggestion: dict | None
     policies: list[dict]
     retrieval_info: dict
+    history: dict | None
     diagnosis: dict
     recovery_options: list[dict]
     options_notes: list[str]
@@ -478,6 +479,7 @@ def build_graph(
             ],
             policies=state.get("policies", []),
             backend=backend,
+            history=state.get("history"),
         )
         return {"diagnosis": diagnosis.model_dump()}
 
@@ -701,13 +703,21 @@ def run_shipment(
     shipment: ShipmentInput | dict,
     backend: ModelBackend | None = None,
     retriever: Retriever | None = None,
+    history: dict | None = None,
 ) -> AgentResult:
-    """Run one shipment through the full graph and return the typed result."""
+    """Run one shipment through the full graph and return the typed result.
+
+    ``history`` is the memory summary for this shipment's consignee and
+    lane (see ``service.ShipmentService.analyze``); it reaches the
+    diagnosis as evidence. Direct callers usually leave it None.
+    """
     shipment_model = (
         shipment if isinstance(shipment, ShipmentInput) else ShipmentInput.model_validate(shipment)
     )
     app = build_graph(backend=backend, retriever=retriever)
-    final = app.invoke({"shipment": shipment_model.model_dump(mode="json")})
+    final = app.invoke(
+        {"shipment": shipment_model.model_dump(mode="json"), "history": history}
+    )
     return AgentResult(
         shipment_id=shipment_model.shipment_id,
         classification=final["classification"],

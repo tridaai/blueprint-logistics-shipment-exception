@@ -17,6 +17,32 @@ from .model_backends import DraftContext
 from .schemas import Diagnosis, DocumentExtraction, ShipmentInput
 
 
+def memory_evidence_lines(history: dict | None) -> list[str]:
+    """History as evidence lines, in the diagnosis' citation style.
+
+    Only genuine exceptions count (a prior "none" is not an exception),
+    and the lines name the counts plainly so an approver can weigh them.
+    Empty history produces no lines at all — absence is not evidence.
+    """
+    if not history:
+        return []
+    lines: list[str] = []
+    if history.get("consignee_count"):
+        recent = ", ".join(history.get("consignee_recent_types", [])) or "none recorded"
+        lines.append(
+            f"memory: {history['consignee_count']} prior exception(s) for this "
+            f"consignee in the stored history (consignee: {history.get('consignee', '')}; "
+            f"most recent: {recent})"
+        )
+    if history.get("lane_count"):
+        recent = ", ".join(history.get("lane_recent_types", [])) or "none recorded"
+        lines.append(
+            f"memory: {history['lane_count']} prior exception(s) on this lane "
+            f"({history.get('lane', '')}) in the stored history (most recent: {recent})"
+        )
+    return lines
+
+
 def build_evidence(
     *,
     classification: dict,
@@ -24,6 +50,7 @@ def build_evidence(
     mismatches: list[dict],
     extractions: list[DocumentExtraction],
     policies: list[dict],
+    history: dict | None = None,
 ) -> list[str]:
     """The deterministic evidence list every diagnosis cites."""
     evidence: list[str] = []
@@ -40,6 +67,7 @@ def build_evidence(
         evidence.append("classification signals: " + "; ".join(classification["signals"]))
     for p in policies:
         evidence.append(f"policy {p['policy_id']}: {p['title']}")
+    evidence.extend(memory_evidence_lines(history))
     return evidence
 
 
@@ -84,6 +112,7 @@ def build_diagnosis(
     extractions: list[DocumentExtraction],
     policies: list[dict],
     backend,
+    history: dict | None = None,
 ) -> Diagnosis:
     """Compose the diagnosis: LLM prose in provider mode, template otherwise."""
     evidence = build_evidence(
@@ -92,6 +121,7 @@ def build_diagnosis(
         mismatches=mismatches,
         extractions=extractions,
         policies=policies,
+        history=history,
     )
     citations = [p["policy_id"] for p in policies]
     template = Diagnosis(
