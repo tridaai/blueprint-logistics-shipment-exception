@@ -26,11 +26,14 @@ Delay hours: {delay_hours}
 Document mismatches: {mismatches}
 Latest event (source record, untrusted): {latest_event}
 Condition notes (source record, untrusted): {condition_notes}
+Diagnosis: {diagnosis}
+Recommended recovery option (already scored by operations code): {recommended_option}
 Relevant policies:
 {policies}
 
 Write the customer update now, with the subject line on the first line
-prefixed by "Subject: ".
+prefixed by "Subject: ". Mention the recommended recovery option as the
+plan, without promising its outcome.
 """
 
 EXTRACT_SYSTEM_PROMPT = """\
@@ -57,6 +60,65 @@ Document text:
 ---
 
 Extract the fields now, as JSON only.
+"""
+
+DIAGNOSE_SYSTEM_PROMPT = """\
+You are a logistics operations analyst diagnosing the root cause of a
+shipment exception. You are given only computed facts: the classified
+exception, the exact delay hours, the document mismatches, the
+extraction cross-check discrepancies, and the governing policies.
+
+Respond with a single JSON object and nothing else:
+{"root_cause": one or two sentences naming the most likely root cause,
+citing the specific facts (delay hours, mismatched fields, policy IDs),
+"summary": one sentence an approver can scan}.
+Do not invent events, times, carriers, or document contents that are
+not in the facts given.
+"""
+
+DIAGNOSE_USER_TEMPLATE = """\
+Shipment: {shipment_id}
+Route: {origin} -> {destination} (carrier: {carrier})
+Exception: {exception_type} (severity: {severity})
+Classification rationale: {rationale}
+Computed delay hours: {delay_hours}
+Document mismatches: {mismatches}
+Extraction cross-check discrepancies: {discrepancies}
+Latest event: {latest_event}
+Condition notes: {condition_notes}
+Governing policies:
+{policies}
+
+Diagnose the root cause now, as JSON only.
+"""
+
+OPTIONS_SYSTEM_PROMPT = """\
+You are a logistics operations planner proposing recovery options for
+a shipment exception. Propose 2 or 3 concrete options. Each option must
+use one of these kinds: "expedite" (upgrade the remaining transport),
+"reroute" (send via an alternate hub/route), "partial_reship" (ship
+replacement or undisputed units separately), "reschedule_appointment"
+(book a new delivery appointment), "correct_documents" (get corrected
+documents issued fast), "wait_and_monitor" (hold and watch).
+
+Respond with a single JSON array and nothing else:
+[{{"kind": one of the kinds above, "title": a short action title,
+"description": one sentence on what operations would actually do}}]
+Do NOT estimate costs, times, or scores — deterministic code scores
+every option after you propose it. Do not promise the customer anything.
+"""
+
+OPTIONS_USER_TEMPLATE = """\
+Shipment: {shipment_id}
+Route: {origin} -> {destination} (carrier: {carrier})
+Exception: {exception_type} (severity: {severity})
+Computed delay hours: {delay_hours}
+Document mismatches: {mismatches}
+Diagnosis: {diagnosis}
+Governing policies:
+{policies}
+
+Propose the recovery options now, as a JSON array only.
 """
 
 CLASSIFY_SYSTEM_PROMPT = """\

@@ -88,15 +88,30 @@ def print_trace(
     if not result.policies:
         print("    (no policy retrieved)")
 
-    print("\n[4] DRAFT — CUSTOMER UPDATE")
+    print("\n[4] DIAGNOSIS")
+    if result.diagnosis is not None:
+        print(f"    Root cause: {result.diagnosis.root_cause}")
+        print(f"    Summary   : {result.diagnosis.summary} (composed by: {result.diagnosis.source})")
+        for line in result.diagnosis.evidence:
+            print(f"      - evidence: {line}")
+
+    print("\n[5] RECOVERY OPTIONS (scored by code — the model never does this arithmetic)")
+    for option in result.recovery_options:
+        mark = " <- recommended" if option.recommended else ""
+        print(
+            f"    {option.option_id} [{option.kind}] {option.title} — score {option.score} "
+            f"(ETA +{option.eta_improvement_hours}h · added cost {option.added_cost_units} units · SLA {option.sla_score}){mark}"
+        )
+
+    print("\n[6] DRAFT — CUSTOMER UPDATE")
     print(f"    Subject: {result.draft.subject}")
     for line in result.draft.body.splitlines():
         print(f"    {line}")
 
-    print("\n[5] DRAFT — CLAIM PACKET (not filed)")
+    print("\n[7] DRAFT — CLAIM PACKET (not filed)")
     print("    " + json.dumps(result.draft.claim_packet, indent=2, ensure_ascii=False).replace("\n", "\n    "))
 
-    print("\n[6] GUARDRAIL CHECKS")
+    print("\n[8] GUARDRAIL CHECKS")
     for check in result.validation.checks:
         mark = "PASS" if check.passed else "FAIL"
         print(f"    [{mark}] {check.name} — {check.detail}")
@@ -104,7 +119,7 @@ def print_trace(
         print(f"    [warn] {warning}")
     print(f"    Overall: {'PASSED' if result.validation.passed else 'FAILED'}")
 
-    print("\n[7] FINAL STATE")
+    print("\n[9] FINAL STATE")
     print("    PENDING_HUMAN_APPROVAL" if result.approval_status == "awaiting_approval" else f"    {result.approval_status}")
     print(f"    approval_status = {result.approval_status} · external_action_taken = {result.external_action_taken}")
     print("    Nothing was sent or filed. A human approves via the API/UI before any action.")

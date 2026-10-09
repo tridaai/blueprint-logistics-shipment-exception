@@ -34,10 +34,14 @@ from .config import env_float, env_str, load_dotenv
 from .prompts import (
     CLASSIFY_SYSTEM_PROMPT,
     CLASSIFY_USER_TEMPLATE,
+    DIAGNOSE_SYSTEM_PROMPT,
+    DIAGNOSE_USER_TEMPLATE,
     DRAFT_SYSTEM_PROMPT,
     DRAFT_USER_TEMPLATE,
     EXTRACT_SYSTEM_PROMPT,
     EXTRACT_USER_TEMPLATE,
+    OPTIONS_SYSTEM_PROMPT,
+    OPTIONS_USER_TEMPLATE,
 )
 
 # Shared request timeout for provider API calls (seconds), overridable
@@ -123,6 +127,8 @@ class MockModelBackend:
             quoted.append(f"Condition notes on file: \"{context['condition_notes']}\"")
         if quoted:
             paragraphs.append(" ".join(quoted))
+        if context.get("recommended_option_text"):
+            paragraphs.append(f"Planned recovery: {context['recommended_option_text']}")
         paragraphs += [
             _NEXT_STEP[exception],
             f"Reference policies: {citation_text}",
@@ -168,6 +174,26 @@ def parse_json_object(text: str) -> dict | None:
         except (json.JSONDecodeError, ValueError):
             return None
     return data if isinstance(data, dict) else None
+
+
+def parse_json_list(text: str) -> list | None:
+    """Parse a model reply that should be a JSON array (or an object
+    wrapping one under an ``options`` key). ``None`` when unusable."""
+    cleaned = text.strip()
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.IGNORECASE)
+    try:
+        data = json.loads(cleaned)
+    except (json.JSONDecodeError, ValueError):
+        start, end = cleaned.find("["), cleaned.rfind("]")
+        if start == -1 or end <= start:
+            return None
+        try:
+            data = json.loads(cleaned[start:end + 1])
+        except (json.JSONDecodeError, ValueError):
+            return None
+    if isinstance(data, dict) and isinstance(data.get("options"), list):
+        return data["options"]
+    return data if isinstance(data, list) else None
 
 
 def _parse_classification(text: str, backend_name: str) -> dict | None:
@@ -222,6 +248,8 @@ class _BaseLLMBackend:
             mismatches=context.get("mismatches") or "none",
             latest_event=context.get("latest_event") or "none recorded",
             condition_notes=context.get("condition_notes") or "none recorded",
+            diagnosis=context.get("diagnosis_summary") or "none recorded",
+            recommended_option=context.get("recommended_option_text") or "none scored",
             policies=policies or "none retrieved",
         )
 
@@ -296,6 +324,78 @@ class _BaseLLMBackend:
                 "confidence": min(max(confidence, 0.0), 1.0),
             }
         return extracted
+
+    def _policy_block(self, context: DraftContext) -> str:
+        return "\n".join(
+            f"- [{p['policy_id']}] {p['title']}: {p['snippet']}"
+            for p in context.get("policy_details", [])
+        ) or "none retrieved"
+
+    def diagnose(self, context: DraftContext) -> dict | None:
+        """LLM root-cause diagnosis over the computed facts (LLM only).
+
+        Returns ``{"root_cause": ..., "summary": ...}`` or ``None`` when
+        the reply is unusable — the pipeline then uses the deterministic
+        template diagnosis built from the same evidence.
+        """
+        user = DIAGNOSE_USER_TEMPLATE.format(
+            shipment_id=context["shipment_id"],
+            origin=context["origin"],
+            destination=context["destination"],
+            carrier=context["carrier"],
+            exception_type=context["exception_type"],
+            severity=context["severity"],
+            rationale=context["rationale"],
+            delay_hours=context.get("delay_hours"),
+            mismatches=context.get("mismatches") or "none",
+            discrepancies="; ".join(context.get("discrepancies", [])) or "none",
+            latest_event=context.get("latest_event") or "none recorded",
+            condition_notes=context.get("condition_notes") or "none recorded",
+            policies=self._policy_block(context),
+        )
+        data = parse_json_object(self._complete(DIAGNOSE_SYSTEM_PROMPT, user, max_tokens=400))
+        if data is None:
+            return None
+        root_cause = str(data.get("root_cause", "")).strip()
+        summary = str(data.get("summary", "")).strip()
+        if not root_cause or not summary:
+            return None
+        return {"root_cause": root_cause[:600], "summary": summary[:300]}
+
+    def propose_options(self, context: DraftContext) -> list[dict] | None:
+        """LLM recovery-option proposals (LLM only) — names, not numbers.
+
+        Returns a list of ``{"kind", "title", "description"}`` dicts in
+        reply order, or ``None`` when the reply has no usable entry.
+        Kind validation and ALL scoring happen in ``options.py``.
+        """
+        user = OPTIONS_USER_TEMPLATE.format(
+            shipment_id=context["shipment_id"],
+            origin=context["origin"],
+            destination=context["destination"],
+            carrier=context["carrier"],
+            exception_type=context["exception_type"],
+            severity=context["severity"],
+            delay_hours=context.get("delay_hours"),
+            mismatches=context.get("mismatches") or "none",
+            diagnosis=context.get("diagnosis_summary") or "none recorded",
+            policies=self._policy_block(context),
+        )
+        data = parse_json_list(self._complete(OPTIONS_SYSTEM_PROMPT, user, max_tokens=500))
+        if not data:
+            return None
+        proposals: list[dict] = []
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            kind = str(entry.get("kind", "")).strip().lower()
+            title = str(entry.get("title", "")).strip()
+            description = str(entry.get("description", "")).strip()
+            if kind and title and description:
+                proposals.append(
+                    {"kind": kind, "title": title[:120], "description": description[:300]}
+                )
+        return proposals or None
 
 
 class OpenAIBackend(_BaseLLMBackend):

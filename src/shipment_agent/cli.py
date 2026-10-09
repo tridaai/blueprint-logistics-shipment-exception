@@ -56,6 +56,11 @@ def _print_result(
     if result.document_mismatches:
         print(f"Mismatches: {[m.model_dump() for m in result.document_mismatches]}")
     print(f"Policies  : {[p.policy_id for p in result.policies]}")
+    if result.diagnosis is not None:
+        print(f"Diagnosis : {result.diagnosis.root_cause} (composed by: {result.diagnosis.source})")
+    recommended = next((o for o in result.recovery_options if o.recommended), None)
+    if recommended is not None:
+        print(f"Recovery  : recommended {recommended.option_id} [{recommended.kind}] {recommended.title} (score {recommended.score}) of {len(result.recovery_options)} scored option(s)")
     print(f"Guardrails: passed={result.validation.passed} errors={result.validation.errors}")
     print(f"Approval  : {result.approval_status} | external action taken: {result.external_action_taken}")
     print("-" * 72)

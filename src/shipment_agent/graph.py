@@ -2,8 +2,8 @@
 
 Pipeline — every step is a named, inspectable node:
 
-    extract ──► ingest ──► classify ──► retrieve ──► draft ──► validate
-        ──► human_approval ──► END
+    extract ──► ingest ──► classify ──► retrieve ──► diagnose ──► options
+        ──► draft ──► validate ──► human_approval ──► END
 
 The graph deliberately has NO node that sends a message, files a claim, or
 touches an external system. It ends at the human-approval gate. Acting on an
@@ -19,11 +19,20 @@ from langgraph.graph import END, StateGraph
 
 from .classifier import classify_shipment
 from .crosscheck import resolve_classification
+from .diagnosis import build_diagnosis
 from .extractor import discrepancies_from_dicts, extract_documents
 from .guardrails import validate_draft
 from .model_backends import DraftContext, ModelBackend, MockModelBackend
+from .options import build_recovery_options
 from .retriever import KeywordRetriever, Retriever
-from .schemas import AgentResult, DraftOutput, ExceptionType, ShipmentInput, TraceStep
+from .schemas import (
+    AgentResult,
+    DocumentExtraction,
+    DraftOutput,
+    ExceptionType,
+    ShipmentInput,
+    TraceStep,
+)
 from .tools import compare_documents, compute_delay_hours
 
 # Sentinel distinguishing "no LLM backend configured" (default mode — no
@@ -147,6 +156,34 @@ def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
             ],
         ),
         TraceStep(
+            name="diagnose",
+            title="Diagnose root cause",
+            summary=final["diagnosis"]["summary"],
+            details=[
+                f"root cause: {final['diagnosis']['root_cause']}",
+                f"composition: {'LLM over the computed evidence' if final['diagnosis']['source'] == 'llm' else 'deterministic template over the computed evidence'}",
+            ]
+            + [f"evidence: {e}" for e in final["diagnosis"]["evidence"]],
+        ),
+        TraceStep(
+            name="options",
+            title="Recovery options (scored by code)",
+            summary=(
+                f"{len(final.get('recovery_options', []))} option(s) proposed; every score "
+                "computed by deterministic code — recommended: "
+                + next(
+                    (o["title"] for o in final.get("recovery_options", []) if o["recommended"]),
+                    "none",
+                )
+            ),
+            details=[
+                f"{o['option_id']} [{o['kind']}] {o['title']} — score {o['score']} "
+                f"(ETA +{o['eta_improvement_hours']}h · added cost {o['added_cost_units']} units · "
+                f"SLA {o['sla_score']})" + (" <- recommended" if o["recommended"] else "")
+                for o in final.get("recovery_options", [])
+            ],
+        ),
+        TraceStep(
             name="draft",
             title="Draft update & claim packet",
             summary=f"Customer update drafted with {len(final['draft']['citations'])} policy citation(s); claim packet assembled as draft — not filed.",
@@ -184,6 +221,9 @@ class AgentState(TypedDict, total=False):
     cross_check: dict | None
     classification_suggestion: dict | None
     policies: list[dict]
+    diagnosis: dict
+    recovery_options: list[dict]
+    recommended_option_id: str | None
     draft: dict
     validation: dict
     approval_status: str
@@ -278,10 +318,56 @@ def build_graph(
         policies = retriever.retrieve(query, top_k=3)
         return {"policies": [p.model_dump() for p in policies]}
 
+    def diagnose(state: AgentState) -> AgentState:
+        shipment = ShipmentInput.model_validate(state["shipment"])
+        diagnosis = build_diagnosis(
+            shipment=shipment,
+            classification=state["classification"],
+            delay_hours=state.get("delay_hours"),
+            mismatches=state.get("document_mismatches", []),
+            extractions=[
+                DocumentExtraction.model_validate(e) for e in state.get("extractions", [])
+            ],
+            policies=state.get("policies", []),
+            backend=backend,
+        )
+        return {"diagnosis": diagnosis.model_dump()}
+
+    def options(state: AgentState) -> AgentState:
+        shipment = ShipmentInput.model_validate(state["shipment"])
+        classification = state["classification"]
+        context = DraftContext(
+            shipment_id=shipment.shipment_id,
+            origin=shipment.origin,
+            destination=shipment.destination,
+            carrier=shipment.carrier,
+            exception_type=classification["exception_type"],
+            severity=classification["severity"],
+            delay_hours=state.get("delay_hours"),
+            mismatches=state.get("document_mismatches", []),
+            diagnosis_summary=state["diagnosis"]["summary"],
+            policy_details=state.get("policies", []),
+        )
+        scored = build_recovery_options(
+            exception_type=classification["exception_type"],
+            severity=classification["severity"],
+            delay_hours=state.get("delay_hours"),
+            backend=backend,
+            context=context,
+        )
+        recommended = next((o for o in scored if o.recommended), None)
+        return {
+            "recovery_options": [o.model_dump() for o in scored],
+            "recommended_option_id": recommended.option_id if recommended else None,
+        }
+
     def draft(state: AgentState) -> AgentState:
         shipment = ShipmentInput.model_validate(state["shipment"])
         classification = state["classification"]
         citations = [p["policy_id"] for p in state.get("policies", [])]
+        recommended = next(
+            (o for o in state.get("recovery_options", []) if o["recommended"]), None
+        )
         context = DraftContext(
             shipment_id=shipment.shipment_id,
             customer_name=shipment.customer_name,
@@ -298,6 +384,12 @@ def build_graph(
             mismatches=state.get("document_mismatches", []),
             citations=citations,
             policy_details=state.get("policies", []),
+            diagnosis_summary=state["diagnosis"]["summary"],
+            recommended_option_text=(
+                f"{recommended['title']} — {recommended['description']}"
+                if recommended
+                else ""
+            ),
         )
         subject, body = backend.draft_customer_update(context)
         claim_packet = {
@@ -307,6 +399,9 @@ def build_graph(
             "document_mismatches": state.get("document_mismatches", []),
             "supporting_documents": [d.document_id for d in shipment.documents],
             "policy_citations": citations,
+            "diagnosis": state["diagnosis"],
+            "recovery_options": state.get("recovery_options", []),
+            "recommended_option_id": state.get("recommended_option_id"),
             "status": "draft — not filed",
         }
         draft_output = DraftOutput(
@@ -335,6 +430,8 @@ def build_graph(
     graph.add_node("ingest", ingest)
     graph.add_node("classify", classify)
     graph.add_node("retrieve", retrieve)
+    graph.add_node("diagnose", diagnose)
+    graph.add_node("options", options)
     graph.add_node("draft", draft)
     graph.add_node("validate", validate)
     graph.add_node("human_approval", human_approval)
@@ -343,7 +440,9 @@ def build_graph(
         ("extract", "ingest"),
         ("ingest", "classify"),
         ("classify", "retrieve"),
-        ("retrieve", "draft"),
+        ("retrieve", "diagnose"),
+        ("diagnose", "options"),
+        ("options", "draft"),
         ("draft", "validate"),
         ("validate", "human_approval"),
         ("human_approval", END),
@@ -369,6 +468,9 @@ def run_shipment(
         llm_suggestion=final.get("classification_suggestion"),
         cross_check=final.get("cross_check"),
         extractions=final.get("extractions", []),
+        diagnosis=final.get("diagnosis"),
+        recovery_options=final.get("recovery_options", []),
+        recommended_option_id=final.get("recommended_option_id"),
         delay_hours=final.get("delay_hours"),
         document_mismatches=final.get("document_mismatches", []),
         policies=final.get("policies", []),
