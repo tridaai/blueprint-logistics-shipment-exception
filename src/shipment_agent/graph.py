@@ -347,9 +347,30 @@ def build_graph(
 
     def retrieve(state: AgentState) -> AgentState:
         classification = state["classification"]
-        query = (
-            f"{classification['exception_type']} {classification['rationale']} "
-            f"customer update claim packet escalation"
+        shipment = ShipmentInput.model_validate(state["shipment"])
+        # The query is built from the shipment's OWN content — its latest
+        # event text, condition notes, and document field values — not
+        # just the exception type and the classifier's rationale. A
+        # customer's SOP written in operational language ("cartons
+        # crushed at terminal inspection") must rank for the case it
+        # describes, even when its vocabulary shares nothing with the
+        # rationale's wording.
+        doc_values = [
+            str(value)
+            for document in shipment.documents
+            for value in document.fields.values()
+        ]
+        query = " ".join(
+            part
+            for part in [
+                classification["exception_type"],
+                classification["rationale"],
+                shipment.latest_event,
+                shipment.condition_notes,
+                *doc_values,
+                "customer update claim packet escalation",
+            ]
+            if part
         )
         policies = retriever.retrieve(query, top_k=3)
         info = {"mode": getattr(retriever, "name", "keyword")}
