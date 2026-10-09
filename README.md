@@ -29,7 +29,7 @@ and tests run locally with no API key. The primary workflow is
 ```bash
 uv sync --extra dev              # 1 · install the locked set (uv.lock)
 uv run shipment-agent-demo       # 2 · one shipment, end to end, with a trace
-uv run pytest -q                 # 3 · the full test suite (48 tests)
+uv run pytest -q                 # 3 · the full test suite (82 tests)
 ```
 
 No uv? Create a virtual environment and use pip. The direct dependencies
@@ -112,15 +112,20 @@ For one shipment, end to end:
 
 Use these seams to adapt it — each is one file or one setting:
 
-- **Real LLM drafting in the API** — install the optional SDKs
-  (`uv sync --extra dev --extra llm`), set `MODEL_BACKEND=openai` or
-  `anthropic` and the matching API key in the process environment before
-  starting the API; the deterministic mock stays the default. The CLI and
-  traced demo always use the mock. Backend interface:
+- **Real LLM drafting** — install the optional SDKs
+  (`uv sync --extra dev --extra llm`), copy `.env.example` to `.env`, set
+  `MODEL_BACKEND=openai` or `anthropic` plus the matching API key, and run
+  any surface — API, CLI, and traced demo all honour the same variables
+  (full table under Configuration below). The deterministic mock stays
+  the default. With an LLM backend active, low-confidence or `none` rule
+  classifications also get an advisory LLM suggestion recorded next to
+  them; the rule result stays authoritative. Backend interface:
   `src/shipment_agent/model_backends.py`.
-- **Semantic retrieval** — implement the `Retriever` protocol in
-  `src/shipment_agent/retriever.py` (e.g. LlamaIndex over a vector store);
-  the graph doesn't change.
+- **Semantic retrieval** — set `RETRIEVER=semantic` to rank the policy
+  corpus by embedding cosine similarity instead of keyword overlap
+  (embeddings run through OpenAI — see Configuration). Or implement the
+  `Retriever` protocol in `src/shipment_agent/retriever.py` (e.g.
+  LlamaIndex over a vector store); the graph doesn't change.
 - **Your policy corpus** — replace the synthetic SOPs in
   `src/shipment_agent/policies_data.py` with your real exception-handling
   policies, and keep the mirror in `data/sample/policies.json` in sync.
@@ -141,11 +146,11 @@ Use these seams to adapt it — each is one file or one setting:
 - **Docker optional** — only for the Docker Compose deployment option.
 - **No GPU required.** The agent is rules, retrieval, and drafting; it
   runs comfortably on a laptop CPU.
-- **No API key needed** for the default deterministic mock backend. The
-  optional LLM backends read `MODEL_BACKEND`, `OPENAI_API_KEY`, and
-  `ANTHROPIC_API_KEY` from the process environment. `.env.example` lists
-  the variable names; the application does not load a `.env` file
-  automatically.
+- **No API key needed** for the default deterministic mock backend. For
+  the optional LLM backends, configuration is environment variables only:
+  the application loads a `.env` file from the repo root at startup
+  (copy `.env.example`), and variables set in the real environment take
+  precedence over the file.
 
 ## Quickstart (no API key)
 
@@ -158,7 +163,7 @@ uv sync --extra dev                  # locked install from uv.lock
 # Traced demo on one synthetic sample shipment
 uv run shipment-agent-demo           # or: uv run python -m shipment_agent demo, or: make demo
 
-# Batch CLI over all 12 bundled samples
+# Batch CLI over all 13 bundled samples
 uv run shipment-agent --all
 
 # Demo console (API + web UI)
@@ -179,9 +184,62 @@ sample data ships inside the package, and the `shipment-agent` /
 Or with Docker: `docker compose up --build` serves the API on port 8000.
 
 After installation, the default **deterministic mock** backend makes no
-external network calls. To use a real model in the API, install the `llm`
-extra and set `MODEL_BACKEND=openai` or `anthropic` plus the matching API
-key in the process environment before starting the API.
+external network calls.
+
+One bundled sample is deliberately adversarial: **SYN-1013**, whose
+carrier condition note promises the customer a full refund. The drafting
+template quotes the source record, so the draft inherits the promise —
+and the `no_prohibited_promises` guardrail fails it, so the draft cannot
+be approved. Run `uv run shipment-agent --index 12` or pick SYN-1013 in
+the demo console to watch a guardrail block a draft.
+
+## Configuration
+
+Everything provider-related is an environment variable — nothing is
+hardcoded beyond the defaults below. The app loads a `.env` file from
+the repo root at startup (copy `.env.example` to `.env`); variables set
+in the real environment take precedence over the file. **All surfaces —
+API, CLI, and traced demo — read the same variables.**
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `MODEL_BACKEND` | `mock` | Drafting backend: `mock` (offline, deterministic) · `openai` · `anthropic` |
+| `OPENAI_API_KEY` | — | Required when `MODEL_BACKEND=openai`; also the embeddings key for `RETRIEVER=semantic` |
+| `OPENAI_MODEL` | `gpt-4o-mini` | OpenAI chat model for drafting + classification suggestions |
+| `OPENAI_BASE_URL` | provider default | Any OpenAI-compatible endpoint (Azure OpenAI, LiteLLM gateway, hosted/self-hosted) — applies to chat and embeddings |
+| `ANTHROPIC_API_KEY` | — | Required when `MODEL_BACKEND=anthropic` |
+| `ANTHROPIC_MODEL` | `claude-sonnet-4-5` | Anthropic model for drafting + classification suggestions |
+| `ANTHROPIC_BASE_URL` | provider default | Custom Anthropic-compatible endpoint |
+| `RETRIEVER` | `keyword` | Policy retrieval: `keyword` (token overlap, offline) · `semantic` (embedding cosine similarity) |
+| `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model for `RETRIEVER=semantic` |
+| `LLM_TIMEOUT_SECONDS` | `60` | Request timeout for provider API calls |
+
+To run the demo against a real model (Anthropic shown; OpenAI is the
+same shape):
+
+```bash
+uv sync --extra dev --extra llm      # install the provider SDKs
+cp .env.example .env                 # then edit .env:
+#   MODEL_BACKEND=anthropic
+#   ANTHROPIC_API_KEY=<your key>
+uv run shipment-agent-demo           # the header names the live backend
+uv run uvicorn shipment_agent.api:app --port 8000   # console on the same config
+```
+
+Notes that matter:
+
+- **Guardrails run after generation**, on LLM drafts exactly as on
+  template drafts. A fluent draft that promises a refund is blocked.
+- With an LLM backend active, rule classifications that come back
+  `none` or below 0.85 confidence also get an **advisory LLM
+  classification suggestion** in the result (`llm_suggestion`, with its
+  own confidence and an agreement flag). The rule result stays
+  authoritative — the suggestion is there for the human reviewer.
+- `RETRIEVER=semantic` embeds the corpus with OpenAI even when the
+  drafting backend is Anthropic or mock — Anthropic has no embeddings
+  API. Without `OPENAI_API_KEY` it fails immediately and says so.
+- A missing key or missing SDK fails loudly at startup with the fix in
+  the message — nothing silently falls back to the mock.
 
 ## Deployment options
 
@@ -209,6 +267,10 @@ uvicorn shipment_agent.api:app --port 8000
 docker compose up --build   # serves on port 8000, mock backend by default
 docker compose down         # stop it
 ```
+
+For a real LLM backend under Docker, set `MODEL_BACKEND` and pass the
+API key through the compose file — see the `environment:` / `env_file:`
+comments in `docker-compose.yml`.
 
 ## Architecture
 
@@ -250,11 +312,16 @@ accuracy claim. When a new phrasing is missed, add it as a case before
 changing the classifier; the case then guards the fix. Production accuracy
 would be measured on real, consented, anonymised exception data.
 
-Test suite: **48 tests, all passing** (`pytest -q`) — classifier, tools,
+Test suite: **82 tests, all passing** (`pytest -q`) — classifier, tools,
 retriever, guardrails, end-to-end graph, API approval/reject flow, the web
-UI, and a negation suite covering the inputs humans try first ("no damage
+UI, a negation suite covering the inputs humans try first ("no damage
 reported", "not damaged", "undamaged", "damage: none", "no discrepancy
-found" — none of which may fire the rule they negate).
+found" — none of which may fire the rule they negate), and the LLM wiring:
+`.env` loading and precedence, both provider backends with the SDK layer
+mocked (drafting, base-URL/timeout passthrough, loud failures, the
+classification suggestion), the semantic retriever's ranking, and the
+SYN-1013 guardrail-failure sample. No test touches the network or a real
+API key.
 
 ## Repository structure
 
@@ -264,9 +331,10 @@ src/shipment_agent/   agent graph, classifier, retriever, guardrails,
                       FastAPI app + web UI (static/), demo trace, CLI,
                       service layer, bundled samples (data/)
 docs/architecture.md  full architecture and productionisation notes
-data/sample/          synthetic shipments (12) + policy corpus mirror
+data/sample/          synthetic shipments (13) + policy corpus mirror
 evals/                golden dataset (32 cases) + run_evals.py
-tests/                48 pytest tests: unit, integration, API, UI, negation
+tests/                82 pytest tests: unit, integration, API, UI, negation,
+                      LLM backends (mocked SDKs), config, semantic retrieval
 Makefile              make demo · make test · make evals · make serve
 ```
 
@@ -287,7 +355,10 @@ detail.
   wording can be missed (classified `none`). It does handle negation
   ("no damage reported" is not damage) and recovery ("back on schedule"
   cancels a keyword delay, never a computed one) — both covered by tests.
-- Keyword retrieval, not semantic search.
+- Default retrieval is keyword matching. An embedding-based semantic
+  retriever ships as an option (`RETRIEVER=semantic`), but there is no
+  vector store, no corpus-indexing pipeline, and the corpus is embedded
+  in memory per process.
 - Approvals are in-memory; nothing persists across restarts.
 - No OCR, no carrier integration, no sending — by design.
 

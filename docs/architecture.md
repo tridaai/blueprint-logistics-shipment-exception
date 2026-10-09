@@ -76,27 +76,50 @@ customer messaging and claim handling, so it must be auditable and stable
 from run to run and in production. Rules are prioritised deliberately:
 damage > missed appointment > document mismatch > delay > none, so specific,
 time-sensitive signals are never swallowed by a generic "late" keyword.
-Trade-off: rules miss novel phrasings. Mitigation in production: route
-low-confidence cases to an LLM classifier *as a suggestion*, log
-disagreements, and promote recurring patterns into rules + golden cases.
+Trade-off: rules miss novel phrasings. The mitigation pattern is
+implemented in this repo as an advisory path: when an LLM backend is
+active and the rule result is `none` or below 0.85 confidence, the graph
+asks the model for a classification *suggestion* and records it in the
+result (`llm_suggestion`, with its own confidence and an
+`agrees_with_rules` flag) and in the classify trace step. The rule
+result stays authoritative — disagreements are surfaced to the human
+reviewer, never resolved silently. In production, recurring
+disagreements are what get promoted into rules + golden cases. The
+suggestion can never fire with the mock backend, and a malformed or
+failed suggestion call records nothing and changes nothing.
 
 **Facts are computed, never generated.** Delay hours and document mismatches
 come from functions (`tools.py`), not from a model reading prose. That
 keeps those facts out of the model's hands.
 
 **Retrieval behind an interface.** The agent depends on a `Retriever`
-protocol. The in-repo `KeywordRetriever` is transparent and deterministic
-(stable for tests and demos); a production deployment swaps in LlamaIndex
-over a vector store fed by the client's SOP/claims document systems,
-without touching the graph.
+protocol. Two implementations ship in the repo, selected with
+`RETRIEVER`: `KeywordRetriever` (transparent token overlap,
+deterministic, stable for tests and demos) and `SemanticRetriever`
+(embeds the corpus and the query, cosine-similarity top-3, same return
+shape). Embeddings always run through OpenAI or an OpenAI-compatible
+endpoint — Anthropic has no embeddings API, so `RETRIEVER=semantic`
+requires `OPENAI_API_KEY` even when the drafting backend is Anthropic or
+mock, and the retriever fails loudly saying exactly that rather than
+quietly degrading. A production deployment swaps either implementation
+for LlamaIndex over a vector store fed by the client's SOP/claims
+document systems, without touching the graph.
 
 **Model backend behind an interface, mock by default.** The default
-backend renders drafts from deterministic templates offline. The API
-service can select the OpenAI/Anthropic backends with `MODEL_BACKEND`;
-they fail loudly without the optional SDKs or a key. Trade-off:
-template drafts are less fluent than LLM drafts; they are also incapable of
-inventing a delivery time or a compensation promise, which is the failure
-mode that matters here.
+backend renders drafts from deterministic templates offline. All surfaces
+(API, CLI, traced demo) can select the OpenAI/Anthropic backends with
+`MODEL_BACKEND`; configuration is environment variables only (the app
+loads a repo-root `.env` at startup, real environment wins), including
+`OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` for hosted or OpenAI-compatible
+endpoints. The backends fail loudly — with the fix in the message —
+without the optional SDKs or a key; nothing silently falls back to the
+mock. Whichever backend drafts, the guardrails run on its output
+afterwards. Trade-off: template drafts are less fluent than LLM drafts;
+they are also incapable of inventing a delivery time, which is the
+failure mode that matters here. Note the template *can* carry a
+compensation promise — it quotes the source record verbatim, and a
+carrier agent's note can contain one (sample SYN-1013 does). That is
+exactly what the guardrail layer is for, in both modes.
 
 **Guardrails as code, not prompts.** `guardrails.py` rejects drafts that
 lack the shipment ID, lack policy citations on exception drafts, or contain
@@ -124,16 +147,20 @@ and testable.
 | BOL or invoice absent | mismatch check returns empty; classification relies on event text |
 | Novel exception phrasing | may classify as `none` — visible in evals as a miss; golden set grows from these |
 | Retrieved policies irrelevant | draft still carries citations; approver sees policy titles and can reject |
-| LLM backend unavailable | explicit RuntimeError at construction; mock remains the default |
-| Draft fails guardrails | approval is blocked with the exact errors surfaced |
+| LLM backend unavailable | explicit RuntimeError at construction naming the fix (missing key or missing `llm` extra); no silent fallback to the mock |
+| LLM suggestion malformed/unavailable | suggestion is dropped; the rule result stands alone and the run continues |
+| `RETRIEVER=semantic` without `OPENAI_API_KEY` | explicit RuntimeError at construction: embeddings run through OpenAI regardless of the drafting backend |
+| Draft fails guardrails | approval is blocked with the exact errors surfaced (sample SYN-1013 demonstrates this deterministically) |
 | Conflicting signals (damage + delay) | priority order resolves deterministically; rationale records the winning signal |
 
 ## 7. Security notes
 
-- No credentials are required for the default path. Optional LLM keys are
-  read from the process environment; `.env.example` lists the variable
-  names, but the application does not load a `.env` file automatically.
-  A local `.env` is git-ignored.
+- No credentials are required for the default path. All provider
+  configuration is environment variables. The application loads a `.env`
+  file from the repo root at startup (parser in `config.py`); variables
+  set in the real environment take precedence over the file. `.env` is
+  git-ignored — never commit a filled-in one. `.env.example` lists every
+  variable.
 - All sample data is synthetic; the repo must never contain real shipment,
   customer, or carrier data.
 - The API has no authentication — acceptable for a local prototype, and
@@ -149,12 +176,15 @@ Ordered by value when adapting this blueprint to your own operation:
 
 1. **Policy corpus** — swap the synthetic SOPs (`policies_data.py`) for
    your real exception policies; drafts immediately speak your language.
-2. **Model backend** — set `MODEL_BACKEND=openai|anthropic` and compare
-   draft quality against the mock on the golden set.
+2. **Model backend** — install the `llm` extra, copy `.env.example` to
+   `.env`, set `MODEL_BACKEND=openai|anthropic` plus the key, and compare
+   draft quality against the mock on the golden set. Point
+   `OPENAI_BASE_URL` at a compatible endpoint if you host your own.
 3. **Intake shape** — map one real source (a TMS export or webhook
    payload) onto `ShipmentInput`; keep the rest of the graph untouched.
-4. **Retriever** — replace keyword retrieval with embeddings over your
-   full policy library behind the same `Retriever` protocol.
+4. **Retriever** — set `RETRIEVER=semantic` for embedding-based ranking
+   of the shipped corpus, or replace the retriever with embeddings over
+   your full policy library behind the same `Retriever` protocol.
 5. **Exception types** — add the exceptions your operation actually sees
    (customs hold, address issue, …) as rules + golden cases.
 6. **Action layer** — wire approve → your messaging/claims system, behind
@@ -186,7 +216,11 @@ Ordered by value when adapting this blueprint to your own operation:
 
 - Keyword/rule classification covers the phrasings in its golden set; it is
   a regression gate, not a real-world benchmark.
-- The retriever is keyword-based; semantic retrieval is an interface swap,
-  not implemented here.
+- Retrieval defaults to keyword matching. The shipped semantic retriever
+  embeds the small in-repo corpus in memory per process — no vector
+  store, no persisted index, no retrieval eval set.
+- The LLM classification suggestion is advisory only: it never changes
+  the classification, the draft, or the approval flow, and it is not
+  evaluated against the golden set.
 - Approvals live in memory and disappear on restart.
 - No OCR, no carrier/TMS integration, no sending — by design.

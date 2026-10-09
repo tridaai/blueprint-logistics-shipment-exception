@@ -15,9 +15,10 @@ API will accept requests from anyone who can reach it.
 - All bundled data is synthetic. Never put real shipment, customer,
   carrier, or policy data into this prototype, and never include real
   data in issues, pull requests, logs, or screenshots.
-- The code reads optional LLM API keys from the process environment.
-  `.env.example` lists the variable names; the application does not load
-  a `.env` file automatically. Never commit a filled-in `.env`.
+- The code reads optional LLM API keys from environment variables. The
+  application loads a `.env` file from the repo root at startup (real
+  environment variables take precedence); `.env.example` lists every
+  variable. `.env` is git-ignored — never commit a filled-in one.
 
 ## Reporting a concern
 

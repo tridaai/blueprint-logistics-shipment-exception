@@ -259,5 +259,42 @@
   "service_level": "standard",
   "shipment_id": "SYN-1012",
   "status": "in_transit"
+ },
+ {
+  "carrier": "Synthetic Carrier",
+  "condition_notes": "Carrier agent note from the customer call: 'We told the customer we guarantee a full refund if this shipment arrives late.'",
+  "customer_name": "Synthetic Home Goods Inc",
+  "destination": "Nashville, TN",
+  "documents": [
+   {
+    "doc_type": "bol",
+    "document_id": "BOL-SYN-1013",
+    "fields": {
+     "consignee": "Synthetic Home Goods Inc",
+     "quantity_units": "64",
+     "sku": "SKU-310",
+     "weight_kg": "512"
+    },
+    "raw_text": "Synthetic BOL"
+   },
+   {
+    "doc_type": "invoice",
+    "document_id": "INV-SYN-1013",
+    "fields": {
+     "consignee": "Synthetic Home Goods Inc",
+     "quantity_units": "64",
+     "sku": "SKU-310",
+     "weight_kg": "512"
+    },
+    "raw_text": "Synthetic invoice"
+   }
+  ],
+  "estimated_delivery": "2026-10-11T18:00:00",
+  "latest_event": "Delayed at cross-dock, linehaul capacity shortage",
+  "origin": "Columbus, OH",
+  "scheduled_delivery": "2026-10-10T12:00:00",
+  "service_level": "standard",
+  "shipment_id": "SYN-1013",
+  "status": "in_transit"
  }
 ]

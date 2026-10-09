@@ -15,9 +15,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from .graph import run_shipment
+from .model_backends import ModelBackend, get_backend
+from .retriever import Retriever, get_retriever
 from .samples import load_sample_shipments
 from .schemas import ShipmentInput
 
@@ -29,13 +32,21 @@ def _load_shipments(path: Path | None) -> list[ShipmentInput]:
     return [ShipmentInput.model_validate(item) for item in raw]
 
 
-def _print_result(shipment: ShipmentInput) -> None:
-    result = run_shipment(shipment)
+def _print_result(
+    shipment: ShipmentInput,
+    backend: ModelBackend | None = None,
+    retriever: Retriever | None = None,
+) -> None:
+    result = run_shipment(shipment, backend=backend, retriever=retriever)
     c = result.classification
     print("=" * 72)
     print(f"Shipment {result.shipment_id}: {shipment.origin} -> {shipment.destination}")
     print(f"Exception : {c.exception_type.value} (severity {c.severity.value}, confidence {c.confidence})")
     print(f"Rationale : {c.rationale}")
+    if result.llm_suggestion is not None:
+        s = result.llm_suggestion
+        agreement = "agrees with rules" if s.agrees_with_rules else "DISAGREES with rules — rule result stands"
+        print(f"LLM sugg. : {s.exception_type} (severity {s.severity}, confidence {s.confidence}, via {s.backend}; {agreement})")
     if result.delay_hours is not None:
         print(f"Delay     : {result.delay_hours} hours vs schedule")
     if result.document_mismatches:
@@ -56,10 +67,20 @@ def main() -> None:
     parser.add_argument("--all", action="store_true", help="Run every sample shipment")
     args = parser.parse_args()
 
+    # Backend + retriever come from the environment (.env loaded by the
+    # factories). A misconfiguration (e.g. MODEL_BACKEND=openai with no
+    # key) fails loudly with the actionable message, not a traceback.
+    try:
+        backend = get_backend()
+        retriever = get_retriever()
+    except (RuntimeError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+
     shipments = _load_shipments(args.file)
     selected = shipments if args.all else [shipments[args.index]]
     for shipment in selected:
-        _print_result(shipment)
+        _print_result(shipment, backend=backend, retriever=retriever)
 
 
 if __name__ == "__main__":

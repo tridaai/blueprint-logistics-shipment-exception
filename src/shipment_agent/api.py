@@ -15,10 +15,15 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from .config import load_dotenv
 from .policies_data import POLICIES
 from .samples import load_sample_shipments
 from .schemas import AgentResult, ShipmentInput
 from .service import ShipmentService
+
+# Load the repo-root .env at startup (real environment variables win), so
+# MODEL_BACKEND / RETRIEVER / API keys can live in the file — see .env.example.
+load_dotenv()
 
 app = FastAPI(
     title="Trida AI Blueprint — Logistics Shipment Exception Agent",

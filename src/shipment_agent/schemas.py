@@ -65,6 +65,23 @@ class Classification(BaseModel):
     rationale: str = ""
 
 
+class ClassificationSuggestion(BaseModel):
+    """Advisory LLM classification suggestion, recorded next to the rule result.
+
+    Only ever produced when a real LLM backend is active and the rule
+    result is low-confidence or ``none``. It never overrides the rule
+    classification in ``AgentResult.classification`` — ``agrees_with_rules``
+    flags disagreements for the human reviewer instead.
+    """
+
+    exception_type: str
+    severity: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    rationale: str = ""
+    backend: str = ""
+    agrees_with_rules: bool = True
+
+
 class RetrievedPolicy(BaseModel):
     policy_id: str
     title: str
@@ -119,6 +136,7 @@ class TraceStep(BaseModel):
 class AgentResult(BaseModel):
     shipment_id: str
     classification: Classification
+    llm_suggestion: ClassificationSuggestion | None = None
     delay_hours: float | None = None
     document_mismatches: list[DocumentMismatch] = Field(default_factory=list)
     policies: list[RetrievedPolicy] = Field(default_factory=list)

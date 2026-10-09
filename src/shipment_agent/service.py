@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 
 from .graph import run_shipment
 from .model_backends import ModelBackend, get_backend
+from .retriever import Retriever, get_retriever
 from .schemas import AgentResult, ShipmentInput
 
 
@@ -27,11 +28,16 @@ class ApprovalRecord:
 @dataclass
 class ShipmentService:
     backend: ModelBackend | None = None
+    retriever: Retriever | None = None
     _records: dict[str, ApprovalRecord] = field(default_factory=dict)
 
     def analyze(self, shipment: ShipmentInput | dict) -> AgentResult:
+        # Backend and retriever come from the environment (MODEL_BACKEND /
+        # RETRIEVER, with the repo-root .env loaded) unless injected.
         backend = self.backend or get_backend()
-        result = run_shipment(shipment, backend=backend)
+        if self.retriever is None:
+            self.retriever = get_retriever()
+        result = run_shipment(shipment, backend=backend, retriever=self.retriever)
         self._records[result.shipment_id] = ApprovalRecord(result=result)
         return result
 

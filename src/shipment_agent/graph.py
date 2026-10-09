@@ -20,13 +20,32 @@ from .classifier import classify_shipment
 from .guardrails import validate_draft
 from .model_backends import DraftContext, ModelBackend, MockModelBackend
 from .retriever import KeywordRetriever, Retriever
-from .schemas import AgentResult, DraftOutput, ShipmentInput, TraceStep
+from .schemas import AgentResult, DraftOutput, ExceptionType, ShipmentInput, TraceStep
 from .tools import compare_documents, compute_delay_hours
+
+# When a real LLM backend is active, rule results below this confidence —
+# and every `none` result — also get an advisory LLM classification
+# suggestion recorded next to them (see the classify node). The rule
+# result always stays authoritative.
+SUGGESTION_CONFIDENCE_THRESHOLD = 0.85
 
 
 def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
     """Assemble the inspectable per-step trace from the final graph state."""
     classification = final["classification"]
+    suggestion = final.get("classification_suggestion")
+    classify_details = [f"evidence: {s}" for s in classification.get("signals", [])] or ["evidence: (no signals)"]
+    if suggestion:
+        classify_details.append(
+            f"llm suggestion ({suggestion['backend']}): {suggestion['exception_type']} · "
+            f"severity {suggestion['severity']} · confidence {suggestion['confidence']} — "
+            f"{suggestion['rationale']}"
+        )
+        classify_details.append(
+            "llm suggestion agrees with the rule result"
+            if suggestion["agrees_with_rules"]
+            else "DISAGREEMENT: llm suggestion differs from the rule result — the rule result stays authoritative"
+        )
     mismatches = final.get("document_mismatches", [])
     delay = final.get("delay_hours")
     policies = final.get("policies", [])
@@ -56,7 +75,7 @@ def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
                 f"{classification['exception_type']} · severity {classification['severity']} · "
                 f"confidence {classification['confidence']} — {classification['rationale']}"
             ),
-            details=[f"evidence: {s}" for s in classification.get("signals", [])] or ["evidence: (no signals)"],
+            details=classify_details,
         ),
         TraceStep(
             name="retrieve",
@@ -99,6 +118,7 @@ class AgentState(TypedDict, total=False):
     delay_hours: float | None
     document_mismatches: list[dict]
     classification: dict
+    classification_suggestion: dict | None
     policies: list[dict]
     draft: dict
     validation: dict
@@ -128,7 +148,54 @@ def build_graph(
         shipment = ShipmentInput.model_validate(state["shipment"])
         mismatches = compare_documents(shipment.documents)
         result = classify_shipment(shipment, mismatches)
-        return {"classification": result.model_dump(mode="json")}
+        return {
+            "classification": result.model_dump(mode="json"),
+            "classification_suggestion": _maybe_suggest(state, shipment, result),
+        }
+
+    def _maybe_suggest(state: AgentState, shipment: ShipmentInput, rule_result) -> dict | None:
+        """Advisory LLM classification suggestion — LLM backends only.
+
+        Fires only when the rule result is ``none`` or below the confidence
+        threshold. The mock backend has no ``suggest_classification``
+        method, so this can never fire in the default mode. The suggestion
+        is advisory: a provider error or an unusable reply records no
+        suggestion and the run continues on the rule result alone.
+        """
+        suggest = getattr(backend, "suggest_classification", None)
+        if suggest is None:
+            return None
+        if (
+            rule_result.exception_type != ExceptionType.NONE
+            and rule_result.confidence >= SUGGESTION_CONFIDENCE_THRESHOLD
+        ):
+            return None
+        context = DraftContext(
+            shipment_id=shipment.shipment_id,
+            origin=shipment.origin,
+            destination=shipment.destination,
+            carrier=shipment.carrier,
+            status=shipment.status,
+            latest_event=shipment.latest_event,
+            condition_notes=shipment.condition_notes,
+            delay_hours=state.get("delay_hours"),
+            mismatches=state.get("document_mismatches", []),
+            rule_exception_type=rule_result.exception_type.value,
+            rule_severity=rule_result.severity.value,
+            rule_confidence=rule_result.confidence,
+            rule_rationale=rule_result.rationale,
+            rule_signals=rule_result.signals,
+        )
+        try:
+            suggestion = suggest(context)
+        except Exception:  # advisory path — never fail the run over it
+            return None
+        if not suggestion:
+            return None
+        suggestion["agrees_with_rules"] = (
+            suggestion["exception_type"] == rule_result.exception_type.value
+        )
+        return suggestion
 
     def retrieve(state: AgentState) -> AgentState:
         classification = state["classification"]
@@ -153,6 +220,8 @@ def build_graph(
             severity=classification["severity"],
             rationale=classification["rationale"],
             signals=classification["signals"],
+            latest_event=shipment.latest_event,
+            condition_notes=shipment.condition_notes,
             delay_hours=state.get("delay_hours"),
             mismatches=state.get("document_mismatches", []),
             citations=citations,
@@ -223,6 +292,7 @@ def run_shipment(
     return AgentResult(
         shipment_id=shipment_model.shipment_id,
         classification=final["classification"],
+        llm_suggestion=final.get("classification_suggestion"),
         delay_hours=final.get("delay_hours"),
         document_mismatches=final.get("document_mismatches", []),
         policies=final.get("policies", []),
