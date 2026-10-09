@@ -1,3 +1,7 @@
+<p align="center">
+  <img alt="Trida AI" src="assets/tridaai-logo.png" width="280">
+</p>
+
 # Trida AI
 
 ## Blueprint — Logistics Shipment Exception Agent
