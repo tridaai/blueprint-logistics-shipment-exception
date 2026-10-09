@@ -331,6 +331,10 @@ function render(result) {
       + (result.original_validation && result.original_validation.errors && result.original_validation.errors.length
         ? ' · original failure: ' + result.original_validation.errors.join('; ') : ''));
   }
+  if (result.autonomy) {
+    facts.push(`Autonomy recommendation: <strong>${result.autonomy.eligible_for_auto_approval ? 'eligible for auto-approval' : 'human decision required'}</strong> (recommendation only — never acted on)`
+      + (result.autonomy.reasons && result.autonomy.reasons.length ? ' · ' + result.autonomy.reasons.join('; ') : ''));
+  }
   $('facts').innerHTML = facts.join('<br>');
   renderExtractions(result.extractions);
   $('signals').innerHTML = (result.classification.signals || []).map(s => `<li>${s}</li>`).join('') || '<li>(none)</li>';

@@ -17,6 +17,7 @@ from typing import TypedDict
 
 from langgraph.graph import END, StateGraph
 
+from .autonomy import compute_autonomy
 from .classifier import classify_shipment
 from .crosscheck import resolve_classification
 from .diagnosis import build_diagnosis
@@ -145,6 +146,7 @@ def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
         "summary": "",
         "note": "",
     }
+    autonomy = final.get("autonomy")
     validation = final["validation"]
 
     extract_details: list[str] = []
@@ -309,7 +311,21 @@ def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
             title="Human approval gate",
             status="awaiting",
             summary="Pipeline stops here. No message sent, no claim filed — a human approves via the service layer.",
-            details=["external_action_taken: False"],
+            details=["external_action_taken: False"]
+            + (
+                [
+                    "autonomy recommendation: "
+                    + (
+                        "eligible for auto-approval"
+                        if autonomy["eligible_for_auto_approval"]
+                        else "human decision required"
+                    )
+                    + " (recommendation only — the gate is unchanged)",
+                    *[f"autonomy: {r}" for r in autonomy.get("reasons", [])],
+                ]
+                if autonomy
+                else []
+            ),
         ),
     ]
 
@@ -340,6 +356,7 @@ class AgentState(TypedDict, total=False):
     repaired: bool
     repair_attempts: int
     original_validation: dict | None
+    autonomy: dict
     approval_status: str
 
 
@@ -668,8 +685,25 @@ def build_graph(
 
     def human_approval(state: AgentState) -> AgentState:
         # The gate. Nothing leaves the system from here — a human must
-        # explicitly approve via the API/CLI service layer.
-        return {"approval_status": "awaiting_approval"}
+        # explicitly approve via the API/CLI service layer. The autonomy
+        # recommendation computed here is printed on the result and the
+        # claim packet; it never opens this gate by itself.
+        autonomy = compute_autonomy(
+            classification=state["classification"],
+            validation=state["validation"],
+            cross_check=state.get("cross_check"),
+            repair_attempted=bool(state.get("repair_attempted")),
+        )
+        draft = DraftOutput.model_validate(state["draft"])
+        draft.claim_packet = {
+            **draft.claim_packet,
+            "autonomy_recommendation": autonomy.model_dump(),
+        }
+        return {
+            "approval_status": "awaiting_approval",
+            "autonomy": autonomy.model_dump(),
+            "draft": draft.model_dump(),
+        }
 
     graph = StateGraph(AgentState)
     graph.add_node("extract", extract)
@@ -738,6 +772,7 @@ def run_shipment(
         repaired=bool(final.get("repaired")),
         repair_attempts=int(final.get("repair_attempts") or 0),
         original_validation=final.get("original_validation"),
+        autonomy=final.get("autonomy"),
         trace=_build_trace(shipment_model, final),
         approval_status=final.get("approval_status", "awaiting_approval"),
         external_action_taken=False,

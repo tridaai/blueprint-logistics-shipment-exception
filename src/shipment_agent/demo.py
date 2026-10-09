@@ -145,6 +145,11 @@ def print_trace(
     print("\n[10] FINAL STATE")
     print("    PENDING_HUMAN_APPROVAL" if result.approval_status == "awaiting_approval" else f"    {result.approval_status}")
     print(f"    approval_status = {result.approval_status} · external_action_taken = {result.external_action_taken}")
+    if result.autonomy is not None:
+        label = "eligible for auto-approval" if result.autonomy.eligible_for_auto_approval else "human decision required"
+        print(f"    Autonomy recommendation: {label} (recommendation only — never acted on)")
+        for reason in result.autonomy.reasons:
+            print(f"      - {reason}")
     print("    Nothing was sent or filed. A human approves via the API/UI before any action.")
     print(_LINE)
 

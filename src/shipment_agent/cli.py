@@ -74,6 +74,9 @@ def _print_result(
     if result.repair_attempted:
         print(f"Repair    : attempted ({result.repair_attempts}) — {'repaired' if result.repaired else 'still failing'}; original errors={result.original_validation.errors if result.original_validation else []}")
     print(f"Approval  : {result.approval_status} | external action taken: {result.external_action_taken}")
+    if result.autonomy is not None:
+        label = "eligible for auto-approval" if result.autonomy.eligible_for_auto_approval else "human decision required"
+        print(f"Autonomy  : {label} (recommendation only) — {'; '.join(result.autonomy.reasons)}")
     print("-" * 72)
     print(f"Subject: {result.draft.subject}")
     print(result.draft.body)

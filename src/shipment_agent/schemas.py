@@ -313,6 +313,17 @@ class ValidationResult(BaseModel):
     checks: list[GuardrailCheck] = Field(default_factory=list)
 
 
+class AutonomyRecommendation(BaseModel):
+    """Deterministic routing recommendation (see ``autonomy.py``).
+
+    A recommendation only — it is printed on the result and the claim
+    packet, and nothing in the pipeline acts on it.
+    """
+
+    eligible_for_auto_approval: bool
+    reasons: list[str] = Field(default_factory=list)
+
+
 class TraceStep(BaseModel):
     """One pipeline step, with the actual output it produced.
 
@@ -349,6 +360,7 @@ class AgentResult(BaseModel):
     repaired: bool = False
     repair_attempts: int = 0
     original_validation: ValidationResult | None = None
+    autonomy: AutonomyRecommendation | None = None
     trace: list[TraceStep] = Field(default_factory=list)
     approval_status: str = "awaiting_approval"
     decided_by: str | None = None  # who approved/rejected, once decided
