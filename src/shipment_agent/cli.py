@@ -66,6 +66,10 @@ def _print_result(
     recommended = next((o for o in result.recovery_options if o.recommended), None)
     if recommended is not None:
         print(f"Recovery  : recommended {recommended.option_id} [{recommended.kind}] {recommended.title} (score {recommended.score}) of {len(result.recovery_options)} scored option(s)")
+    if result.verification is not None:
+        verdict = "grounded" if result.verification.grounded else "NOT GROUNDED"
+        issues = f" issues={result.verification.issues}" if result.verification.issues else ""
+        print(f"Self-check: {verdict} ({result.verification.source}){issues}")
     print(f"Guardrails: passed={result.validation.passed} errors={result.validation.errors}")
     print(f"Approval  : {result.approval_status} | external action taken: {result.external_action_taken}")
     print("-" * 72)

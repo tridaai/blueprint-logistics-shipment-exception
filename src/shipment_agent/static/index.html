@@ -318,6 +318,14 @@ function render(result) {
     facts.push(`Computed delay vs schedule: <strong>${result.delay_hours} hours</strong>`);
   (result.document_mismatches || []).forEach(m =>
     facts.push(`Document mismatch — <strong>${m.field}</strong>: BOL=${m.bol_value} vs invoice=${m.invoice_value}`));
+  if (result.document_check_warning)
+    facts.push(`⚠️ ${result.document_check_warning}`);
+  if (result.verification) {
+    const v = result.verification;
+    facts.push(`Self-verification: <strong>${v.grounded ? 'grounded' : 'NOT GROUNDED'}</strong> (${v.source === 'llm' ? 'LLM critique' : 'deterministic checklist'})`
+      + (v.issues && v.issues.length ? ' — ' + v.issues.join('; ') : '')
+      + (v.note ? ` <small>(${v.note})</small>` : ''));
+  }
   $('facts').innerHTML = facts.join('<br>');
   renderExtractions(result.extractions);
   $('signals').innerHTML = (result.classification.signals || []).map(s => `<li>${s}</li>`).join('') || '<li>(none)</li>';

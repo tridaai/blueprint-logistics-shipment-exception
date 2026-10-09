@@ -116,7 +116,19 @@ def print_trace(
     print("\n[7] DRAFT — CLAIM PACKET (not filed)")
     print("    " + json.dumps(result.draft.claim_packet, indent=2, ensure_ascii=False).replace("\n", "\n    "))
 
-    print("\n[8] GUARDRAIL CHECKS")
+    print("\n[8] SELF-VERIFICATION — the agent critiques its own draft")
+    if result.verification is not None:
+        verdict = "GROUNDED" if result.verification.grounded else "NOT GROUNDED"
+        source = "LLM critique" if result.verification.source == "llm" else "deterministic checklist"
+        print(f"    verdict: {verdict} ({source})")
+        if result.verification.summary:
+            print(f"    {result.verification.summary}")
+        for issue in result.verification.issues:
+            print(f"    issue: {issue}")
+        if result.verification.note:
+            print(f"    note: {result.verification.note}")
+
+    print("\n[9] GUARDRAIL CHECKS")
     for check in result.validation.checks:
         mark = "PASS" if check.passed else "FAIL"
         print(f"    [{mark}] {check.name} — {check.detail}")
@@ -124,7 +136,7 @@ def print_trace(
         print(f"    [warn] {warning}")
     print(f"    Overall: {'PASSED' if result.validation.passed else 'FAILED'}")
 
-    print("\n[9] FINAL STATE")
+    print("\n[10] FINAL STATE")
     print("    PENDING_HUMAN_APPROVAL" if result.approval_status == "awaiting_approval" else f"    {result.approval_status}")
     print(f"    approval_status = {result.approval_status} · external_action_taken = {result.external_action_taken}")
     print("    Nothing was sent or filed. A human approves via the API/UI before any action.")

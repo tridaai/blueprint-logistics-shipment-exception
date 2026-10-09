@@ -3,7 +3,7 @@
 Pipeline — every step is a named, inspectable node:
 
     extract ──► ingest ──► classify ──► retrieve ──► diagnose ──► options
-        ──► draft ──► validate ──► human_approval ──► END
+        ──► draft ──► verify ──► validate ──► human_approval ──► END
 
 The graph deliberately has NO node that sends a message, files a claim, or
 touches an external system. It ends at the human-approval gate. Acting on an
@@ -34,6 +34,7 @@ from .schemas import (
     TraceStep,
 )
 from .tools import compare_documents, compute_delay_hours, document_pair_warning
+from .verify import verify_draft
 
 # Sentinel distinguishing "no LLM backend configured" (default mode — no
 # cross-check is recorded at all) from "LLM configured but its reply was
@@ -117,6 +118,13 @@ def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
     mismatches = final.get("document_mismatches", [])
     delay = final.get("delay_hours")
     policies = final.get("policies", [])
+    verification = final.get("verification") or {
+        "grounded": True,
+        "issues": [],
+        "source": "checklist",
+        "summary": "",
+        "note": "",
+    }
     validation = final["validation"]
 
     extract_details: list[str] = []
@@ -236,6 +244,20 @@ def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
             details=[f"subject: {final['draft']['subject']}"],
         ),
         TraceStep(
+            name="verify",
+            title="Self-verification — the agent critiques its own draft",
+            status="passed" if verification["grounded"] else "failed",
+            summary=(
+                f"Draft checked against the verified facts and cited policies "
+                f"({'LLM critique' if verification['source'] == 'llm' else 'deterministic checklist'}): "
+                f"{'grounded' if verification['grounded'] else 'NOT grounded'}."
+            ),
+            details=[f"verdict: {'grounded' if verification['grounded'] else 'not grounded'}"]
+            + ([f"summary: {verification['summary']}"] if verification.get("summary") else [])
+            + [f"issue: {i}" for i in verification.get("issues", [])]
+            + ([f"note: {verification['note']}"] if verification.get("note") else []),
+        ),
+        TraceStep(
             name="validate",
             title="Guardrail validation",
             status="passed" if validation["passed"] else "failed",
@@ -275,6 +297,7 @@ class AgentState(TypedDict, total=False):
     options_notes: list[str]
     recommended_option_id: str | None
     draft: dict
+    verification: dict
     validation: dict
     approval_status: str
 
@@ -497,6 +520,26 @@ def build_graph(
         )
         return {"draft": draft_output.model_dump()}
 
+    def verify(state: AgentState) -> AgentState:
+        draft = DraftOutput.model_validate(state["draft"])
+        verification = verify_draft(
+            draft=draft,
+            classification=state["classification"],
+            delay_hours=state.get("delay_hours"),
+            mismatches=state.get("document_mismatches", []),
+            policies=state.get("policies", []),
+            shipment_id=state["shipment"]["shipment_id"],
+            backend=backend,
+        )
+        # The verdict travels inside the claim packet too — the approver
+        # (and any downstream system) sees the self-critique next to the
+        # draft it judges.
+        draft.claim_packet = {
+            **draft.claim_packet,
+            "verification": verification.model_dump(),
+        }
+        return {"verification": verification.model_dump(), "draft": draft.model_dump()}
+
     def validate(state: AgentState) -> AgentState:
         from .schemas import ExceptionType
 
@@ -521,6 +564,7 @@ def build_graph(
     graph.add_node("diagnose", diagnose)
     graph.add_node("options", options)
     graph.add_node("draft", draft)
+    graph.add_node("verify", verify)
     graph.add_node("validate", validate)
     graph.add_node("human_approval", human_approval)
     graph.set_entry_point("extract")
@@ -531,7 +575,8 @@ def build_graph(
         ("retrieve", "diagnose"),
         ("diagnose", "options"),
         ("options", "draft"),
-        ("draft", "validate"),
+        ("draft", "verify"),
+        ("verify", "validate"),
         ("validate", "human_approval"),
         ("human_approval", END),
     ]:
@@ -564,6 +609,7 @@ def run_shipment(
         document_check_warning=final.get("document_check_warning"),
         policies=final.get("policies", []),
         draft=final["draft"],
+        verification=final.get("verification"),
         validation=final["validation"],
         trace=_build_trace(shipment_model, final),
         approval_status=final.get("approval_status", "awaiting_approval"),

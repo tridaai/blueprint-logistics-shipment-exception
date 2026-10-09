@@ -290,6 +290,22 @@ class GuardrailCheck(BaseModel):
     blocking: bool = True
 
 
+class VerificationResult(BaseModel):
+    """The agent's self-critique of its own draft, before guardrails run.
+
+    Two producers, one shape: an LLM critique in provider mode
+    (``source="llm"``), or a deterministic evidence checklist in the
+    default/mock mode (``source="checklist"``) — labelled honestly,
+    never presented as model judgement when it is code.
+    """
+
+    grounded: bool
+    issues: list[str] = Field(default_factory=list)
+    source: str  # llm | checklist
+    summary: str = ""
+    note: str = ""  # set when the LLM critique failed and the checklist ran
+
+
 class ValidationResult(BaseModel):
     passed: bool
     errors: list[str] = Field(default_factory=list)
@@ -306,7 +322,7 @@ class TraceStep(BaseModel):
     inspect what each node really did, including its tool calls.
     """
 
-    name: str  # extract | ingest | classify | retrieve | diagnose | options | draft | validate | human_approval
+    name: str  # extract | ingest | classify | retrieve | diagnose | options | draft | verify | validate | human_approval
     title: str
     status: str = "completed"  # completed | passed | failed | awaiting
     summary: str = ""
@@ -327,6 +343,7 @@ class AgentResult(BaseModel):
     document_check_warning: str | None = None
     policies: list[RetrievedPolicy] = Field(default_factory=list)
     draft: DraftOutput
+    verification: VerificationResult | None = None
     validation: ValidationResult
     trace: list[TraceStep] = Field(default_factory=list)
     approval_status: str = "awaiting_approval"

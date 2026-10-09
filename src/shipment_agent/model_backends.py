@@ -47,6 +47,8 @@ from .prompts import (
     EXTRACT_USER_TEMPLATE,
     OPTIONS_SYSTEM_PROMPT,
     OPTIONS_USER_TEMPLATE,
+    VERIFY_SYSTEM_PROMPT,
+    VERIFY_USER_TEMPLATE,
 )
 
 # Shared request timeout for provider API calls (seconds), overridable
@@ -437,6 +439,38 @@ class _BaseLLMBackend:
                     {"kind": kind, "title": title[:120], "description": description[:300]}
                 )
         return proposals or None
+
+    def verify_draft(self, context: dict) -> dict | None:
+        """LLM self-verification critique (LLM backends only).
+
+        ``context`` is the plain dict built by ``verify.py``: verified
+        facts + the draft. Returns ``{"grounded", "issues", "summary"}``
+        or ``None`` when the reply is unusable — the caller then runs
+        the deterministic checklist and records the degradation.
+        """
+        user = VERIFY_USER_TEMPLATE.format(
+            shipment_id=context["shipment_id"],
+            origin=context.get("origin") or "unknown",
+            destination=context.get("destination") or "unknown",
+            exception_type=context.get("exception_type") or "unknown",
+            severity=context.get("severity") or "unknown",
+            delay_hours=context.get("delay_hours"),
+            mismatches=context.get("mismatches") or "none",
+            policies=self._policy_block(context),
+            subject=context.get("subject", ""),
+            body=context.get("body", ""),
+        )
+        data = parse_json_object(self._complete(VERIFY_SYSTEM_PROMPT, user, max_tokens=500))
+        if data is None or "grounded" not in data:
+            return None
+        issues = data.get("issues") or []
+        if not isinstance(issues, list):
+            issues = [str(issues)]
+        return {
+            "grounded": bool(data["grounded"]),
+            "issues": [str(issue)[:300] for issue in issues],
+            "summary": str(data.get("summary", ""))[:300],
+        }
 
 
 class OpenAIBackend(_BaseLLMBackend):

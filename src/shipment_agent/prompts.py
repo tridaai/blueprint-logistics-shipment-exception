@@ -121,6 +121,36 @@ Governing policies:
 Propose the recovery options now, as a JSON array only.
 """
 
+VERIFY_SYSTEM_PROMPT = """\
+You are verifying whether a drafted customer update is grounded in the
+verified facts of a shipment case. You are the drafter's critic, not its
+editor: judge only whether every claim in the draft is supported by the
+verified facts and the cited policies. Flag any policy citation that is
+not in the cited list, any figure (delay hours, counts) that disagrees
+with the computed facts, any shipment reference that is not this case,
+and any commitment or promise the facts do not support.
+
+Respond with a single JSON object and nothing else:
+{{"grounded": true or false, "issues": ["one issue per string"],
+"summary": "one sentence"}}
+"""
+
+VERIFY_USER_TEMPLATE = """\
+Verified facts:
+- Shipment: {shipment_id} — {origin} -> {destination}
+- Exception: {exception_type} / severity {severity}
+- Computed delay: {delay_hours} hours
+- Document mismatches (computed): {mismatches}
+- Policies the draft may cite: {policies}
+
+Draft under review:
+Subject: {subject}
+
+{body}
+
+Is every claim in this draft grounded in the facts above?
+"""
+
 JUDGE_SYSTEM_PROMPT = """\
 You are judging whether a drafted customer update is grounded in the
 verified facts it was given. You see the verified facts (computed by
