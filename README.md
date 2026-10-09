@@ -23,7 +23,9 @@ decision.
 ## Try it in 3 commands
 
 Once the repository is cloned and dependencies are installed, the demo
-and tests run locally with no API key. The primary workflow is
+and tests run locally. The standard run uses your provider API key
+(Quickstart below); the same three commands also work with no key, on
+the offline smoke-test backend. The primary workflow is
 **[uv](https://docs.astral.sh/uv/)**, using the versions in `uv.lock`:
 
 **Supported Python: 3.10 – 3.12** (macOS and Linux).
@@ -266,19 +268,26 @@ therefore always means "compared and agreed", never "not compared".
 - **Docker optional** — only for the Docker Compose deployment option.
 - **No GPU required.** The agent is rules, retrieval, and drafting; it
   runs comfortably on a laptop CPU.
-- **No API key needed** for the default offline fallback (mock backend).
-  For the optional LLM backends, configuration is environment variables only:
-  the application loads a `.env` file from the repo root at startup
-  (copy `.env.example`), and variables set in the real environment take
-  precedence over the file.
+- **A provider API key is the standard run** — Anthropic or OpenAI (or
+  any OpenAI-compatible endpoint). That is how this agent is meant to
+  run, and how enterprises run agents. Configuration is environment
+  variables only: the application loads a `.env` file from the repo
+  root at startup (copy `.env.example`), and variables set in the real
+  environment take precedence over the file. A no-key **offline smoke
+  test** (deterministic mock) exists to check the plumbing, and Ollama
+  covers fully local runs — neither is the headline.
 
-## Quickstart (no API key)
+## Quickstart
 
 ```bash
 git clone https://github.com/tridaai/blueprint-logistics-shipment-exception.git
 cd blueprint-logistics-shipment-exception
 
-uv sync --extra dev                  # locked install from uv.lock
+uv sync --extra dev --extra llm      # locked install from uv.lock (+ provider SDKs)
+
+# The standard run: a real provider API.
+cp .env.example .env                 # MODEL_BACKEND=anthropic — add your ANTHROPIC_API_KEY
+                                     # (or set MODEL_BACKEND=openai + OPENAI_API_KEY)
 
 # Traced demo on one synthetic sample shipment
 uv run shipment-agent-demo           # or: uv run python -m shipment_agent demo, or: make demo
@@ -303,8 +312,10 @@ sample data ships inside the package, and the `shipment-agent` /
 
 Or with Docker: `docker compose up --build` serves the API on port 8000.
 
-After installation, the default **offline fallback** (deterministic mock)
-backend makes no external network calls.
+Skip the `.env` step and the same commands run against the **offline
+smoke test** (deterministic mock backend, no network calls) — useful to
+verify the install, not a way to evaluate the agent. Set
+`MODEL_BACKEND=ollama` for a fully local real-model run.
 
 One bundled sample is deliberately adversarial: **SYN-1013**, whose
 carrier condition note promises the customer a full refund. The drafting
@@ -332,7 +343,7 @@ API, CLI, and traced demo — read the same variables.**
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `MODEL_BACKEND` | `mock` | Model backend: `mock` (offline fallback, deterministic) · `openai` · `anthropic` · `ollama` (local) |
+| `MODEL_BACKEND` | `mock` when unset | Model backend: `anthropic` · `openai` (the standard, provider APIs) · `ollama` (local) · `mock` (offline smoke test) — `.env.example` ships set to `anthropic` |
 | `OPENAI_API_KEY` | — | Required when `MODEL_BACKEND=openai`; also the embeddings key for semantic/hybrid retrieval on cloud backends |
 | `OPENAI_MODEL` | `gpt-4o-mini` | OpenAI chat model (extraction, cross-check, diagnosis, options, drafting) |
 | `OPENAI_BASE_URL` | provider default | **The "other providers" switch**: any OpenAI-compatible endpoint — LiteLLM, Together, Groq, Azure OpenAI, a self-hosted gateway — applies to chat and embeddings |
