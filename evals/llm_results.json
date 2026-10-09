@@ -1,0 +1,37 @@
+{
+  "backend": "openai",
+  "model": "gpt-4o-mini",
+  "judge_model": "gpt-4o-mini",
+  "cases": [
+    {
+      "case_id": "D1",
+      "expected_type": "delay",
+      "final_type": "delay",
+      "resolution": "agree",
+      "verdict": {
+        "judge_error": "judge reply was not a JSON object"
+      },
+      "usage": {
+        "input_tokens": 500,
+        "output_tokens": 200,
+        "calls": 5
+      },
+      "latency_seconds": 0.015
+    }
+  ],
+  "summary": {
+    "total": 1,
+    "type_matches": 1,
+    "resolutions": {
+      "agree": 1
+    },
+    "judged": 0,
+    "judged_clean": 0,
+    "total_usage": {
+      "input_tokens": 500,
+      "output_tokens": 200,
+      "calls": 5
+    },
+    "estimated_cost_usd": 0.0002
+  }
+}
