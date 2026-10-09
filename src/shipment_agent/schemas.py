@@ -329,8 +329,8 @@ class TraceStep(BaseModel):
 
     Additive field for the demo console: the UI renders these as the
     pipeline trace (extract → ingest → classify → retrieve → diagnose →
-    options → draft → validate → human approval) so a reviewer can
-    inspect what each node really did, including its tool calls.
+    options → draft → verify → validate → human approval) so a reviewer
+    can inspect what each node really did, including its tool calls.
     """
 
     name: str  # extract | ingest | classify | retrieve | diagnose | options | draft | verify | validate | human_approval

@@ -2,8 +2,10 @@
 
 > **Status: reference prototype.** Built by Trida AI as an open blueprint for
 > forward-deployed AI engineering in logistics operations. It runs entirely
-> on synthetic data, takes no external action, and is not a production
-> system. Nothing in this document describes a real client engagement.
+> on synthetic data, takes no external action by default (the one opt-in
+> exception is the operator-configured approval webhook, §4), and is not a
+> production system. Nothing in this document describes a real client
+> engagement.
 
 ## 1. Problem framing
 
@@ -33,13 +35,15 @@ Shipment input (events + documents, JSON)
 └─────────────┘   └──────────────┘   └──────────────┘   └──────────────┘
                                                               │
         ┌──────────────┐   ┌──────────────┐   ┌──────────────┐  ▼
-        │   human_   │◄──│   validate   │◄──│    draft     │◄─ diagnose ─► options
-        │   approval │   │ guardrails   │   │ grounded on  │   (root cause;  (proposed,
-        │   (GATE)   │   │ as code      │   │ recommended  │    cited)        scored by code)
+        │   human_   │◄──│   validate   │◄──│    verify    │◄─ draft ◄─ diagnose ─► options
+        │   approval │   │ guardrails   │   │ self-critique│   (grounded on  (root cause;  (proposed,
+        │   (GATE)   │   │ as code +    │   │ vs facts     │    recommended)  cited)        scored by code)
+        │            │   │ repair loop  │   │              │
         └──────────────┘   └──────────────┘   └──────────────┘
               │
               ▼
             END — no external action exists in this graph
+            (an approval may POST to an operator-configured webhook — §4)
 ```
 
 Implemented as a LangGraph `StateGraph` (`src/shipment_agent/graph.py`).
@@ -58,15 +62,22 @@ serialisable shape:
 | `extractions` | extract | per-document extracted fields, per-field confidence, code cross-check status |
 | `delay_hours` | ingest | computed exactly, never estimated by a model |
 | `document_mismatches` | ingest | field-level BOL vs invoice diffs |
+| `document_check_warning` | ingest | set when no BOL/invoice pair exists — the skipped check is announced, never silent |
 | `classification` | classify | type, severity, confidence, signals, rationale |
 | `cross_check` | classify | rules vs LLM outcome + resolution (provider mode only) |
+| `classify_note` | classify | the translated provider error when the LLM cross-check degraded to rules-only |
 | `policies` | retrieve | top-3 policy snippets with scores (+ how each was retrieved) |
 | `retrieval_info` | retrieve | mode, hybrid pool stats, vector store that served |
-| `diagnosis` | diagnose | root cause, summary, evidence list, policy citations |
+| `history` | service (memory) | prior-shipment summary for this consignee + lane, or `None` |
+| `diagnosis` | diagnose | root cause, summary, evidence list (incl. memory lines), policy citations |
 | `recovery_options` | options | proposed options with code-computed scores |
 | `recommended_option_id` | options | the highest-scoring option; the draft grounds on it |
 | `draft` | draft | subject, body, claim packet (incl. diagnosis + options), citations |
+| `verification` | verify | self-critique verdict: grounded?, issues, source (`llm` \| `checklist`) |
 | `validation` | validate | guardrail pass/fail, errors, warnings |
+| `repair_attempted` / `repaired` / `repair_attempts` | validate | bounded-repair bookkeeping |
+| `original_validation` | validate | the first (failed) validation, preserved when repair ran |
+| `autonomy` | human_approval | deterministic routing recommendation + reasons (never acted on) |
 | `approval_status` | human_approval | always `awaiting_approval` at graph exit |
 
 Why a graph instead of a chain? Each node is independently testable, the
@@ -161,6 +172,16 @@ quietly degrading. A production deployment can still swap the
 implementation for LlamaIndex over a managed store without touching
 the graph.
 
+The retrieval **query is built from the shipment's own content** —
+exception type and rationale, yes, but also the latest event text, the
+condition notes, and the document field values. An earlier version
+queried with type + rationale only, and a customer SOP written in
+operational language ("cartons crushed at terminal inspection") never
+ranked for the damage case it described, because its vocabulary shares
+nothing with the classifier's rationale. The query now carries the
+case's own words; a regression test pins the operational-vocabulary
+scenario.
+
 **Model backend behind an interface, mock as offline fallback only.**
 The default backend renders from deterministic templates offline; it is
 the fallback for no-key environments, labelled as such in the console
@@ -187,6 +208,68 @@ promise — it quotes the source record verbatim, and a carrier agent's
 note can contain one (sample SYN-1013 does). That is exactly what the
 guardrail layer is for, in both modes.
 
+**Provider errors are translated; degradation is recorded, not silent.**
+Every provider call (chat backends and the embeddings client) is wrapped
+(`errors.py`): a transport failure becomes a `ProviderError` in the
+product's own style naming the backend, the endpoint it tried, and the
+likely fix — an unreachable Ollama says to start Ollama or check
+`OLLAMA_BASE_URL`. SDK retries are disabled (`max_retries=0`) and the
+timeout is `LLM_TIMEOUT_SECONDS`, so a dead endpoint fails in seconds;
+retrying is a deployment decision in front of the service, not inside
+it. Nodes that can degrade — extraction, the classification cross-check,
+diagnosis, options, verification — fall back and record the translated
+reason in the trace; drafting cannot degrade, so its failure is the
+clean error on every surface (CLI/demo exit 1, API 502), never a raw
+SDK traceback. Embeddings errors name the `RETRIEVER` value actually
+set (`hybrid` says `hybrid`).
+
+**Self-verification, then guardrails, then a bounded repair.** Drafting
+is where generated language can drift from computed facts, so a verify
+node critiques the draft against the verified facts and cited policies
+before the guardrails run: an LLM critique call in provider mode
+(versioned prompt in `prompts.py`, structured grounded/issues verdict),
+a deterministic evidence checklist in default mode — same verdict
+shape, honestly labelled `source="checklist"` (it checks cited policy
+IDs against the retrieved set, hour figures against the computed delay,
+shipment references against the case, and flags monetary figures no
+fact supports). The verdict never edits the draft; it is evidence for
+the approver and input to repair. On guardrail failure, a **bounded
+repair loop** (`GUARDRAIL_REPAIR`, default on;
+`GUARDRAIL_REPAIR_MAX_ATTEMPTS`, default 1, hard cap 3) redrafts with
+the failure reasons and self-verification issues fed back into the
+drafting prompt, then re-verifies and re-validates. The original
+failure is preserved as `original_validation` and the attempt flagged
+(`repair_attempted` / `repaired`). The guardrail rules themselves do
+not change, and with repair off a failed draft behaves exactly as a
+no-repair pipeline's does. Note the honest default-mode consequence:
+the deterministic template redrafts identical words, so SYN-1013's
+repair attempt fails identically — repair pays off with a real model
+behind it, and the flags make which case happened unmistakable.
+
+**Memory: prior shipments as diagnosis evidence.** Before diagnosis,
+the service asks the store for prior analysed shipments
+(`prior_shipments`, both stores; SQLite gained a `shipment_json`
+column by additive migration) and summarises matches for the same
+consignee and the same lane (origin → destination): counts of priors
+that themselves had exceptions, plus their most recent types. The
+summary reaches the diagnosis as evidence lines ("memory: 2 prior
+exception(s) for this consignee in the stored history…"). A shipment
+never counts itself; "none" priors do not count; empty history adds
+no line. Scope is deliberately small — counts and recent types, not a
+case-retrieval system; the store is the seam where a customer's real
+history source would plug in.
+
+**Autonomy recommendation: deterministic, printed, never acted on.**
+Every result carries a routing recommendation computed by policy in
+code (`autonomy.py`): eligible for auto-approval only when the
+exception is `none` or severity `low`, the guardrails passed, the
+cross-check did not disagree, and no repair was needed — each
+criterion's outcome listed in `reasons`. It is printed on the result,
+the console, the demo, and the claim packet, and nothing reads it to
+skip the gate. Its job is to make the autonomy conversation concrete
+for a customer: which of *their* case classes could move, and why the
+rest stay human.
+
 **Approvals persist; the API can be gated.** Analyses and decisions are
 stored through a small store interface (`store.py`): SQLite on disk by
 default (`STATE_DB_PATH`, default `.data/state.db`, git-ignored), so
@@ -194,8 +277,8 @@ the approval queue survives restarts; the in-memory implementation
 remains as the test double (`STATE_DB_PATH=:memory:`). Setting
 `API_KEY` turns on a shared-key check (`X-API-Key` header) for all data
 endpoints; unset, the API is open and documented as a local-dev default.
-Neither changes the gate semantics: approval records a decision and
-still performs no external action.
+Approve and reject take one decision-maker field, `actor` (legacy
+`approver`/`reviewer` accepted), and the result returns `decided_by`.
 
 **Guardrails as code, not prompts.** `guardrails.py` rejects drafts that
 lack the shipment ID, lack policy citations on exception drafts, or contain
@@ -204,7 +287,14 @@ that fails validation cannot be approved through the service layer.
 
 **The approval gate is structural.** There is no send/file/act node in the
 graph at all. Approval in `service.py` records *who* approved and marks the
-packet ready — and still performs no external action in this prototype.
+packet ready. The one opt-in exception lives in the service layer, not
+the graph: **output routing**. When the operator sets
+`ACTION_WEBHOOK_URL`, a successful approval POSTs the approved packet
+JSON to that endpoint — the thin adapter to the customer's system of
+choice — with a short timeout (`ACTION_WEBHOOK_TIMEOUT_SECONDS`,
+default 5s). The outcome is recorded as `dispatch_status`
+(`sent`/`failed`) on the result; a failed dispatch never undoes the
+approval. Unset (the default), approval performs no external action.
 
 ## 5. Data model
 
@@ -217,20 +307,55 @@ them against the provided ones. What this prototype does *not* do is OCR:
 scanned documents need an OCR step in front of it in production, and
 photo damage assessment (a VLM step) is out of scope entirely.
 
+### Intake contract and normalisation
+
+`ShipmentInput` fields (the README carries the same table):
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `shipment_id` | string | yes | results, approvals, and history key on it |
+| `origin` / `destination` | string | yes | the memory lane key is `origin -> destination` |
+| `carrier` | string | no | default `Synthetic Carrier` |
+| `customer_name` | string | no | consignee name for memory matching (fallback: a document's `consignee` field) |
+| `service_level` | string | no | `standard` \| `priority` \| `critical` |
+| `status` | string | no | default `in_transit` |
+| `scheduled_delivery` / `estimated_delivery` | datetime | no | drive the computed delay |
+| `latest_event` / `condition_notes` | string | no | feed classification AND the retrieval query |
+| `documents` | array | no | each: `doc_type`, `document_id`, optional `raw_text`, optional `fields` object |
+
+Canonical document types: `bol`, `invoice`, `tracking`, `delivery_note`,
+`other`. Intake normalises caller dialects onto that vocabulary
+(`bill_of_lading`/`BOL`/`Bill of Lading` → `bol`; `commercial_invoice` →
+`invoice`; `tracking_note`/`tracking_update` → `tracking`;
+`delivery_receipt`/`POD`/`proof_of_delivery` → `delivery_note`). An
+unknown type is kept as supplied and flagged on the document record
+(`doc_type_provided`, `doc_type_flagged`) — visible, never silently
+reinterpreted. Document `fields` values coerce numbers to strings
+(`120` → `"120"`) instead of failing validation; `null` values are
+dropped. And the BOL↔invoice mismatch check announces a skip: with no
+pair present, the result and trace carry *"no bill_of_lading/invoice
+pair found — document mismatch check skipped"* — an empty mismatch list
+always means "compared and agreed".
+
 ## 6. Failure modes
 
 | Failure | Behaviour |
 |---|---|
 | Missing schedule data | delay_hours = None; classification falls back to event keywords; severity defaults to medium |
-| BOL or invoice absent | mismatch check returns empty; classification relies on event text |
+| BOL or invoice absent | mismatch check is skipped AND the result/trace carry the explicit warning ("no bill_of_lading/invoice pair found — document mismatch check skipped"); classification relies on event text |
+| Unknown / aliased doc_type | aliases normalise to the canonical vocabulary; unknown types are kept and flagged (`doc_type_flagged`), never dropped |
+| Numeric document field values | coerced to strings at intake — no 422 for a well-formed TMS payload |
 | Novel exception phrasing | may classify as `none` — visible in evals as a miss; golden set grows from these |
 | Retrieved policies irrelevant | draft still carries citations; approver sees policy titles and can reject |
-| LLM backend unavailable | explicit RuntimeError at construction naming the fix (missing key or missing `llm` extra); no silent fallback to the mock |
+| LLM backend unavailable at startup | explicit RuntimeError at construction naming the fix (missing key or missing `llm` extra); no silent fallback to the mock |
+| Provider unreachable mid-run (e.g. Ollama down) | translated `ProviderError` naming backend, endpoint, likely fix; degradable nodes fall back with the reason in the trace; a drafting failure ends the run cleanly (CLI/demo exit 1, API 502). No SDK retries — fails within `LLM_TIMEOUT_SECONDS` |
 | LLM classification malformed/unavailable | cross-check records `rules_only` with the failure in its note; the rule result stands and the run continues |
-| LLM extraction / diagnosis / options failure | that node falls back to provided fields / the evidence template / template options; the run continues |
+| LLM extraction / diagnosis / options / verification failure | that node falls back to provided fields / the evidence template / template options / the deterministic checklist; the fallback is recorded in the trace and the run continues |
 | Chroma installed but store broken | semantic retrieval falls back to in-memory cosine; `vector_store` in the result reports `memory` |
-| `RETRIEVER=semantic` with no embeddings route | explicit RuntimeError at construction: embeddings need OpenAI(-compatible) or the Ollama backend |
-| Draft fails guardrails | approval is blocked with the exact errors surfaced (sample SYN-1013 demonstrates this deterministically) |
+| `RETRIEVER=semantic`/`hybrid` with no embeddings route | explicit RuntimeError at construction naming the RETRIEVER value set: embeddings need OpenAI(-compatible) or the Ollama backend |
+| Draft fails guardrails, repair on (default) | one bounded redraft with the failures fed back, re-verified + re-validated; result flags the attempt and preserves the original failure; if the redraft still fails, approval is blocked (SYN-1013 demonstrates the deterministic case) |
+| Draft fails guardrails, `GUARDRAIL_REPAIR=off` | no attempt: approval is blocked with the exact errors surfaced — the pre-repair behaviour, unchanged |
+| Approval webhook unreachable / non-2xx | `dispatch_status=failed` on the result; the approval itself stands |
 | Conflicting signals (damage + delay) | priority order resolves deterministically; rationale records the winning signal |
 
 ## 7. Security notes
@@ -268,15 +393,32 @@ Ordered by value when adapting this blueprint to your own operation:
    (`evals/run_llm_evals.py`) for groundedness. Point `OPENAI_BASE_URL`
    at a compatible endpoint if you host your own.
 3. **Intake shape** — map one real source (a TMS export or webhook
-   payload) onto `ShipmentInput`; keep the rest of the graph untouched.
+   payload) onto `ShipmentInput` (§5 has the full field table); keep
+   the rest of the graph untouched. Concretely: (a) point your payload
+   at `POST /shipments/analyze` and map your identifiers to
+   `shipment_id`, your lane fields to `origin`/`destination`, your
+   latest status text to `latest_event`, and your condition remarks to
+   `condition_notes` — those two text fields drive both classification
+   and the retrieval query, so do not summarise them away; (b) attach
+   documents with your own type names — the normaliser maps
+   `bill_of_lading`/`BOL`/`Invoice`/`POD`-style dialects onto the
+   canonical vocabulary (§5), and anything unrecognised is kept and
+   flagged rather than rejected; (c) send document `fields` as your
+   system has them — numbers are coerced to strings at intake; the
+   mismatch check reads `quantity_units` and `weight_kg` from the
+   `bol` and `invoice` documents; (d) if your source cannot supply a
+   BOL/invoice pair, expect the explicit skipped-check warning on every
+   result — that is the contract working, not an error.
 4. **Retriever** — set `RETRIEVER=hybrid` (and install the `vectordb`
    extra for the local Chroma store) for embedding-based ranking of the
    shipped corpus, or replace the retriever with embeddings over your
    full policy library behind the same `Retriever` protocol.
 5. **Exception types** — add the exceptions your operation actually sees
    (customs hold, address issue, …) as rules + golden cases.
-6. **Action layer** — wire approve → your messaging/claims system, behind
-   the existing gate, with an audit log.
+6. **Action layer** — the seam already exists: set `ACTION_WEBHOOK_URL`
+   to POST approved packets to your system, then grow it into the full
+   approve → messaging/claims wiring behind the existing gate, with an
+   audit log.
 
 ## 9. How you would productionise this
 
@@ -290,9 +432,11 @@ Ordered by value when adapting this blueprint to your own operation:
 3. **Approval UX:** queue UI with side-by-side evidence (classification
    signals, source documents, policy text), one-click edit/approve/reject,
    and full audit log of who approved what, when.
-4. **Action layer:** after approval, send via the client's messaging system
-   and file claims via carrier portals/APIs — behind feature flags, with
-   idempotency keys and rate limits.
+4. **Action layer:** the shipped approval webhook is the first adapter;
+   production grows it into send-via-the-client's-messaging-system and
+   claim filing via carrier portals/APIs — behind feature flags, with
+   idempotency keys and rate limits, and `dispatch_status` grown into
+   full delivery bookkeeping.
 5. **Observability:** LangGraph tracing (e.g. Langfuse / OpenTelemetry),
    per-node latency and cost, classification drift dashboards.
 6. **Evals as a regression gate:** the golden dataset grows from real
@@ -319,6 +463,15 @@ Ordered by value when adapting this blueprint to your own operation:
   database.
 - Extraction consumes document text; there is no OCR engine and no
   photo/VLM damage assessment.
+- Default-mode self-verification is a deterministic checklist (citations,
+  figures, references, invented money) — it does not judge tone or subtle
+  overclaiming; the provider-mode LLM critique is broader but is a model
+  judging a draft.
+- Memory is counts and recent exception types from this store — not a
+  case-similarity search, and it starts empty on a fresh deployment.
+- The autonomy recommendation is policy, not learning: its band
+  (none/low) is a starting posture a customer tunes, and it never acts.
 - The Docker local stack (agent + Ollama + Chroma) is reviewed but not
   build-verified — no Docker daemon in the development environment.
-- No carrier/TMS integration, no sending, no claims filing — by design.
+- No carrier/TMS integration and no claims filing — by design; the only
+  outbound call that exists is the opt-in approval webhook.
