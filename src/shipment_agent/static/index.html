@@ -261,9 +261,9 @@ function renderExtractions(extractions) {
   const statusMark = { match: '✅ match', mismatch: '❌ mismatch', missing_in_text: '⚠️ missing in text', extracted_only: 'ℹ️ extracted only', source_provided: 'source-provided' };
   const rows = [];
   extractions.forEach(ex => {
-    (ex.comparisons || []).forEach(c => {
+    (ex.fields || []).forEach(c => {
       const conf = c.confidence === null || c.confidence === undefined ? '—' : c.confidence;
-      rows.push(`<tr><td>${ex.document_id} (${ex.source.replace('_', ' ')})</td><td>${c.field}</td><td>${c.provided_value ?? '—'}</td><td>${c.extracted_value ?? '—'}</td><td>${conf}</td><td>${statusMark[c.status] || c.status}</td></tr>`);
+      rows.push(`<tr><td>${ex.document_id} (${ex.doc_type}, ${ex.source})</td><td>${c.field}</td><td>${c.provided_value ?? '—'}</td><td>${c.extracted_value ?? '—'}</td><td>${conf}</td><td>${statusMark[c.status] || c.status}</td></tr>`);
     });
   });
   wrap.innerHTML = `<p style="font-size:14px; margin:16px 0 6px"><strong>Document extraction — LLM fields vs provided, cross-checked by code</strong></p>
@@ -273,14 +273,14 @@ function renderExtractions(extractions) {
 function renderCrossCheck(cc) {
   const wrap = $('crosscheck');
   if (!cc) { wrap.innerHTML = ''; return; }
-  const llm = cc.llm_suggestion;
-  const llmLine = llm
-    ? `LLM (${cc.llm_backend}): <strong>${llm.exception_type}</strong> / ${llm.severity} · confidence ${llm.confidence} — ${llm.rationale}`
-    : `LLM: no usable suggestion (${cc.note})`;
+  const llmLine = cc.llm_exception_type
+    ? `LLM (${cc.llm_backend}): <strong>${cc.llm_exception_type}</strong> / ${cc.llm_severity} · confidence ${cc.llm_confidence}`
+    : `LLM: no usable classification this run`;
+  const agreeLine = cc.agrees === null || cc.agrees === undefined ? '' : (cc.agrees ? ' — rules and LLM agree' : ' — they disagree');
   wrap.innerHTML = `<p style="font-size:14px; margin:16px 0 6px"><strong>Classification cross-check</strong></p>
     <div class="policy">Rules: <strong>${cc.rule_exception_type}</strong> / ${cc.rule_severity} · confidence ${cc.rule_confidence}<br>
     ${llmLine}<br>
-    Outcome: <strong>${cc.resolution}</strong>${cc.agreement ? ' — rules and LLM agree' : ' — they disagree'} · ${cc.note}</div>`;
+    Outcome: <strong>${cc.resolution}</strong>${agreeLine}${cc.note ? ' · ' + cc.note : ''}</div>`;
 }
 
 function renderDiagnosis(d) {
@@ -297,9 +297,9 @@ function renderOptions(options, recommendedId) {
   const wrap = $('options');
   if (!options || !options.length) { wrap.innerHTML = ''; return; }
   const rows = options.map(o =>
-    `<tr><td>${o.title}${o.option_id === recommendedId ? ' <span class="badge">recommended</span>' : ''}<br><small>${o.description}</small></td><td>${o.kind.replaceAll('_', ' ')}</td><td>${o.eta_impact_hours > 0 ? '+' : ''}${o.eta_impact_hours}h</td><td>$${o.cost_estimate_usd}</td><td>${o.sla_impact}</td><td><strong>${o.score}</strong></td></tr>`).join('');
+    `<tr><td>${o.title}${o.option_id === recommendedId ? ' <span class="badge">recommended</span>' : ''}<br><small>${o.description}</small></td><td>${o.kind.replaceAll('_', ' ')}</td><td>+${o.eta_improvement_hours}h</td><td>${o.added_cost_units} units</td><td>${o.sla_score}</td><td><strong>${o.score}</strong></td></tr>`).join('');
   wrap.innerHTML = `<p style="font-size:14px; margin:16px 0 6px"><strong>Recovery options — proposed, then scored by deterministic code</strong></p>
-    <table><thead><tr><th>Option</th><th>Kind</th><th>ETA impact</th><th>Cost est.</th><th>SLA impact</th><th>Score</th></tr></thead><tbody>${rows}</tbody></table>
+    <table><thead><tr><th>Option</th><th>Kind</th><th>ETA improvement</th><th>Added cost</th><th>SLA score</th><th>Score</th></tr></thead><tbody>${rows}</tbody></table>
     <p class="note">The draft below grounds on the recommended option. Scores are computed in code from the delay and severity — never by the model.</p>`;
 }
 
