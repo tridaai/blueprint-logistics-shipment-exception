@@ -50,6 +50,15 @@ def _retrieve_details(final: dict, policies: list[dict]) -> list[str]:
     details = [
         f"tool call: search_policies(query, mode={mode}) -> {len(policies)} cited"
     ]
+    if info.get("vector_store"):
+        details.append(
+            f"vector store: {info['vector_store']}"
+            + (
+                " (local Chroma persistent store)"
+                if info["vector_store"] == "chroma"
+                else " (in-memory cosine fallback — install the vectordb extra for Chroma)"
+            )
+        )
     if mode == "hybrid":
         details.append(
             f"merge: keyword pool {info.get('keyword_pool', 0)} + semantic pool "
@@ -345,6 +354,9 @@ def build_graph(
         policies = retriever.retrieve(query, top_k=3)
         info = {"mode": getattr(retriever, "name", "keyword")}
         info.update(getattr(retriever, "last_stats", {}) or {})
+        vector_store = getattr(retriever, "vector_store", None)
+        if vector_store:
+            info["vector_store"] = vector_store
         return {
             "policies": [p.model_dump() for p in policies],
             "retrieval_info": info,

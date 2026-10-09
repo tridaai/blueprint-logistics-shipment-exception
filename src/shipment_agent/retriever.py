@@ -105,6 +105,12 @@ class SemanticRetriever:
         self._policies = policies if policies is not None else POLICIES
         self._client, self._model = self._build_embeddings_client()
         self._corpus_vectors: list[list[float]] | None = None
+        # Which store actually serves queries: "chroma" when the optional
+        # vectordb extra is installed (local persistent store), else
+        # "memory" (in-repo cosine over freshly embedded vectors).
+        self.vector_store = "memory"
+        self._chroma_collection = None
+        self._chroma_checked = False
 
     @staticmethod
     def _build_embeddings_client():
@@ -168,7 +174,91 @@ class SemanticRetriever:
         ordered = sorted(response.data, key=lambda d: getattr(d, "index", 0))
         return [list(d.embedding) for d in ordered]
 
+    def _get_chroma_collection(self):
+        """Lazily open the local Chroma store, indexing the corpus once.
+
+        Returns the collection, or ``None`` when chromadb is not
+        installed (the in-memory fallback then serves queries). The
+        store is a persistent local directory (``CHROMA_DIR``, default
+        ``<repo>/.chroma``, git-ignored): the policy corpus is embedded
+        and added on first use, and survives restarts after that.
+        Embeddings are always computed by our configured provider
+        client and passed in explicitly — Chroma's own default
+        embedding function (which downloads a model) is never used.
+        """
+        if self._chroma_checked:
+            return self._chroma_collection
+        self._chroma_checked = True
+        try:
+            import chromadb
+        except ImportError:
+            return None
+        try:
+            import hashlib
+            from pathlib import Path
+
+            persist_dir = env_str("CHROMA_DIR") or str(
+                Path(__file__).resolve().parents[2] / ".chroma"
+            )
+            client = chromadb.PersistentClient(path=persist_dir)
+            # The collection is named by a fingerprint of the corpus
+            # contents: a changed corpus (edited policies, a different
+            # corpus in tests) gets its own collection instead of
+            # silently querying stale vectors.
+            fingerprint = hashlib.sha256(
+                "\n".join(
+                    f"{p['policy_id']}|{p['title']}|{p['text']}" for p in self._policies
+                ).encode("utf-8")
+            ).hexdigest()[:12]
+            collection = client.get_or_create_collection(
+                f"policies-{fingerprint}", metadata={"hnsw:space": "cosine"}
+            )
+            if collection.count() != len(self._policies):
+                if collection.count() > 0:  # partial/stale write — rebuild
+                    collection.delete(
+                        ids=[p["policy_id"] for p in self._policies]
+                    )
+                texts = [f"{p['title']} {p['text']}" for p in self._policies]
+                collection.add(
+                    ids=[p["policy_id"] for p in self._policies],
+                    embeddings=self._embed(texts),
+                    documents=texts,
+                    metadatas=[{"title": p["title"]} for p in self._policies],
+                )
+            self._chroma_collection = collection
+            self.vector_store = "chroma"
+        except Exception:  # a broken local store must not break retrieval
+            self._chroma_collection = None
+        return self._chroma_collection
+
+    def _retrieve_chroma(self, collection, query: str, top_k: int) -> list[RetrievedPolicy]:
+        query_vector = self._embed([query])[0]
+        result = collection.query(
+            query_embeddings=[query_vector],
+            n_results=min(top_k, len(self._policies)),
+        )
+        by_id = {p["policy_id"]: p for p in self._policies}
+        retrieved: list[RetrievedPolicy] = []
+        for policy_id, distance in zip(result["ids"][0], result["distances"][0]):
+            policy = by_id.get(policy_id)
+            if policy is None:  # foreign id in a shared store — skip it
+                continue
+            retrieved.append(
+                RetrievedPolicy(
+                    policy_id=policy_id,
+                    title=policy["title"],
+                    snippet=policy["text"],
+                    # hnsw:space=cosine -> distance is 1 - cosine similarity.
+                    score=round(1.0 - float(distance), 4),
+                    retrieval="semantic",
+                )
+            )
+        return retrieved
+
     def retrieve(self, query: str, top_k: int = 3) -> list[RetrievedPolicy]:
+        collection = self._get_chroma_collection()
+        if collection is not None:
+            return self._retrieve_chroma(collection, query, top_k)
         if self._corpus_vectors is None:
             self._corpus_vectors = self._embed(
                 [f"{p['title']} {p['text']}" for p in self._policies]
@@ -246,6 +336,11 @@ class HybridRetriever:
         self._keyword = KeywordRetriever(policies)
         self._semantic = SemanticRetriever(policies)
         self.last_stats: dict[str, int] = {}
+
+    @property
+    def vector_store(self) -> str:
+        """The store serving the semantic half (chroma | memory)."""
+        return self._semantic.vector_store
 
     def retrieve(self, query: str, top_k: int = 3) -> list[RetrievedPolicy]:
         pool = top_k * 2

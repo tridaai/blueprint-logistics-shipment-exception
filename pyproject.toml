@@ -29,6 +29,11 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest==9.1.1", "httpx==0.28.1"]
 llm = ["openai==3.27.0", "anthropic==1.13.0"]
+# Optional local vector store for RETRIEVER=semantic|hybrid (not part of
+# the frozen default set in constraints.txt). The retriever only uses
+# Chroma's stable surface (PersistentClient / collection add+query).
+# Without it, semantic retrieval falls back to in-memory cosine.
+vectordb = ["chromadb==1.5.9"]
 
 [project.scripts]
 shipment-agent = "shipment_agent.cli:main"

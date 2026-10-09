@@ -62,6 +62,7 @@ def clean_env(monkeypatch):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr("shipment_agent.model_backends.load_dotenv", lambda *a, **k: None)
     monkeypatch.setattr("shipment_agent.retriever.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setitem(sys.modules, "chromadb", None)  # hermetic: force the in-memory fallback
 
 
 @pytest.fixture
