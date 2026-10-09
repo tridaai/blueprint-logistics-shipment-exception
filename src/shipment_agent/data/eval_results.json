@@ -1,0 +1,39 @@
+{
+  "dataset": "golden.jsonl (synthetic)",
+  "generated_at": "2026-10-09T18:18:15+00:00",
+  "total_cases": 32,
+  "type_correct": 32,
+  "type_accuracy": 1.0,
+  "severity_correct": 32,
+  "severity_accuracy": 1.0,
+  "per_type": {
+    "damage": {
+      "correct": 7,
+      "total": 7,
+      "accuracy": 1.0
+    },
+    "delay": {
+      "correct": 8,
+      "total": 8,
+      "accuracy": 1.0
+    },
+    "document_mismatch": {
+      "correct": 7,
+      "total": 7,
+      "accuracy": 1.0
+    },
+    "missed_appointment": {
+      "correct": 5,
+      "total": 5,
+      "accuracy": 1.0
+    },
+    "none": {
+      "correct": 5,
+      "total": 5,
+      "accuracy": 1.0
+    }
+  },
+  "threshold": 0.9,
+  "passed": true,
+  "framing": "Synthetic golden set used as a regression gate. It is not a real-world accuracy claim."
+}

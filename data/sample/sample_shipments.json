@@ -1,0 +1,263 @@
+[
+ {
+  "carrier": "Synthetic Carrier",
+  "condition_notes": "",
+  "customer_name": "Synthetic Retail Co",
+  "destination": "Charlotte, NC",
+  "documents": [
+   {
+    "doc_type": "bol",
+    "document_id": "BOL-SYN-1001",
+    "fields": {
+     "consignee": "Synthetic Retail Co",
+     "quantity_units": "120",
+     "sku": "SKU-100",
+     "weight_kg": "840"
+    },
+    "raw_text": "Synthetic BOL"
+   },
+   {
+    "doc_type": "invoice",
+    "document_id": "INV-SYN-1001",
+    "fields": {
+     "consignee": "Synthetic Retail Co",
+     "quantity_units": "120",
+     "sku": "SKU-100",
+     "weight_kg": "840"
+    },
+    "raw_text": "Synthetic invoice"
+   }
+  ],
+  "estimated_delivery": "2026-10-11T21:00:00",
+  "latest_event": "Delayed at regional hub due to weather hold",
+  "origin": "Memphis, TN",
+  "scheduled_delivery": "2026-10-10T09:00:00",
+  "service_level": "standard",
+  "shipment_id": "SYN-1001",
+  "status": "in_transit"
+ },
+ {
+  "carrier": "Synthetic Carrier",
+  "condition_notes": "Two cartons crushed, contents leaking noted at terminal inspection",
+  "customer_name": "Synthetic Parts Ltd",
+  "destination": "Atlanta, GA",
+  "documents": [
+   {
+    "doc_type": "bol",
+    "document_id": "BOL-SYN-1002",
+    "fields": {
+     "consignee": "Synthetic Parts Ltd",
+     "quantity_units": "40",
+     "sku": "SKU-220",
+     "weight_kg": "300"
+    },
+    "raw_text": "Synthetic BOL"
+   }
+  ],
+  "estimated_delivery": "2026-10-10T15:00:00",
+  "latest_event": "Arrived at destination terminal",
+  "origin": "Dallas, TX",
+  "scheduled_delivery": "2026-10-10T14:00:00",
+  "service_level": "priority",
+  "shipment_id": "SYN-1002",
+  "status": "out_for_delivery"
+ },
+ {
+  "carrier": "Synthetic Carrier",
+  "condition_notes": "",
+  "customer_name": "Synthetic Foods Inc",
+  "destination": "Columbus, OH",
+  "documents": [
+   {
+    "doc_type": "bol",
+    "document_id": "BOL-SYN-1003",
+    "fields": {
+     "consignee": "Synthetic Foods Inc",
+     "quantity_units": "200",
+     "sku": "SKU-310",
+     "weight_kg": "1500"
+    },
+    "raw_text": "Synthetic BOL"
+   },
+   {
+    "doc_type": "invoice",
+    "document_id": "INV-SYN-1003",
+    "fields": {
+     "consignee": "Synthetic Foods Inc",
+     "quantity_units": "180",
+     "sku": "SKU-310",
+     "weight_kg": "1350"
+    },
+    "raw_text": "Synthetic invoice"
+   }
+  ],
+  "estimated_delivery": "2026-10-12T09:30:00",
+  "latest_event": "Departed origin terminal",
+  "origin": "Chicago, IL",
+  "scheduled_delivery": "2026-10-12T09:00:00",
+  "service_level": "standard",
+  "shipment_id": "SYN-1003",
+  "status": "in_transit"
+ },
+ {
+  "carrier": "Synthetic Carrier",
+  "condition_notes": "",
+  "customer_name": "Synthetic Builders LLC",
+  "destination": "Raleigh, NC",
+  "documents": [],
+  "estimated_delivery": "2026-10-11T10:00:00",
+  "latest_event": "Driver turned away at dock, missed delivery appointment, appointment rescheduled by facility",
+  "origin": "Nashville, TN",
+  "scheduled_delivery": "2026-10-10T10:00:00",
+  "service_level": "standard",
+  "shipment_id": "SYN-1004",
+  "status": "delivery_attempted"
+ },
+ {
+  "carrier": "Synthetic Carrier",
+  "condition_notes": "",
+  "customer_name": "Synthetic Home Goods",
+  "destination": "Greenville, SC",
+  "documents": [],
+  "estimated_delivery": "2026-10-12T07:45:00",
+  "latest_event": "In transit, on schedule",
+  "origin": "Louisville, KY",
+  "scheduled_delivery": "2026-10-12T08:00:00",
+  "service_level": "standard",
+  "shipment_id": "SYN-1005",
+  "status": "in_transit"
+ },
+ {
+  "carrier": "Synthetic Carrier",
+  "condition_notes": "",
+  "customer_name": "Synthetic Auto Supply",
+  "destination": "Knoxville, TN",
+  "documents": [],
+  "estimated_delivery": "2026-10-12T09:00:00",
+  "latest_event": "Held at hub, mechanical delay with linehaul equipment",
+  "origin": "Birmingham, AL",
+  "scheduled_delivery": "2026-10-09T09:00:00",
+  "service_level": "critical",
+  "shipment_id": "SYN-1006",
+  "status": "held"
+ },
+ {
+  "carrier": "Synthetic Carrier",
+  "condition_notes": "One carton dented at cross-dock, contents intact, minor cosmetic damage to outer packaging",
+  "customer_name": "Synthetic Garden Supply",
+  "destination": "Jacksonville, FL",
+  "documents": [
+   {
+    "doc_type": "bol",
+    "document_id": "BOL-SYN-1007",
+    "fields": {
+     "consignee": "Synthetic Garden Supply",
+     "quantity_units": "60",
+     "sku": "SKU-410",
+     "weight_kg": "420"
+    },
+    "raw_text": "Synthetic BOL"
+   }
+  ],
+  "estimated_delivery": "2026-10-10T16:00:00",
+  "latest_event": "Arrived at destination terminal, condition exception noted at inspection",
+  "origin": "Savannah, GA",
+  "scheduled_delivery": "2026-10-10T15:00:00",
+  "service_level": "standard",
+  "shipment_id": "SYN-1007",
+  "status": "arrived"
+ },
+ {
+  "carrier": "Synthetic Carrier",
+  "condition_notes": "",
+  "customer_name": "Synthetic Office Mart",
+  "destination": "Charlotte, NC",
+  "documents": [],
+  "estimated_delivery": "2026-10-12T10:30:00",
+  "latest_event": "Earlier weather delay cleared at hub \u2014 back on schedule",
+  "origin": "Greenville, SC",
+  "scheduled_delivery": "2026-10-12T10:00:00",
+  "service_level": "standard",
+  "shipment_id": "SYN-1008",
+  "status": "in_transit"
+ },
+ {
+  "carrier": "Synthetic Carrier",
+  "condition_notes": "",
+  "customer_name": "Synthetic Hardware Co",
+  "destination": "Richmond, VA",
+  "documents": [
+   {
+    "doc_type": "bol",
+    "document_id": "BOL-SYN-1009",
+    "fields": {
+     "consignee": "Synthetic Hardware Co",
+     "quantity_units": "80",
+     "sku": "SKU-520",
+     "weight_kg": "640"
+    },
+    "raw_text": "Synthetic BOL"
+   },
+   {
+    "doc_type": "invoice",
+    "document_id": "INV-SYN-1009",
+    "fields": {
+     "consignee": "Synthetic Hardware Co",
+     "quantity_units": "75",
+     "sku": "SKU-520",
+     "weight_kg": "640"
+    },
+    "raw_text": "Synthetic invoice"
+   }
+  ],
+  "estimated_delivery": "2026-10-12T09:30:00",
+  "latest_event": "Departed origin terminal",
+  "origin": "Norfolk, VA",
+  "scheduled_delivery": "2026-10-12T09:00:00",
+  "service_level": "standard",
+  "shipment_id": "SYN-1009",
+  "status": "in_transit"
+ },
+ {
+  "carrier": "Synthetic Carrier",
+  "condition_notes": "",
+  "customer_name": "Synthetic Grocers Group",
+  "destination": "Greensboro, NC",
+  "documents": [],
+  "estimated_delivery": "2026-10-11T08:00:00",
+  "latest_event": "Missed delivery appointment at receiver, appointment rescheduled to next morning",
+  "origin": "Roanoke, VA",
+  "scheduled_delivery": "2026-10-10T08:00:00",
+  "service_level": "standard",
+  "shipment_id": "SYN-1010",
+  "status": "delivery_attempted"
+ },
+ {
+  "carrier": "Synthetic Carrier",
+  "condition_notes": "No damage reported; packaging intact on delivery",
+  "customer_name": "Synthetic Pharma Dist",
+  "destination": "Durham, NC",
+  "documents": [],
+  "estimated_delivery": "2026-10-09T13:00:00",
+  "latest_event": "Delivered on time, signed by receiver",
+  "origin": "Charlotte, NC",
+  "scheduled_delivery": "2026-10-09T13:00:00",
+  "service_level": "priority",
+  "shipment_id": "SYN-1011",
+  "status": "delivered"
+ },
+ {
+  "carrier": "Synthetic Carrier",
+  "condition_notes": "",
+  "customer_name": "Synthetic Textiles Ltd",
+  "destination": "Columbia, SC",
+  "documents": [],
+  "estimated_delivery": "2026-10-12T14:00:00",
+  "latest_event": "Terminal inspection complete: no damage, no leak found, seals intact and undamaged",
+  "origin": "Augusta, GA",
+  "scheduled_delivery": "2026-10-12T14:00:00",
+  "service_level": "standard",
+  "shipment_id": "SYN-1012",
+  "status": "in_transit"
+ }
+]

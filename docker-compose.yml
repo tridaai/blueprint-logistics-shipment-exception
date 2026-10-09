@@ -1,0 +1,9 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      MODEL_BACKEND: mock
+    # For a real LLM backend: set MODEL_BACKEND and pass your key via .env
+    # env_file: .env

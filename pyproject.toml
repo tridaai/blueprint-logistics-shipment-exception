@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trida-blueprint-logistics-shipment-exception"
+version = "0.1.0"
+description = "Trida AI Blueprint — Logistics Shipment Exception Agent (reference prototype)"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10,<3.13"
+# Direct dependencies are pinned EXACTLY (==). Loose >= ranges made pip's
+# resolver backtrack for minutes on Python 3.10 (see constraints.txt header).
+# The full transitive set is frozen in constraints.txt; install with:
+#   pip install -e ".[dev]" -c constraints.txt
+dependencies = [
+    "langgraph==0.6.11",
+    "fastapi==0.143.0",
+    "pydantic==2.14.0",
+    "uvicorn==0.54.0",
+    # Transitive via langchain-core -> langsmith (websockets>=15.0, unbounded).
+    # websockets 17.x requires Python >=3.11, which sent the 3.10 resolver
+    # into a backtracking cascade through langgraph/langchain/pydantic.
+    # 16.0 is the newest line that supports Python 3.10. Pinned here so a
+    # plain `pip install` (no -c constraints.txt) also resolves fast.
+    "websockets==16.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.1.1", "httpx==0.28.1"]
+llm = ["openai==3.27.0", "anthropic==1.13.0"]
+
+[project.scripts]
+shipment-agent = "shipment_agent.cli:main"
+shipment-agent-demo = "shipment_agent.demo:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+shipment_agent = ["data/*.json", "static/*.html", "static/brand/*.png", "static/brand/*.svg", "static/brand/*.ico"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

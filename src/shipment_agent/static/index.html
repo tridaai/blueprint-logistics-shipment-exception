@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trida AI Blueprint — Logistics Shipment Exception Agent</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="alternate icon" type="image/x-icon" href="/favicon.ico">
+<style>
+  :root { --indigo:#4F46E5; --indigo-dark:#3730A3; --ink:#0A0A0A; --muted:#6B7280; --line:#E5E7EB; --bg:#F9FAFB; --card:#FFFFFF; --ok:#047857; --bad:#B91C1C; --warn:#92400E; }
+  * { box-sizing:border-box; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin:0; color:var(--ink); background:var(--bg); }
+  header { background:var(--card); border-bottom:1px solid var(--line); padding:16px 24px; }
+  .header-inner { max-width:1080px; margin:0 auto; display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+  header img.logo { height:42px; width:auto; }
+  header .titles h1 { font-size:18px; margin:0 0 3px; }
+  header .titles h1 .accent { color:var(--indigo); }
+  header .titles p { margin:0; color:var(--muted); font-size:13px; }
+  .pill { margin-left:auto; font-size:12px; font-weight:700; color:var(--indigo); background:#EEF2FF; border:1px solid #C7D2FE; padding:5px 12px; border-radius:999px; text-transform:uppercase; letter-spacing:.05em; }
+  main { max-width:1080px; margin:0 auto; padding:24px; display:grid; gap:18px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:20px; box-shadow:0 1px 3px rgba(10,10,10,.05); }
+  .card h2 { font-size:14px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin:0 0 12px; }
+  .card h3 { font-size:15px; margin:18px 0 6px; }
+  label { font-size:13px; font-weight:600; display:block; margin:10px 0 6px; }
+  select, textarea, input { width:100%; padding:9px 10px; border:1px solid var(--line); border-radius:8px; font:inherit; font-size:14px; background:#fff; color:var(--ink); }
+  textarea { min-height:130px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size:12.5px; }
+  button { border:0; border-radius:8px; padding:10px 18px; font:inherit; font-size:14px; font-weight:600; cursor:pointer; }
+  .primary { background:var(--indigo); color:#fff; }
+  .primary:hover { background:var(--indigo-dark); }
+  .approve { background:var(--ok); color:#fff; }
+  .reject { background:#fff; color:var(--bad); border:1px solid var(--bad); }
+  button:disabled { opacity:.45; cursor:default; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  .badge { display:inline-block; padding:3px 10px; border-radius:999px; font-size:12px; font-weight:700; background:#EEF2FF; color:var(--indigo); text-transform:uppercase; letter-spacing:.04em; }
+  .badge.sev-high, .badge.sev-critical { background:#FEF2F2; color:var(--bad); }
+  .badge.sev-medium { background:#FFFBEB; color:var(--warn); }
+  .badge.sev-low { background:#ECFDF5; color:var(--ok); }
+  .status { font-weight:700; }
+  .status.approved { color:var(--ok); } .status.rejected { color:var(--bad); } .status.awaiting_approval { color:var(--indigo); }
+  pre { white-space:pre-wrap; background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:12px; font-size:13px; margin:0; overflow:auto; }
+  ul.checks { list-style:none; padding:0; margin:0; display:grid; gap:6px; font-size:14px; }
+  ul.signals { margin:6px 0 0; padding-left:18px; font-size:14px; }
+  .policy { font-size:14px; margin-bottom:8px; }
+  .policy small { color:var(--muted); }
+  .hidden { display:none; }
+  #error { color:var(--bad); font-size:14px; }
+  /* Pipeline trace */
+  .trace { display:grid; gap:0; }
+  .step { display:grid; grid-template-columns:34px 1fr; gap:12px; }
+  .step .rail { display:flex; flex-direction:column; align-items:center; }
+  .step .dot { width:26px; height:26px; border-radius:50%; background:var(--indigo); color:#fff; font-size:13px; font-weight:700; display:flex; align-items:center; justify-content:center; flex:none; }
+  .step.failed .dot { background:var(--bad); }
+  .step.awaiting .dot { background:#fff; color:var(--indigo); border:2px solid var(--indigo); }
+  .step .line { width:2px; flex:1; background:var(--line); min-height:14px; }
+  .step:last-child .line { display:none; }
+  .step .body { padding-bottom:18px; }
+  .step .body strong { font-size:14px; }
+  .step .st { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin-left:8px; }
+  .step p { margin:4px 0 6px; font-size:14px; }
+  .step details { font-size:13px; }
+  .step summary { cursor:pointer; color:var(--indigo); font-weight:600; }
+  .step details ul { margin:6px 0 0; padding-left:18px; }
+  .step details li { margin-bottom:3px; word-break:break-word; }
+  /* Architecture */
+  .arch-svg { width:100%; height:auto; }
+  /* Tables */
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th, td { text-align:left; padding:7px 10px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.05em; }
+  .big-stat { font-size:22px; font-weight:800; color:var(--indigo); }
+  .note { font-size:13px; color:var(--muted); }
+  footer { max-width:1080px; margin:0 auto; padding:0 24px 28px; color:var(--muted); font-size:12.5px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="header-inner">
+    <img class="logo" src="/static/brand/tridaai-logo.png" alt="Trida AI">
+    <div class="titles">
+      <h1>Blueprint Demo Console — <span class="accent">Logistics Shipment Exception Agent</span></h1>
+      <p>Reference prototype · synthetic data only · drafts stop at a human-approval gate — nothing is ever sent.</p>
+    </div>
+    <span class="pill">Prototype</span>
+  </div>
+</header>
+<main>
+  <section class="card">
+    <h2>1 · Pick a shipment</h2>
+    <label for="sample">Bundled synthetic sample</label>
+    <select id="sample"></select>
+    <label for="json">…or paste shipment JSON</label>
+    <textarea id="json" spellcheck="false"></textarea>
+    <div class="row" style="margin-top:12px">
+      <button class="primary" id="analyze">Analyze shipment</button>
+      <span id="error"></span>
+    </div>
+  </section>
+
+  <section class="card hidden" id="result">
+    <h2>2 · Agent result</h2>
+    <p>
+      <span class="badge" id="etype"></span>
+      <span class="badge" id="severity"></span>
+      <span style="font-size:14px">confidence <strong id="confidence"></strong></span>
+    </p>
+    <p id="rationale" style="font-size:14px"></p>
+    <div id="facts" style="font-size:14px"></div>
+    <p style="font-size:14px; margin-bottom:4px"><strong>Evidence (signals)</strong></p>
+    <ul class="signals" id="signals"></ul>
+
+    <p style="font-size:14px; margin:16px 0 6px"><strong>Retrieved policy context</strong></p>
+    <div id="policies"></div>
+
+    <p style="font-size:14px; margin:16px 0 6px"><strong>Draft customer update</strong></p>
+    <pre id="draft"></pre>
+
+    <p style="font-size:14px; margin:16px 0 6px"><strong>Claim packet (draft — not filed)</strong></p>
+    <pre id="packet"></pre>
+
+    <p style="font-size:14px; margin:16px 0 6px"><strong>Guardrail checks</strong></p>
+    <ul class="checks" id="checks"></ul>
+
+    <h3>Pipeline trace — what each step actually did</h3>
+    <div class="trace" id="trace"></div>
+
+    <h2 style="margin-top:20px">3 · Human decision</h2>
+    <p style="font-size:14px">Status: <span class="status awaiting_approval" id="status">awaiting_approval</span>
+       · external action taken: <strong>false</strong> (always, in this prototype)</p>
+    <label for="reviewer">Your name</label>
+    <input id="reviewer" placeholder="e.g. ops-lead" style="max-width:260px">
+    <div class="row" style="margin-top:12px">
+      <button class="approve" id="approve">Approve draft</button>
+      <button class="reject" id="reject">Reject draft</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Architecture — how this blueprint is built</h2>
+    <svg class="arch-svg" viewBox="0 0 1040 250" role="img" aria-label="Agent pipeline architecture diagram" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#4F46E5"></path>
+        </marker>
+      </defs>
+      <!-- row 1 -->
+      <g font-family="system-ui, sans-serif">
+        <rect x="10" y="20" width="190" height="72" rx="12" fill="#EEF2FF" stroke="#4F46E5" stroke-width="1.5"></rect>
+        <text x="105" y="50" text-anchor="middle" font-size="15" font-weight="700" fill="#0A0A0A">1 · Ingest</text>
+        <text x="105" y="72" text-anchor="middle" font-size="12" fill="#6B7280">facts computed by code</text>
+        <rect x="240" y="20" width="190" height="72" rx="12" fill="#EEF2FF" stroke="#4F46E5" stroke-width="1.5"></rect>
+        <text x="335" y="50" text-anchor="middle" font-size="15" font-weight="700" fill="#0A0A0A">2 · Classify</text>
+        <text x="335" y="72" text-anchor="middle" font-size="12" fill="#6B7280">deterministic rules</text>
+        <rect x="470" y="20" width="190" height="72" rx="12" fill="#EEF2FF" stroke="#4F46E5" stroke-width="1.5"></rect>
+        <text x="565" y="50" text-anchor="middle" font-size="15" font-weight="700" fill="#0A0A0A">3 · Retrieve</text>
+        <text x="565" y="72" text-anchor="middle" font-size="12" fill="#6B7280">policy context (RAG seam)</text>
+        <rect x="700" y="20" width="190" height="72" rx="12" fill="#EEF2FF" stroke="#4F46E5" stroke-width="1.5"></rect>
+        <text x="795" y="50" text-anchor="middle" font-size="15" font-weight="700" fill="#0A0A0A">4 · Draft</text>
+        <text x="795" y="72" text-anchor="middle" font-size="12" fill="#6B7280">mock backend · LLM swap</text>
+        <line x1="202" y1="56" x2="236" y2="56" stroke="#4F46E5" stroke-width="2" marker-end="url(#arr)"></line>
+        <line x1="432" y1="56" x2="466" y2="56" stroke="#4F46E5" stroke-width="2" marker-end="url(#arr)"></line>
+        <line x1="662" y1="56" x2="696" y2="56" stroke="#4F46E5" stroke-width="2" marker-end="url(#arr)"></line>
+        <line x1="795" y1="94" x2="795" y2="126" stroke="#4F46E5" stroke-width="2" marker-end="url(#arr)"></line>
+        <!-- row 2 -->
+        <rect x="700" y="130" width="190" height="72" rx="12" fill="#EEF2FF" stroke="#4F46E5" stroke-width="1.5"></rect>
+        <text x="795" y="160" text-anchor="middle" font-size="15" font-weight="700" fill="#0A0A0A">5 · Validate</text>
+        <text x="795" y="182" text-anchor="middle" font-size="12" fill="#6B7280">guardrails as code</text>
+        <rect x="470" y="130" width="190" height="72" rx="12" fill="#FFFFFF" stroke="#B91C1C" stroke-width="1.5"></rect>
+        <text x="565" y="160" text-anchor="middle" font-size="15" font-weight="700" fill="#0A0A0A">6 · Human approval</text>
+        <text x="565" y="182" text-anchor="middle" font-size="12" fill="#B91C1C">GATE — nothing is sent</text>
+        <rect x="240" y="130" width="190" height="72" rx="12" fill="#F9FAFB" stroke="#E5E7EB" stroke-width="1.5"></rect>
+        <text x="335" y="160" text-anchor="middle" font-size="15" font-weight="700" fill="#0A0A0A">END</text>
+        <text x="335" y="182" text-anchor="middle" font-size="12" fill="#6B7280">no external action in graph</text>
+        <line x1="696" y1="166" x2="664" y2="166" stroke="#4F46E5" stroke-width="2" marker-end="url(#arr)"></line>
+        <line x1="466" y1="166" x2="434" y2="166" stroke="#4F46E5" stroke-width="2" marker-end="url(#arr)"></line>
+        <text x="10" y="232" font-size="12.5" fill="#6B7280">LangGraph StateGraph (src/shipment_agent/graph.py) · FastAPI + CLI · Pydantic schemas define inputs and results</text>
+      </g>
+    </svg>
+    <p class="note">Full design decisions, trade-offs and failure modes: <code>docs/architecture.md</code> in this repository.</p>
+  </section>
+
+  <section class="card">
+    <h2>Evaluation — classifier golden dataset</h2>
+    <div id="evals-body">
+      <p class="note">Loading the latest eval summary…</p>
+    </div>
+    <p class="note">Honest framing: this is a <strong>synthetic regression gate</strong> — it proves the code
+    keeps passing its own golden cases. It is <strong>not</strong> a real-world accuracy claim. Regenerate with
+    <code>python evals/run_evals.py</code>.</p>
+  </section>
+
+  <section class="card">
+    <h2>Decision log — this session</h2>
+    <table>
+      <thead><tr><th>Time</th><th>Shipment</th><th>Exception</th><th>Severity</th><th>Event</th></tr></thead>
+      <tbody id="decision-log"><tr><td colspan="5" class="note">Nothing yet — analyze a shipment above.</td></tr></tbody>
+    </table>
+  </section>
+</main>
+<footer>
+  Trida AI Blueprint — reference prototype on synthetic data. No customer message was sent and no claim was
+  filed. Built to be taken and adapted: swap the model backend, the retriever, and the policy corpus first.
+</footer>
+
+<script>
+const $ = id => document.getElementById(id);
+let currentId = null;
+let currentMeta = null;
+
+async function loadSamples() {
+  const res = await fetch('/samples');
+  const samples = await res.json();
+  const sel = $('sample');
+  samples.forEach((s, i) => {
+    const opt = document.createElement('option');
+    opt.value = i;
+    opt.textContent = `${s.shipment_id} — ${s.origin} → ${s.destination} (${s.status})`;
+    sel.appendChild(opt);
+  });
+  const show = () => { $('json').value = JSON.stringify(samples[Number(sel.value)], null, 2); };
+  sel.addEventListener('change', show);
+  show();
+}
+
+function logEvent(shipmentId, exceptionType, severity, event) {
+  const tbody = $('decision-log');
+  if (tbody.querySelector('.note')) tbody.innerHTML = '';
+  const tr = document.createElement('tr');
+  const time = new Date().toLocaleTimeString();
+  [time, shipmentId, exceptionType, severity, event].forEach(text => {
+    const td = document.createElement('td');
+    td.textContent = text;
+    tr.appendChild(td);
+  });
+  tbody.prepend(tr);
+}
+
+function renderTrace(trace) {
+  const wrap = $('trace');
+  wrap.innerHTML = '';
+  (trace || []).forEach((step, i) => {
+    const div = document.createElement('div');
+    div.className = 'step' + (step.status === 'failed' ? ' failed' : step.status === 'awaiting' ? ' awaiting' : '');
+    const details = (step.details || []).map(d => `<li>${d}</li>`).join('');
+    div.innerHTML = `
+      <div class="rail"><div class="dot">${i + 1}</div><div class="line"></div></div>
+      <div class="body"><strong>${step.title}</strong><span class="st">${step.status}</span>
+        <p>${step.summary || ''}</p>
+        ${details ? `<details><summary>Step output</summary><ul>${details}</ul></details>` : ''}
+      </div>`;
+    wrap.appendChild(div);
+  });
+}
+
+function render(result) {
+  currentId = result.shipment_id;
+  currentMeta = { type: result.classification.exception_type, severity: result.classification.severity };
+  $('result').classList.remove('hidden');
+  $('etype').textContent = result.classification.exception_type;
+  const sev = $('severity');
+  sev.textContent = 'severity: ' + result.classification.severity;
+  sev.className = 'badge sev-' + result.classification.severity;
+  $('confidence').textContent = result.classification.confidence;
+  $('rationale').textContent = result.classification.rationale;
+  const facts = [];
+  if (result.delay_hours !== null && result.delay_hours !== undefined)
+    facts.push(`Computed delay vs schedule: <strong>${result.delay_hours} hours</strong>`);
+  (result.document_mismatches || []).forEach(m =>
+    facts.push(`Document mismatch — <strong>${m.field}</strong>: BOL=${m.bol_value} vs invoice=${m.invoice_value}`));
+  $('facts').innerHTML = facts.join('<br>');
+  $('signals').innerHTML = (result.classification.signals || []).map(s => `<li>${s}</li>`).join('') || '<li>(none)</li>';
+  $('policies').innerHTML = (result.policies || []).map(p =>
+    `<div class="policy"><strong>[${p.policy_id}]</strong> ${p.title} <small>(score ${p.score})</small><br><small>${p.snippet}</small></div>`).join('');
+  $('draft').textContent = 'Subject: ' + result.draft.subject + '\n\n' + result.draft.body;
+  $('packet').textContent = JSON.stringify(result.draft.claim_packet, null, 2);
+  $('checks').innerHTML = (result.validation.checks || []).map(c =>
+    `<li>${c.passed ? '✅' : '❌'} <strong>${c.name}</strong> — ${c.detail}</li>`).join('')
+    + (result.validation.warnings || []).map(w => `<li>⚠️ ${w}</li>`).join('');
+  renderTrace(result.trace);
+  setStatus(result.approval_status);
+  logEvent(result.shipment_id, currentMeta.type, currentMeta.severity, 'Analyzed — awaiting approval');
+}
+
+function setStatus(status) {
+  const el = $('status');
+  el.textContent = status;
+  el.className = 'status ' + status;
+  const decided = status !== 'awaiting_approval';
+  $('approve').disabled = decided;
+  $('reject').disabled = decided;
+}
+
+$('analyze').addEventListener('click', async () => {
+  $('error').textContent = '';
+  let payload;
+  try { payload = JSON.parse($('json').value); }
+  catch (e) { $('error').textContent = 'That JSON does not parse: ' + e.message; return; }
+  const res = await fetch('/shipments/analyze', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+  });
+  if (!res.ok) { $('error').textContent = 'Analyze failed (' + res.status + '): ' + await res.text(); return; }
+  render(await res.json());
+});
+
+async function decide(path) {
+  $('error').textContent = '';
+  const reviewer = $('reviewer').value.trim() || 'ui-reviewer';
+  const res = await fetch(`/shipments/${currentId}/${path}`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(path === 'approve' ? {approver: reviewer} : {reviewer: reviewer, reason: 'Rejected from web UI'})
+  });
+  if (!res.ok) { $('error').textContent = path + ' failed (' + res.status + '): ' + await res.text(); return; }
+  const result = await res.json();
+  setStatus(result.approval_status);
+  if (currentMeta) logEvent(currentId, currentMeta.type, currentMeta.severity,
+    (result.approval_status === 'approved' ? 'Approved' : 'Rejected') + ' by ' + reviewer);
+}
+$('approve').addEventListener('click', () => decide('approve'));
+$('reject').addEventListener('click', () => decide('reject'));
+
+async function loadEvals() {
+  const body = $('evals-body');
+  try {
+    const res = await fetch('/evals/results');
+    if (!res.ok) throw new Error('absent');
+    const r = await res.json();
+    const pct = v => (v * 100).toFixed(1) + '%';
+    const rows = Object.entries(r.per_type || {}).map(([t, v]) =>
+      `<tr><td>${t}</td><td>${v.correct}/${v.total}</td><td>${pct(v.accuracy)}</td></tr>`).join('');
+    body.innerHTML = `
+      <div class="row" style="gap:28px; margin-bottom:10px">
+        <div><div class="big-stat">${pct(r.type_accuracy)}</div><div class="note">exception-type accuracy</div></div>
+        <div><div class="big-stat">${pct(r.severity_accuracy)}</div><div class="note">severity accuracy</div></div>
+        <div><div class="big-stat">${r.total_cases}</div><div class="note">synthetic cases · gate ${pct(r.threshold)} · ${r.passed ? 'PASS' : 'FAIL'}</div></div>
+      </div>
+      <table><thead><tr><th>Exception type</th><th>Correct</th><th>Accuracy</th></tr></thead><tbody>${rows}</tbody></table>
+      <p class="note" style="margin-top:8px">Last run: ${r.generated_at} · dataset: ${r.dataset}</p>`;
+  } catch (e) {
+    body.innerHTML = '<p class="note">No eval results found yet — run <code>python evals/run_evals.py</code> to generate the summary, then reload.</p>';
+  }
+}
+
+loadSamples();
+loadEvals();
+</script>
+</body>
+</html>
