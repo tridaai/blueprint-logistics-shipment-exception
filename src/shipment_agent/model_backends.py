@@ -35,6 +35,7 @@ import re
 from typing import Protocol
 
 from .config import env_float, env_str, load_dotenv
+from .errors import translate_provider_error
 from .prompts import (
     CLASSIFY_SYSTEM_PROMPT,
     CLASSIFY_USER_TEMPLATE,
@@ -452,6 +453,11 @@ class OpenAIBackend(_BaseLLMBackend):
         client_kwargs: dict = {
             "api_key": api_key,
             "timeout": env_float("LLM_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS),
+            # No silent SDK retries: a dead endpoint must fail in seconds,
+            # and degradation is the pipeline's job (recorded fallbacks),
+            # not the transport's. Retrying is a deployment choice made
+            # in front of this service, not inside it.
+            "max_retries": 0,
         }
         # Optional: point at Azure OpenAI, a LiteLLM gateway, or any hosted
         # OpenAI-compatible endpoint without code changes.
@@ -460,16 +466,22 @@ class OpenAIBackend(_BaseLLMBackend):
             client_kwargs["base_url"] = base_url
         self._client = OpenAI(**client_kwargs)
         self._model = env_str("OPENAI_MODEL", "gpt-4o-mini")
+        self.base_url = base_url or "https://api.openai.com/v1"
 
-    def _complete(self, system: str, user: str, max_tokens: int = 600) -> str:  # pragma: no cover - network
-        response = self._client.chat.completions.create(
-            model=self._model,
-            max_tokens=max_tokens,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-        )
+    def _complete(self, system: str, user: str, max_tokens: int = 600) -> str:
+        try:
+            response = self._client.chat.completions.create(
+                model=self._model,
+                max_tokens=max_tokens,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+            )
+        except Exception as exc:
+            raise translate_provider_error(
+                exc, backend=self.name, base_url=getattr(self, "base_url", None)
+            ) from exc
         usage = getattr(response, "usage", None)
         if usage is not None:
             self._record_usage(
@@ -495,20 +507,27 @@ class AnthropicBackend(_BaseLLMBackend):
         client_kwargs: dict = {
             "api_key": api_key,
             "timeout": env_float("LLM_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS),
+            "max_retries": 0,  # see OpenAIBackend — degradation is the pipeline's job
         }
         base_url = env_str("ANTHROPIC_BASE_URL")
         if base_url:
             client_kwargs["base_url"] = base_url
         self._client = anthropic.Anthropic(**client_kwargs)
         self._model = env_str("ANTHROPIC_MODEL", "claude-sonnet-4-5")
+        self.base_url = base_url or "https://api.anthropic.com"
 
-    def _complete(self, system: str, user: str, max_tokens: int = 600) -> str:  # pragma: no cover - network
-        message = self._client.messages.create(
-            model=self._model,
-            max_tokens=max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-        )
+    def _complete(self, system: str, user: str, max_tokens: int = 600) -> str:
+        try:
+            message = self._client.messages.create(
+                model=self._model,
+                max_tokens=max_tokens,
+                system=system,
+                messages=[{"role": "user", "content": user}],
+            )
+        except Exception as exc:
+            raise translate_provider_error(
+                exc, backend=self.name, base_url=getattr(self, "base_url", None)
+            ) from exc
         usage = getattr(message, "usage", None)
         if usage is not None:
             self._record_usage(
@@ -539,10 +558,12 @@ class OllamaBackend(OpenAIBackend):
             from openai import OpenAI
         except ImportError as exc:
             raise _missing_sdk_error("ollama", "OpenAI") from exc
+        self.base_url = env_str("OLLAMA_BASE_URL", "http://localhost:11434/v1")
         self._client = OpenAI(
             api_key="ollama",  # placeholder — Ollama ignores it
-            base_url=env_str("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
+            base_url=self.base_url,
             timeout=env_float("LLM_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS),
+            max_retries=0,  # see OpenAIBackend — degradation is the pipeline's job
         )
         self._model = env_str("OLLAMA_MODEL", "llama3.1")
 

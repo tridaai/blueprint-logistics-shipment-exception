@@ -87,6 +87,8 @@ def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
         f"rules: {rule_classification['exception_type']} · severity "
         f"{rule_classification['severity']} · confidence {rule_classification['confidence']}"
     )
+    if final.get("classify_note"):
+        classify_details.append(f"llm provider error: {final['classify_note']}")
     if cross_check:
         if cross_check.get("llm_exception_type"):
             classify_details.append(
@@ -135,6 +137,10 @@ def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
             extract_details.append(
                 f"{extraction['document_id']}: fields source-provided "
                 "(LLM extraction runs only with a provider backend configured)"
+            )
+        if extraction.get("note"):
+            extract_details.append(
+                f"{extraction['document_id']}: fallback — {extraction['note']}"
             )
     extract_details += [
         f"discrepancy — {d}" for d in discrepancies_from_dicts(extractions)
@@ -201,6 +207,7 @@ def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
                 f"root cause: {final['diagnosis']['root_cause']}",
                 f"composition: {'LLM over the computed evidence' if final['diagnosis']['source'] == 'llm' else 'deterministic template over the computed evidence'}",
             ]
+            + ([f"fallback: {final['diagnosis']['note']}"] if final["diagnosis"].get("note") else [])
             + [f"evidence: {e}" for e in final["diagnosis"]["evidence"]],
         ),
         TraceStep(
@@ -219,7 +226,8 @@ def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
                 f"(ETA +{o['eta_improvement_hours']}h · added cost {o['added_cost_units']} units · "
                 f"SLA {o['sla_score']})" + (" <- recommended" if o["recommended"] else "")
                 for o in final.get("recovery_options", [])
-            ],
+            ]
+            + [f"fallback: {n}" for n in final.get("options_notes", [])],
         ),
         TraceStep(
             name="draft",
@@ -257,12 +265,14 @@ class AgentState(TypedDict, total=False):
     classification: dict
     rule_classification: dict
     llm_classification: dict | None
+    classify_note: str | None
     cross_check: dict | None
     classification_suggestion: dict | None
     policies: list[dict]
     retrieval_info: dict
     diagnosis: dict
     recovery_options: list[dict]
+    options_notes: list[str]
     recommended_option_id: str | None
     draft: dict
     validation: dict
@@ -298,12 +308,13 @@ def build_graph(
         shipment = ShipmentInput.model_validate(state["shipment"])
         mismatches = compare_documents(shipment.documents)
         rule_result = classify_shipment(shipment, mismatches)
-        llm = _llm_classify(state, shipment)
+        llm, classify_note = _llm_classify(state, shipment)
         if llm is _NO_LLM_BACKEND:
             return {
                 "classification": rule_result.model_dump(mode="json"),
                 "rule_classification": rule_result.model_dump(mode="json"),
                 "llm_classification": None,
+                "classify_note": None,
                 "cross_check": None,
                 "classification_suggestion": None,
             }
@@ -318,6 +329,7 @@ def build_graph(
             "classification": final.model_dump(mode="json"),
             "rule_classification": rule_result.model_dump(mode="json"),
             "llm_classification": llm,
+            "classify_note": classify_note,
             "cross_check": cross.model_dump(),
             "classification_suggestion": suggestion,
         }
@@ -325,15 +337,18 @@ def build_graph(
     def _llm_classify(state: AgentState, shipment: ShipmentInput):
         """The LLM half of the cross-check — LLM backends only.
 
-        Returns the ``_NO_LLM_BACKEND`` sentinel when the backend has no
-        LLM classification (default mode: no cross-check at all), a parsed
+        Returns ``(value, error_note)``. ``value`` is the
+        ``_NO_LLM_BACKEND`` sentinel when the backend has no LLM
+        classification (default mode: no cross-check at all), a parsed
         classification dict in provider mode, or ``None`` when the
         provider call failed or its reply was unusable — the cross-check
-        then records ``rules_only`` and the run continues.
+        then records ``rules_only`` and the run continues. A provider
+        failure also returns its translated message as ``error_note``
+        so the trace records the degradation instead of hiding it.
         """
         classify_fn = getattr(backend, "classify_with_llm", None)
         if classify_fn is None:
-            return _NO_LLM_BACKEND
+            return _NO_LLM_BACKEND, None
         context = DraftContext(
             shipment_id=shipment.shipment_id,
             origin=shipment.origin,
@@ -346,9 +361,9 @@ def build_graph(
             mismatches=state.get("document_mismatches", []),
         )
         try:
-            return classify_fn(context)
-        except Exception:  # the cross-check never fails the run
-            return None
+            return classify_fn(context), None
+        except Exception as exc:  # the cross-check never fails the run
+            return None, str(exc)
 
     def retrieve(state: AgentState) -> AgentState:
         classification = state["classification"]
@@ -418,17 +433,20 @@ def build_graph(
             diagnosis_summary=state["diagnosis"]["summary"],
             policy_details=state.get("policies", []),
         )
+        notes: list[str] = []
         scored = build_recovery_options(
             exception_type=classification["exception_type"],
             severity=classification["severity"],
             delay_hours=state.get("delay_hours"),
             backend=backend,
             context=context,
+            notes=notes,
         )
         recommended = next((o for o in scored if o.recommended), None)
         return {
             "recovery_options": [o.model_dump() for o in scored],
             "recommended_option_id": recommended.option_id if recommended else None,
+            "options_notes": notes,
         }
 
     def draft(state: AgentState) -> AgentState:

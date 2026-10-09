@@ -99,10 +99,17 @@ def extract_documents(shipment: ShipmentInput, backend) -> list[DocumentExtracti
                 document.raw_text,
                 list(COMPARE_FIELDS),
             )
-        except Exception:  # extraction is evidence, never a run failure
-            extracted = None
+        except Exception as exc:  # extraction is evidence, never a run failure
+            fallback = _provided_extraction(document)
+            fallback.note = (
+                f"LLM extraction failed ({exc}) — provided fields used instead"
+            )
+            results.append(fallback)
+            continue
         if extracted is None:
-            results.append(_provided_extraction(document))
+            fallback = _provided_extraction(document)
+            fallback.note = "LLM extraction reply was unusable — provided fields used instead"
+            results.append(fallback)
         else:
             results.append(_cross_check(document, extracted))
     return results

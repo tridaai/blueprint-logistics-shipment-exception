@@ -78,18 +78,19 @@ def main() -> None:
 
     # Backend + retriever come from the environment (.env loaded by the
     # factories). A misconfiguration (e.g. MODEL_BACKEND=openai with no
-    # key) fails loudly with the actionable message, not a traceback.
+    # key) fails loudly with the actionable message, not a traceback —
+    # and so does a provider failure mid-run (e.g. Ollama not running):
+    # provider errors arrive pre-translated via errors.ProviderError.
     try:
         backend = get_backend()
         retriever = get_retriever()
+        shipments = _load_shipments(args.file)
+        selected = shipments if args.all else [shipments[args.index]]
+        for shipment in selected:
+            _print_result(shipment, backend=backend, retriever=retriever)
     except (RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
-
-    shipments = _load_shipments(args.file)
-    selected = shipments if args.all else [shipments[args.index]]
-    for shipment in selected:
-        _print_result(shipment, backend=backend, retriever=retriever)
 
 
 if __name__ == "__main__":

@@ -130,9 +130,12 @@ def build_diagnosis(
     )
     try:
         llm = diagnose_fn(context)
-    except Exception:  # the diagnosis never fails the run
+    except Exception as exc:  # the diagnosis never fails the run
         llm = None
+        template.note = f"LLM diagnosis failed ({exc}) — template diagnosis used"
     if not llm:
+        if not template.note:
+            template.note = "LLM diagnosis reply was unusable — template diagnosis used"
         return template
     return Diagnosis(
         root_cause=llm["root_cause"],

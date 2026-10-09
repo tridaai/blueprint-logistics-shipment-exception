@@ -111,15 +111,25 @@ def build_recovery_options(
     delay_hours: float | None,
     backend=None,
     context: DraftContext | None = None,
+    notes: list[str] | None = None,
 ) -> list[RecoveryOption]:
-    """Propose (template or LLM), validate kinds, score in code, recommend."""
+    """Propose (template or LLM), validate kinds, score in code, recommend.
+
+    When ``notes`` is given, a provider failure that degraded this node
+    to template proposals is appended to it — degradation is recorded,
+    never silent.
+    """
     proposals: list[dict] | None = None
     propose_fn = getattr(backend, "propose_options", None) if backend is not None else None
     if propose_fn is not None and context is not None:
         try:
             raw = propose_fn(context)
-        except Exception:  # proposals never fail the run
+        except Exception as exc:  # proposals never fail the run
             raw = None
+            if notes is not None:
+                notes.append(
+                    f"LLM option proposals failed ({exc}) — template proposals used"
+                )
         if raw:
             seen: set[str] = set()
             valid: list[dict] = []

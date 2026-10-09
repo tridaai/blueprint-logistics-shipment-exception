@@ -198,6 +198,7 @@ class DocumentExtraction(BaseModel):
     doc_type: str
     source: str  # llm | provided
     fields: list[FieldExtraction] = Field(default_factory=list)
+    note: str = ""  # set when the LLM path failed and provided fields were used
 
 
 class ClassificationCrossCheck(BaseModel):
@@ -236,6 +237,7 @@ class Diagnosis(BaseModel):
     evidence: list[str] = Field(default_factory=list)
     citations: list[str] = Field(default_factory=list)
     source: str  # template | llm
+    note: str = ""  # set when the LLM composition failed and the template was used
 
 
 class RecoveryOption(BaseModel):

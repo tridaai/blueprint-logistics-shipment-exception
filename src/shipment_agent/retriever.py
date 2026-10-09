@@ -29,6 +29,7 @@ import re
 from typing import Protocol
 
 from .config import env_float, env_str, load_dotenv
+from .errors import translate_provider_error
 from .model_backends import DEFAULT_TIMEOUT_SECONDS, _missing_sdk_error
 from .policies_data import POLICIES
 from .schemas import RetrievedPolicy
@@ -101,9 +102,23 @@ class SemanticRetriever:
 
     name = "semantic"
 
-    def __init__(self, policies: list[dict[str, str]] | None = None) -> None:
+    def __init__(
+        self,
+        policies: list[dict[str, str]] | None = None,
+        *,
+        mode_label: str = "semantic",
+    ) -> None:
         self._policies = policies if policies is not None else POLICIES
-        self._client, self._model = self._build_embeddings_client()
+        # The RETRIEVER value this instance serves ("semantic", or
+        # "hybrid" when the hybrid retriever owns it) — error messages
+        # name the value the operator actually set, never a sibling mode.
+        self._mode_label = mode_label
+        (
+            self._client,
+            self._model,
+            self._embeddings_backend,
+            self._embeddings_base_url,
+        ) = self._build_embeddings_client()
         self._corpus_vectors: list[list[float]] | None = None
         # Which store actually serves queries: "chroma" when the optional
         # vectordb extra is installed (local persistent store), else
@@ -112,8 +127,7 @@ class SemanticRetriever:
         self._chroma_collection = None
         self._chroma_checked = False
 
-    @staticmethod
-    def _build_embeddings_client():
+    def _build_embeddings_client(self):
         """Resolve the embeddings client, failing loudly when unusable.
 
         Embeddings follow the configured stack:
@@ -126,6 +140,8 @@ class SemanticRetriever:
           Anthropic offers no embeddings API. That is stated, not hidden:
           with ``MODEL_BACKEND=anthropic`` (or ``mock``) an
           ``OPENAI_API_KEY`` is still required, and the error says so.
+
+        Returns (client, model, provider_name, base_url).
         """
         load_dotenv()
         backend = (env_str("MODEL_BACKEND") or "mock").lower()
@@ -135,12 +151,14 @@ class SemanticRetriever:
                 from openai import OpenAI
             except ImportError as exc:
                 raise _missing_sdk_error("ollama (embeddings)", "OpenAI") from exc
+            base_url = env_str("OLLAMA_BASE_URL", "http://localhost:11434/v1")
             client = OpenAI(
                 api_key="ollama",  # placeholder — Ollama ignores it
-                base_url=env_str("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
+                base_url=base_url,
                 timeout=timeout,
+                max_retries=0,
             )
-            return client, env_str("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text")
+            return client, env_str("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text"), "ollama", base_url
         if not env_str("OPENAI_API_KEY"):
             hint = (
                 f" MODEL_BACKEND={backend} has no embeddings API to use instead —"
@@ -149,7 +167,7 @@ class SemanticRetriever:
                 else ""
             )
             raise RuntimeError(
-                "RETRIEVER=semantic needs embeddings, which run through OpenAI, "
+                f"RETRIEVER={self._mode_label} needs embeddings, which run through OpenAI, "
                 "but OPENAI_API_KEY is not set." + hint
                 + " Add OPENAI_API_KEY=<your key> to the .env file in the repo root "
                 "(copy .env.example to .env) or export it, set MODEL_BACKEND=ollama "
@@ -162,15 +180,28 @@ class SemanticRetriever:
         client_kwargs: dict = {
             "api_key": env_str("OPENAI_API_KEY"),
             "timeout": timeout,
+            "max_retries": 0,
         }
         base_url = env_str("OPENAI_BASE_URL")
         if base_url:
             client_kwargs["base_url"] = base_url
         model = env_str("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
-        return OpenAI(**client_kwargs), model
+        return (
+            OpenAI(**client_kwargs),
+            model,
+            "openai",
+            base_url or "https://api.openai.com/v1",
+        )
 
     def _embed(self, texts: list[str]) -> list[list[float]]:
-        response = self._client.embeddings.create(model=self._model, input=texts)
+        try:
+            response = self._client.embeddings.create(model=self._model, input=texts)
+        except Exception as exc:
+            raise translate_provider_error(
+                exc,
+                backend=f"{self._embeddings_backend} embeddings (RETRIEVER={self._mode_label})",
+                base_url=self._embeddings_base_url,
+            ) from exc
         ordered = sorted(response.data, key=lambda d: getattr(d, "index", 0))
         return [list(d.embedding) for d in ordered]
 
@@ -342,7 +373,7 @@ class HybridRetriever:
 
     def __init__(self, policies: list[dict[str, str]] | None = None) -> None:
         self._keyword = KeywordRetriever(policies)
-        self._semantic = SemanticRetriever(policies)
+        self._semantic = SemanticRetriever(policies, mode_label="hybrid")
         self.last_stats: dict[str, int] = {}
 
     @property

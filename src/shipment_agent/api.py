@@ -10,12 +10,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .config import env_str, load_dotenv
+from .errors import ProviderError
 from .policies_data import POLICIES
 from .samples import load_sample_shipments
 from .schemas import AgentResult, ShipmentInput
@@ -54,6 +55,13 @@ app = FastAPI(
 )
 
 service = ShipmentService()
+
+
+@app.exception_handler(ProviderError)
+def provider_error_handler(request: Request, exc: ProviderError) -> JSONResponse:
+    """A provider failure is a clean 502 with the actionable, translated
+    message (backend, endpoint, likely fix) — never a stack dump."""
+    return JSONResponse(status_code=502, content={"detail": str(exc)})
 
 _STATIC_DIR = Path(__file__).parent / "static"
 _INDEX_HTML = _STATIC_DIR / "index.html"
