@@ -90,6 +90,8 @@
     <select id="sample"></select>
     <label for="json">…or paste shipment JSON</label>
     <textarea id="json" spellcheck="false"></textarea>
+    <label for="apikey">API key <span style="font-weight:400; color:var(--muted)">(only when the server runs with API_KEY set — locally the API is open)</span></label>
+    <input id="apikey" type="password" placeholder="X-API-Key value" style="max-width:320px" autocomplete="off">
     <div class="row" style="margin-top:12px">
       <button class="primary" id="analyze">Analyze shipment</button>
       <span id="error"></span>
@@ -206,8 +208,13 @@ const $ = id => document.getElementById(id);
 let currentId = null;
 let currentMeta = null;
 
+function apiHeaders() {
+  const key = $('apikey').value.trim();
+  return key ? {'X-API-Key': key} : {};
+}
+
 async function loadSamples() {
-  const res = await fetch('/samples');
+  const res = await fetch('/samples', {headers: apiHeaders()});
   const samples = await res.json();
   const sel = $('sample');
   samples.forEach((s, i) => {
@@ -295,7 +302,7 @@ $('analyze').addEventListener('click', async () => {
   try { payload = JSON.parse($('json').value); }
   catch (e) { $('error').textContent = 'That JSON does not parse: ' + e.message; return; }
   const res = await fetch('/shipments/analyze', {
-    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    method: 'POST', headers: {'Content-Type': 'application/json', ...apiHeaders()}, body: JSON.stringify(payload)
   });
   if (!res.ok) { $('error').textContent = 'Analyze failed (' + res.status + '): ' + await res.text(); return; }
   render(await res.json());
@@ -305,7 +312,7 @@ async function decide(path) {
   $('error').textContent = '';
   const reviewer = $('reviewer').value.trim() || 'ui-reviewer';
   const res = await fetch(`/shipments/${currentId}/${path}`, {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
+    method: 'POST', headers: {'Content-Type': 'application/json', ...apiHeaders()},
     body: JSON.stringify(path === 'approve' ? {approver: reviewer} : {reviewer: reviewer, reason: 'Rejected from web UI'})
   });
   if (!res.ok) { $('error').textContent = path + ' failed (' + res.status + '): ' + await res.text(); return; }
@@ -320,7 +327,7 @@ $('reject').addEventListener('click', () => decide('reject'));
 async function loadEvals() {
   const body = $('evals-body');
   try {
-    const res = await fetch('/evals/results');
+    const res = await fetch('/evals/results', {headers: apiHeaders()});
     if (!res.ok) throw new Error('absent');
     const r = await res.json();
     const pct = v => (v * 100).toFixed(1) + '%';
@@ -338,6 +345,8 @@ async function loadEvals() {
     body.innerHTML = '<p class="note">No eval results found yet — run <code>python evals/run_evals.py</code> to generate the summary, then reload.</p>';
   }
 }
+
+$('apikey').addEventListener('change', () => { loadSamples(); loadEvals(); });
 
 loadSamples();
 loadEvals();

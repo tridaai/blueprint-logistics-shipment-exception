@@ -16,7 +16,7 @@
         "output_tokens": 200,
         "calls": 5
       },
-      "latency_seconds": 0.015
+      "latency_seconds": 0.013
     }
   ],
   "summary": {

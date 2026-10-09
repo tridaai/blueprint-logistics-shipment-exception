@@ -10,12 +10,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .config import load_dotenv
+from .config import env_str, load_dotenv
 from .policies_data import POLICIES
 from .samples import load_sample_shipments
 from .schemas import AgentResult, ShipmentInput
@@ -24,6 +24,28 @@ from .service import ShipmentService
 # Load the repo-root .env at startup (real environment variables win), so
 # MODEL_BACKEND / RETRIEVER / API keys can live in the file — see .env.example.
 load_dotenv()
+
+
+def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
+    """Optional API-key gate, enabled by setting ``API_KEY``.
+
+    When ``API_KEY`` is set, every data endpoint (read + mutating)
+    requires the matching ``X-API-Key`` header. When it is unset the
+    API is open — the local-dev default, stated here and in the docs
+    rather than implied. The console page and /health stay open either
+    way; the console carries an API-key field for the gated calls.
+    """
+    expected = env_str("API_KEY")
+    if not expected:
+        return
+    if x_api_key != expected:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing API key (send the X-API-Key header).",
+        )
+
+
+_AUTH = [Depends(require_api_key)]
 
 app = FastAPI(
     title="Trida AI Blueprint — Logistics Shipment Exception Agent",
@@ -51,7 +73,7 @@ def favicon_ico() -> FileResponse:
     return FileResponse(_BRAND_DIR / "favicon.ico", media_type="image/x-icon")
 
 
-@app.get("/evals/results")
+@app.get("/evals/results", dependencies=_AUTH)
 def eval_results() -> dict:
     """Latest eval summary, as emitted by ``evals/run_evals.py``.
 
@@ -92,22 +114,22 @@ def health() -> dict[str, str]:
     return {"status": "ok", "prototype": "trida-blueprint-logistics-shipment-exception"}
 
 
-@app.get("/policies")
+@app.get("/policies", dependencies=_AUTH)
 def list_policies() -> list[dict[str, str]]:
     return POLICIES
 
 
-@app.get("/samples")
+@app.get("/samples", dependencies=_AUTH)
 def list_samples() -> list[dict]:
     return load_sample_shipments()
 
 
-@app.post("/shipments/analyze", response_model=AgentResult)
+@app.post("/shipments/analyze", response_model=AgentResult, dependencies=_AUTH)
 def analyze(shipment: ShipmentInput) -> AgentResult:
     return service.analyze(shipment)
 
 
-@app.get("/shipments/{shipment_id}", response_model=AgentResult)
+@app.get("/shipments/{shipment_id}", response_model=AgentResult, dependencies=_AUTH)
 def get_result(shipment_id: str) -> AgentResult:
     result = service.get(shipment_id)
     if result is None:
@@ -115,7 +137,7 @@ def get_result(shipment_id: str) -> AgentResult:
     return result
 
 
-@app.post("/shipments/{shipment_id}/approve", response_model=AgentResult)
+@app.post("/shipments/{shipment_id}/approve", response_model=AgentResult, dependencies=_AUTH)
 def approve(shipment_id: str, request: ApproveRequest) -> AgentResult:
     try:
         return service.approve(shipment_id, approver=request.approver)
@@ -125,7 +147,7 @@ def approve(shipment_id: str, request: ApproveRequest) -> AgentResult:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@app.post("/shipments/{shipment_id}/reject", response_model=AgentResult)
+@app.post("/shipments/{shipment_id}/reject", response_model=AgentResult, dependencies=_AUTH)
 def reject(shipment_id: str, request: RejectRequest) -> AgentResult:
     try:
         return service.reject(shipment_id, reviewer=request.reviewer, reason=request.reason)
