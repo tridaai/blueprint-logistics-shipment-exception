@@ -1,4 +1,4 @@
-.PHONY: demo test evals serve install install-pip
+.PHONY: demo test evals llm-evals serve install install-pip
 
 install:  ## Install the locked set with uv (primary workflow)
 	uv sync --extra dev
@@ -14,6 +14,9 @@ test:  ## Run the pytest suite
 
 evals:  ## Run the golden-dataset evals (gate: type accuracy >= 90%)
 	uv run python evals/run_evals.py
+
+llm-evals:  ## Opt-in LLM-mode eval pack (needs a provider key; NOT part of the default gate)
+	uv run python evals/run_llm_evals.py
 
 serve:  ## Serve the API + web UI on http://localhost:8000
 	uv run uvicorn shipment_agent.api:app --port 8000

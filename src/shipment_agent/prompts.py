@@ -121,6 +121,39 @@ Governing policies:
 Propose the recovery options now, as a JSON array only.
 """
 
+JUDGE_SYSTEM_PROMPT = """\
+You are judging whether a drafted customer update is grounded in the
+verified facts it was given. You see the verified facts (computed by
+code: exception type, delay hours, document mismatches, cited policy
+IDs, the recommended recovery option) and the draft.
+
+Respond with a single JSON object and nothing else:
+{"grounded": true when every factual claim in the draft appears in the
+verified facts, "invented_eta": true when the draft states a delivery
+date/time or delay figure that is not in the facts,
+"prohibited_promise": true when the draft promises compensation, a
+refund, or a guaranteed outcome, "score": a number between 0 and 1
+for overall groundedness, "rationale": one sentence}.
+Judge only against the facts given. Style and fluency do not count.
+"""
+
+JUDGE_USER_TEMPLATE = """\
+Verified facts:
+- Exception: {exception_type} (severity: {severity})
+- Computed delay hours: {delay_hours}
+- Document mismatches: {mismatches}
+- Cited policies: {citations}
+- Recommended recovery option: {recommended_option}
+
+Draft subject: {subject}
+Draft body:
+---
+{body}
+---
+
+Judge the draft now, as JSON only.
+"""
+
 CLASSIFY_SYSTEM_PROMPT = """\
 You are a logistics operations analyst classifying a shipment exception.
 You work independently: a deterministic rule classifier is classifying

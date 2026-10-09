@@ -234,6 +234,42 @@ class _BaseLLMBackend:
         """One provider completion. Implemented by each provider backend."""
         raise NotImplementedError
 
+    # -- usage accounting (the LLM eval pack reports tokens + cost) ------
+    def _record_usage(self, usage: dict) -> None:
+        totals = getattr(self, "_usage_totals", None)
+        if totals is None:
+            totals = self._usage_totals = {"input_tokens": 0, "output_tokens": 0, "calls": 0}
+        totals["input_tokens"] += int(usage.get("input_tokens", 0) or 0)
+        totals["output_tokens"] += int(usage.get("output_tokens", 0) or 0)
+        totals["calls"] += 1
+
+    def usage_totals(self) -> dict:
+        """Cumulative provider usage since construction / last reset."""
+        return dict(
+            getattr(self, "_usage_totals", {"input_tokens": 0, "output_tokens": 0, "calls": 0})
+        )
+
+    def reset_usage(self) -> None:
+        self._usage_totals = {"input_tokens": 0, "output_tokens": 0, "calls": 0}
+
+    def complete_with_usage(
+        self, system: str, user: str, max_tokens: int = 600, model: str | None = None
+    ) -> tuple[str, dict | None]:
+        """One completion plus the usage it consumed (``None`` when the
+        provider/fake reported none). Used by the LLM-judge eval pack,
+        where the judge may run on a different model than the pipeline."""
+        original_model = self._model
+        if model:
+            self._model = model
+        before = self.usage_totals()
+        try:
+            text = self._complete(system, user, max_tokens=max_tokens)
+        finally:
+            self._model = original_model
+        after = self.usage_totals()
+        delta = {k: after[k] - before[k] for k in after}
+        return text, (delta if delta["calls"] else None)
+
     def _render_prompt(self, context: DraftContext) -> str:
         policies = "\n".join(
             f"- [{p['policy_id']}] {p['title']}: {p['snippet']}"
@@ -434,6 +470,14 @@ class OpenAIBackend(_BaseLLMBackend):
                 {"role": "user", "content": user},
             ],
         )
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            self._record_usage(
+                {
+                    "input_tokens": getattr(usage, "prompt_tokens", 0),
+                    "output_tokens": getattr(usage, "completion_tokens", 0),
+                }
+            )
         return response.choices[0].message.content or ""
 
 
@@ -465,6 +509,14 @@ class AnthropicBackend(_BaseLLMBackend):
             system=system,
             messages=[{"role": "user", "content": user}],
         )
+        usage = getattr(message, "usage", None)
+        if usage is not None:
+            self._record_usage(
+                {
+                    "input_tokens": getattr(usage, "input_tokens", 0),
+                    "output_tokens": getattr(usage, "output_tokens", 0),
+                }
+            )
         return "".join(block.text for block in message.content if block.type == "text")
 
 
