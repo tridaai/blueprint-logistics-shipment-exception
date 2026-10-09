@@ -330,6 +330,7 @@ class AgentResult(BaseModel):
     validation: ValidationResult
     trace: list[TraceStep] = Field(default_factory=list)
     approval_status: str = "awaiting_approval"
+    decided_by: str | None = None  # who approved/rejected, once decided
     external_action_taken: bool = False
     disclaimer: str = (
         "Reference prototype running on synthetic data. No external system "

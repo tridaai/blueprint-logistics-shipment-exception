@@ -62,6 +62,7 @@ class ShipmentService:
         record.approved = True
         record.approver = approver
         record.result.approval_status = "approved"
+        record.result.decided_by = approver
         # NOTE: deliberately no external action here in the prototype.
         record.result.external_action_taken = False
         store.save(record)
@@ -79,6 +80,7 @@ class ShipmentService:
         record.rejected_by = reviewer
         record.reject_reason = reason
         record.result.approval_status = "rejected"
+        record.result.decided_by = reviewer
         record.result.external_action_taken = False
         store.save(record)
         return record.result

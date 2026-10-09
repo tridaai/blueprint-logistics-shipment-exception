@@ -362,7 +362,7 @@ async function decide(path) {
   const reviewer = $('reviewer').value.trim() || 'ui-reviewer';
   const res = await fetch(`/shipments/${currentId}/${path}`, {
     method: 'POST', headers: {'Content-Type': 'application/json', ...apiHeaders()},
-    body: JSON.stringify(path === 'approve' ? {approver: reviewer} : {reviewer: reviewer, reason: 'Rejected from web UI'})
+    body: JSON.stringify(path === 'approve' ? {actor: reviewer} : {actor: reviewer, reason: 'Rejected from web UI'})
   });
   if (!res.ok) { $('error').textContent = path + ' failed (' + res.status + '): ' + await res.text(); return; }
   const result = await res.json();

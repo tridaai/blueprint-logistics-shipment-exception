@@ -19,6 +19,11 @@ import argparse
 import json
 import sys
 
+from .config import silence_langchain_deprecation_warnings
+
+# Must precede the graph import: the warning fires while langgraph loads.
+silence_langchain_deprecation_warnings()
+
 from .graph import run_shipment
 from .model_backends import ModelBackend, get_backend
 from .retriever import Retriever, get_retriever

@@ -66,6 +66,29 @@ def load_dotenv(path: Path | None = None) -> Path | None:
     return None
 
 
+def silence_langchain_deprecation_warnings() -> None:
+    """Entry-point hygiene: hide langgraph's `allowed_objects` warning.
+
+    LangGraph currently emits a LangChainPendingDeprecationWarning about
+    a default that will change in a future version. A CLI/demo user can
+    do nothing about it, so the entry points (CLI, demo, API) filter it
+    by message. Two quirks make this less trivial than it looks: the
+    warning fires while langgraph imports (so entry points call this
+    before importing the graph), and langchain_core re-registers its own
+    "default" filters at import time, jumping ahead of any filter set
+    earlier — so langchain_core is imported first here and the ignore
+    is registered after it. Library code never touches global warning
+    state; this runs only where a human is looking at the output.
+    """
+    import warnings
+
+    try:
+        import langchain_core  # noqa: F401 — surfaces its filters first
+    except ImportError:
+        pass
+    warnings.filterwarnings("ignore", message=r".*allowed_objects.*")
+
+
 def env_str(name: str, default: str | None = None) -> str | None:
     """Read a string variable, treating an empty value as unset."""
     value = os.environ.get(name)

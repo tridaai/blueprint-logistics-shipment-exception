@@ -18,5 +18,7 @@ real shipment, client, or carrier system.
   The same file is bundled inside the package
   (`src/shipment_agent/data/sample_shipments.json`) so the demo, API, and
   UI work from a pip install; a test asserts the copies never drift.
-- `policies.json` — the synthetic policy corpus used by the retriever
-  (mirrors `src/shipment_agent/policies_data.py`).
+- `policies.json` — a mirror of the synthetic policy corpus for browsing.
+  The source is `src/shipment_agent/policies_data.py` — that is the module
+  the retriever actually loads. Edit the corpus there and keep this file
+  in sync.

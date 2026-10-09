@@ -15,7 +15,11 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .config import env_str, load_dotenv
+from .config import env_str, load_dotenv, silence_langchain_deprecation_warnings
+
+# Must precede the service import (which loads the graph/langgraph).
+silence_langchain_deprecation_warnings()
+
 from .errors import ProviderError
 from .policies_data import POLICIES
 from .samples import load_sample_shipments
@@ -104,12 +108,26 @@ def eval_results() -> dict:
 
 
 class ApproveRequest(BaseModel):
-    approver: str
+    # One name for the decision-maker across both endpoints: `actor`.
+    # `approver` stays accepted as a legacy alias.
+    actor: str | None = None
+    approver: str | None = None
 
 
 class RejectRequest(BaseModel):
-    reviewer: str
+    actor: str | None = None
+    reviewer: str | None = None  # legacy alias of `actor`
     reason: str = ""
+
+
+def _decision_actor(request: ApproveRequest | RejectRequest) -> str:
+    actor = request.actor or getattr(request, "approver", None) or getattr(request, "reviewer", None)
+    if not actor:
+        raise HTTPException(
+            status_code=422,
+            detail="Provide 'actor' — the decision-maker's name ('approver'/'reviewer' are accepted legacy aliases).",
+        )
+    return actor
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -148,7 +166,7 @@ def get_result(shipment_id: str) -> AgentResult:
 @app.post("/shipments/{shipment_id}/approve", response_model=AgentResult, dependencies=_AUTH)
 def approve(shipment_id: str, request: ApproveRequest) -> AgentResult:
     try:
-        return service.approve(shipment_id, approver=request.approver)
+        return service.approve(shipment_id, approver=_decision_actor(request))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -158,7 +176,9 @@ def approve(shipment_id: str, request: ApproveRequest) -> AgentResult:
 @app.post("/shipments/{shipment_id}/reject", response_model=AgentResult, dependencies=_AUTH)
 def reject(shipment_id: str, request: RejectRequest) -> AgentResult:
     try:
-        return service.reject(shipment_id, reviewer=request.reviewer, reason=request.reason)
+        return service.reject(
+            shipment_id, reviewer=_decision_actor(request), reason=request.reason
+        )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
