@@ -179,12 +179,14 @@ class SemanticRetriever:
 
         Returns the collection, or ``None`` when chromadb is not
         installed (the in-memory fallback then serves queries). The
-        store is a persistent local directory (``CHROMA_DIR``, default
-        ``<repo>/.chroma``, git-ignored): the policy corpus is embedded
-        and added on first use, and survives restarts after that.
-        Embeddings are always computed by our configured provider
-        client and passed in explicitly — Chroma's own default
-        embedding function (which downloads a model) is never used.
+        store is either a Chroma server (``CHROMA_HOST`` set — the
+        docker-compose local stack runs one) or an embedded persistent
+        directory (``CHROMA_DIR``, default ``<repo>/.chroma``,
+        git-ignored): the policy corpus is embedded and added on first
+        use, and survives restarts after that. Embeddings are always
+        computed by our configured provider client and passed in
+        explicitly — Chroma's own default embedding function (which
+        downloads a model) is never used.
         """
         if self._chroma_checked:
             return self._chroma_collection
@@ -197,10 +199,16 @@ class SemanticRetriever:
             import hashlib
             from pathlib import Path
 
-            persist_dir = env_str("CHROMA_DIR") or str(
-                Path(__file__).resolve().parents[2] / ".chroma"
-            )
-            client = chromadb.PersistentClient(path=persist_dir)
+            chroma_host = env_str("CHROMA_HOST")
+            if chroma_host:
+                client = chromadb.HttpClient(
+                    host=chroma_host, port=int(env_str("CHROMA_PORT") or "8000")
+                )
+            else:
+                persist_dir = env_str("CHROMA_DIR") or str(
+                    Path(__file__).resolve().parents[2] / ".chroma"
+                )
+                client = chromadb.PersistentClient(path=persist_dir)
             # The collection is named by a fingerprint of the corpus
             # contents: a changed corpus (edited policies, a different
             # corpus in tests) gets its own collection instead of

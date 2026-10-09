@@ -151,3 +151,34 @@ def test_memory_fallback_when_chromadb_missing(monkeypatch):
     results = retriever.retrieve("delay delay customer update", top_k=3)
     assert retriever.vector_store == "memory"
     assert results[0].policy_id == "P-DELAY"
+
+
+class FakeChromaHttpClient(FakeChromaClient):
+    """Records the host/port the retriever dialed (CHROMA_HOST mode)."""
+
+    dialed: list[tuple[str, int]] = []
+
+    def __init__(self, host=None, port=None) -> None:
+        super().__init__(path=None)
+        FakeChromaHttpClient.dialed.append((host, port))
+
+
+def test_chroma_server_mode_via_env(monkeypatch):
+    """CHROMA_HOST set (the compose local stack): HttpClient, not files."""
+    FakeChromaHttpClient.dialed = []
+    monkeypatch.setitem(
+        sys.modules,
+        "chromadb",
+        SimpleNamespace(
+            PersistentClient=FakeChromaClient, HttpClient=FakeChromaHttpClient
+        ),
+    )
+    monkeypatch.setenv("CHROMA_HOST", "chroma")
+    monkeypatch.setenv("CHROMA_PORT", "8000")
+    monkeypatch.delenv("CHROMA_DIR", raising=False)
+    retriever = SemanticRetriever(policies=POLICIES)
+    results = retriever.retrieve("delay delay customer update", top_k=1)
+    assert retriever.vector_store == "chroma"
+    assert results[0].policy_id == "P-DELAY"
+    assert FakeChromaHttpClient.dialed == [("chroma", 8000)]
+    assert FakeChromaClient.instances[-1].path is None  # no local dir used

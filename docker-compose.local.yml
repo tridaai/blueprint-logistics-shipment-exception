@@ -1,0 +1,60 @@
+# Local real stack — agent + Ollama (local LLM) + Chroma (local vectors).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml --profile local up
+#
+# This override reconfigures the SAME api service (no second agent to
+# drift): it rebuilds the image with the llm + vectordb extras and
+# points the agent at the Ollama and Chroma services, purely via env.
+# The default `docker compose up` (agent only, offline mock) is
+# unchanged.
+#
+# One-time model pull (after the stack is up):
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml exec ollama ollama pull llama3.1
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml exec ollama ollama pull nomic-embed-text
+# Then open http://localhost:8000 — extraction, cross-check, diagnosis
+# and options all run on the local model; approvals persist in the
+# agent-data volume.
+#
+# NOTE: this stack is carefully reviewed against the Dockerfile and the
+# services' documented configuration, but it has not been build-verified
+# in the blueprint's CI environment (no Docker daemon there).
+services:
+  api:
+    build:
+      context: .
+      args:
+        UV_EXTRA_ARGS: "--extra llm --extra vectordb"
+    environment:
+      MODEL_BACKEND: ollama
+      OLLAMA_BASE_URL: http://ollama:11434/v1
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1}
+      OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-nomic-embed-text}
+      RETRIEVER: hybrid
+      CHROMA_HOST: chroma
+      CHROMA_PORT: "8000"
+      STATE_DB_PATH: /app/.data/state.db
+    volumes:
+      - agent-data:/app/.data
+    depends_on:
+      - ollama
+      - chroma
+
+  ollama:
+    profiles: ["local"]
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+
+  chroma:
+    profiles: ["local"]
+    image: chromadb/chroma:latest
+    ports:
+      - "8001:8000"
+    # No data volume on purpose: the agent re-indexes the policy corpus
+    # into Chroma on first use, so an ephemeral store is self-healing.
+
+volumes:
+  agent-data:
+  ollama-models:
