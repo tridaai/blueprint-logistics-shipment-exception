@@ -5,6 +5,7 @@ venv/
 .env
 .chroma/
 .data/
+evals/llm_results.json
 *.egg-info/
 dist/
 build/

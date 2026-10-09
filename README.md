@@ -29,7 +29,7 @@ and tests run locally with no API key. The primary workflow is
 ```bash
 uv sync --extra dev              # 1 · install the locked set (uv.lock)
 uv run shipment-agent-demo       # 2 · one shipment, end to end, with a trace
-uv run pytest -q                 # 3 · the full test suite (82 tests)
+uv run pytest -q                 # 3 · the full test suite (135 tests)
 ```
 
 No uv? Create a virtual environment and use pip. The direct dependencies
@@ -54,14 +54,19 @@ Real excerpt from the demo's output:
       - delay signal: delayed
       - delay signal: weather hold
 
-[6] GUARDRAIL CHECKS
+[5] RECOVERY OPTIONS (scored by code — the model never does this arithmetic)
+    OPT-1 [expedite] Expedite the remaining leg — score 59.81 (ETA +32.8h · added cost 148.2 units · SLA 0.85) <- recommended
+    OPT-2 [reroute] Reroute via the alternate hub — score 52.84 (ETA +20.0h · added cost 70.6 units · SLA 0.75)
+    OPT-3 [wait_and_monitor] Hold and monitor — score 6.72 (ETA +0.0h · added cost 0.0 units · SLA 0.112)
+
+[8] GUARDRAIL CHECKS
     [PASS] references_shipment_id — Draft references shipment SYN-1001.
     [PASS] no_prohibited_promises — No prohibited promise phrases found.
     [PASS] policy_citations_present — Cites 3 policy citation(s): POL-DELAY-01, POL-COMM-01, POL-DMG-01.
     [PASS] states_next_step — Draft states the next update / next step.
     Overall: PASSED
 
-[7] FINAL STATE
+[9] FINAL STATE
     PENDING_HUMAN_APPROVAL
     approval_status = awaiting_approval · external_action_taken = False
 ```
@@ -83,22 +88,48 @@ lose hours and consistency.
 
 ## What this agent does
 
-For one shipment, end to end:
+For one shipment, end to end — a nine-node LangGraph pipeline where the
+model does language work and code does every number:
 
-1. **Ingests** one shipment record as JSON: schedule, latest event,
-   condition notes, and documents (bill of lading, invoice, tracking
-   notes).
-2. **Classifies** the exception — `delay`, `damage`, `document_mismatch`,
-   `missed_appointment`, or `none` — with deterministic, auditable rules,
-   and computes the facts (delay hours, field-level document mismatches)
-   with code, never with a model.
-3. **Retrieves** policy context from the synthetic SOP corpus behind a
-   small retriever interface.
-4. **Drafts** a customer update and a claim packet, with policy citations.
-5. **Validates** the draft against guardrails implemented as code (no
+1. **Extracts** document fields (bill of lading, invoice, event text):
+   with an LLM backend, the model extracts typed fields with per-field
+   confidences; deterministic code cross-checks them against the
+   provided fields and records every discrepancy. In the default mode
+   the provided fields pass through, marked source-provided.
+2. **Ingests** the shipment record and computes the facts — delay hours,
+   field-level document mismatches — with code, never with a model.
+3. **Classifies** the exception — `delay`, `damage`, `document_mismatch`,
+   `missed_appointment`, or `none`. Deterministic rules run
+   independently; with a provider configured, the LLM classifies
+   independently too, and the two are **cross-checked** under one
+   explicit resolution policy (below) that the approver can see.
+4. **Retrieves** policy context from the synthetic SOP corpus: keyword,
+   semantic (embeddings), or **hybrid** — both candidate sets merged,
+   deduplicated, and reranked by reciprocal-rank score fusion to the
+   cited top-3.
+5. **Diagnoses** the root cause over the computed evidence — computed
+   delay, document diffs, extraction discrepancies, retrieved policy
+   IDs — composed by the LLM in provider mode, by a template over the
+   same evidence structure in default mode.
+6. **Proposes recovery options** (2–3: expedite, reroute, reschedule,
+   correct the documents, …) and **scores them in deterministic code**
+   from the delay and severity — ETA improvement, added cost, SLA
+   impact. The model never does this arithmetic; the highest score is
+   the recommendation the draft grounds on.
+7. **Drafts** a customer update and a claim packet, with policy
+   citations, the diagnosis, and the scored options.
+8. **Validates** the draft against guardrails implemented as code (no
    promised compensation, no missing citations, no missing shipment ID).
-6. **Stops.** The result sits at `awaiting_approval`. Nothing is sent,
+9. **Stops.** The result sits at `awaiting_approval`. Nothing is sent,
    filed, or posted anywhere — a human approves first.
+
+**The classification resolution policy** (implemented in
+`crosscheck.py`, shown in the result and the trace): rules are
+authoritative on disagreement — **except** when the rules land on
+`none` or below 0.85 confidence while the LLM is at 0.85 confidence or
+above on a concrete type; then the LLM result is adopted and flagged
+`llm_adopted` in the classification's signals and rationale, so the
+approver always knows which path decided.
 
 ## Who it's for
 
@@ -112,20 +143,22 @@ For one shipment, end to end:
 
 Use these seams to adapt it — each is one file or one setting:
 
-- **Real LLM drafting** — install the optional SDKs
-  (`uv sync --extra dev --extra llm`), copy `.env.example` to `.env`, set
-  `MODEL_BACKEND=openai` or `anthropic` plus the matching API key, and run
-  any surface — API, CLI, and traced demo all honour the same variables
-  (full table under Configuration below). The deterministic mock stays
-  the default. With an LLM backend active, low-confidence or `none` rule
-  classifications also get an advisory LLM suggestion recorded next to
-  them; the rule result stays authoritative. Backend interface:
-  `src/shipment_agent/model_backends.py`.
-- **Semantic retrieval** — set `RETRIEVER=semantic` to rank the policy
-  corpus by embedding cosine similarity instead of keyword overlap
-  (embeddings run through OpenAI — see Configuration). Or implement the
-  `Retriever` protocol in `src/shipment_agent/retriever.py` (e.g.
-  LlamaIndex over a vector store); the graph doesn't change.
+- **Real LLM, cloud or local** — install the optional SDKs
+  (`uv sync --extra dev --extra llm`), copy `.env.example` to `.env`, and
+  set `MODEL_BACKEND=openai`, `anthropic`, or `ollama` (a local model —
+  no key, nothing leaves the machine). Every surface honours the same
+  variables, and the provider runs the *whole* pipeline — extraction,
+  classification cross-check, diagnosis, options, drafting — not a
+  single prompt. The deterministic mock remains only as the **offline
+  fallback**. Backend interface: `src/shipment_agent/model_backends.py`.
+- **Hybrid retrieval + local vectors** — `RETRIEVER=keyword|semantic|hybrid`.
+  Hybrid merges keyword and semantic candidates and reranks them by
+  reciprocal-rank fusion. With the `vectordb` extra installed, semantic
+  search runs on a local **Chroma** store (embedded, or a server via
+  `CHROMA_HOST`); without it, in-memory cosine serves behind the same
+  interface. Or implement the `Retriever` protocol in
+  `src/shipment_agent/retriever.py` (e.g. LlamaIndex); the graph doesn't
+  change.
 - **Your policy corpus** — replace the synthetic SOPs in
   `src/shipment_agent/policies_data.py` with your real exception-handling
   policies, and keep the mirror in `data/sample/policies.json` in sync.
@@ -146,8 +179,8 @@ Use these seams to adapt it — each is one file or one setting:
 - **Docker optional** — only for the Docker Compose deployment option.
 - **No GPU required.** The agent is rules, retrieval, and drafting; it
   runs comfortably on a laptop CPU.
-- **No API key needed** for the default deterministic mock backend. For
-  the optional LLM backends, configuration is environment variables only:
+- **No API key needed** for the default offline fallback (mock backend).
+  For the optional LLM backends, configuration is environment variables only:
   the application loads a `.env` file from the repo root at startup
   (copy `.env.example`), and variables set in the real environment take
   precedence over the file.
@@ -183,8 +216,8 @@ sample data ships inside the package, and the `shipment-agent` /
 
 Or with Docker: `docker compose up --build` serves the API on port 8000.
 
-After installation, the default **deterministic mock** backend makes no
-external network calls.
+After installation, the default **offline fallback** (deterministic mock)
+backend makes no external network calls.
 
 One bundled sample is deliberately adversarial: **SYN-1013**, whose
 carrier condition note promises the customer a full refund. The drafting
@@ -203,19 +236,27 @@ API, CLI, and traced demo — read the same variables.**
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `MODEL_BACKEND` | `mock` | Drafting backend: `mock` (offline, deterministic) · `openai` · `anthropic` |
-| `OPENAI_API_KEY` | — | Required when `MODEL_BACKEND=openai`; also the embeddings key for `RETRIEVER=semantic` |
-| `OPENAI_MODEL` | `gpt-4o-mini` | OpenAI chat model for drafting + classification suggestions |
-| `OPENAI_BASE_URL` | provider default | Any OpenAI-compatible endpoint (Azure OpenAI, LiteLLM gateway, hosted/self-hosted) — applies to chat and embeddings |
+| `MODEL_BACKEND` | `mock` | Model backend: `mock` (offline fallback, deterministic) · `openai` · `anthropic` · `ollama` (local) |
+| `OPENAI_API_KEY` | — | Required when `MODEL_BACKEND=openai`; also the embeddings key for semantic/hybrid retrieval on cloud backends |
+| `OPENAI_MODEL` | `gpt-4o-mini` | OpenAI chat model (extraction, cross-check, diagnosis, options, drafting) |
+| `OPENAI_BASE_URL` | provider default | **The "other providers" switch**: any OpenAI-compatible endpoint — LiteLLM, Together, Groq, Azure OpenAI, a self-hosted gateway — applies to chat and embeddings |
 | `ANTHROPIC_API_KEY` | — | Required when `MODEL_BACKEND=anthropic` |
-| `ANTHROPIC_MODEL` | `claude-sonnet-4-5` | Anthropic model for drafting + classification suggestions |
+| `ANTHROPIC_MODEL` | `claude-sonnet-4-5` | Anthropic model for the pipeline's model work |
 | `ANTHROPIC_BASE_URL` | provider default | Custom Anthropic-compatible endpoint |
-| `RETRIEVER` | `keyword` | Policy retrieval: `keyword` (token overlap, offline) · `semantic` (embedding cosine similarity) |
-| `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model for `RETRIEVER=semantic` |
+| `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | Ollama server URL for `MODEL_BACKEND=ollama` |
+| `OLLAMA_MODEL` | `llama3.1` | Local chat model (pull it first: `ollama pull llama3.1`) |
+| `OLLAMA_EMBEDDING_MODEL` | `nomic-embed-text` | Local embedding model when the backend is Ollama |
+| `RETRIEVER` | `keyword` | Policy retrieval: `keyword` (token overlap, offline) · `semantic` (embedding cosine) · `hybrid` (both, merged + reranked by score fusion) |
+| `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model for semantic/hybrid retrieval on OpenAI(-compatible) backends |
+| `CHROMA_DIR` | `<repo>/.chroma` | Local Chroma store directory (embedded mode; git-ignored) |
+| `CHROMA_HOST` / `CHROMA_PORT` | — / `8000` | Talk to a Chroma server instead of the embedded store (the local Docker stack sets these) |
+| `STATE_DB_PATH` | `<repo>/.data/state.db` | SQLite file for analyses + approval decisions (`:memory:` = in-memory test double) |
+| `API_KEY` | — (unset) | When set, data endpoints require the `X-API-Key` header; when unset the API is open (local dev) |
+| `LLM_JUDGE_MODEL` | backend's model | Judge model for the opt-in LLM eval pack |
 | `LLM_TIMEOUT_SECONDS` | `60` | Request timeout for provider API calls |
 
 To run the demo against a real model (Anthropic shown; OpenAI is the
-same shape):
+same shape, and Ollama needs no key at all):
 
 ```bash
 uv sync --extra dev --extra llm      # install the provider SDKs
@@ -230,20 +271,29 @@ Notes that matter:
 
 - **Guardrails run after generation**, on LLM drafts exactly as on
   template drafts. A fluent draft that promises a refund is blocked.
-- With an LLM backend active, rule classifications that come back
-  `none` or below 0.85 confidence also get an **advisory LLM
-  classification suggestion** in the result (`llm_suggestion`, with its
-  own confidence and an agreement flag). The rule result stays
-  authoritative — the suggestion is there for the human reviewer.
-- `RETRIEVER=semantic` embeds the corpus with OpenAI even when the
-  drafting backend is Anthropic or mock — Anthropic has no embeddings
-  API. Without `OPENAI_API_KEY` it fails immediately and says so.
+- **Cross-check, not a suggestion.** With a provider configured, the LLM
+  classifies every case independently of the rules; agreement and the
+  resolution (`agree` / `rules_authoritative` / `llm_adopted`) are
+  recorded in the result's `cross_check` for the approver. In default
+  mode there is no cross-check — rules only, and the golden evals are
+  untouched by it.
+- **Embeddings follow the backend.** Semantic/hybrid retrieval embeds
+  through OpenAI(-compatible) endpoints — or through Ollama when
+  `MODEL_BACKEND=ollama`, so a fully local run needs no cloud key.
+  Anthropic has no embeddings API, so with an Anthropic backend,
+  semantic retrieval still needs an OpenAI key (or use Ollama) and
+  fails immediately and says so when it has neither.
+- **Local vector store.** Install the `vectordb` extra
+  (`uv sync --extra vectordb`) and semantic/hybrid retrieval runs on a
+  local Chroma store, indexed on first use. Without the extra, the
+  in-memory cosine implementation serves behind the same interface —
+  the run's trace says which store served it.
 - A missing key or missing SDK fails loudly at startup with the fix in
   the message — nothing silently falls back to the mock.
 
 ## Deployment options
 
-Three ways to run the same code — all serve the demo console and API on
+Four ways to run the same code — all serve the demo console and API on
 http://localhost:8000 (API docs at http://localhost:8000/docs).
 
 **1 · Local with uv (recommended)**
@@ -261,7 +311,7 @@ pip install -e ".[dev]" -c constraints.txt
 uvicorn shipment_agent.api:app --port 8000
 ```
 
-**3 · Docker Compose**
+**3 · Docker Compose (agent only, offline fallback)**
 
 ```bash
 docker compose up --build   # serves on port 8000, mock backend by default
@@ -272,14 +322,34 @@ For a real LLM backend under Docker, set `MODEL_BACKEND` and pass the
 API key through the compose file — see the `environment:` / `env_file:`
 comments in `docker-compose.yml`.
 
+**4 · Local stack — agent + Ollama + Chroma (one command)**
+
+The whole real thing, fully local: the agent on a local LLM with local
+vectors, approvals persisted in a volume, configured purely by env.
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.local.yml --profile local up
+# one-time model pull:
+docker compose -f docker-compose.yml -f docker-compose.local.yml exec ollama ollama pull llama3.1
+docker compose -f docker-compose.yml -f docker-compose.local.yml exec ollama ollama pull nomic-embed-text
+```
+
+Honest status: this stack is reviewed carefully against the Dockerfile
+and both services' documented configuration, but it is **not
+build-verified** — the environment this blueprint was developed in has
+no Docker daemon. The default compose (option 3) is unaffected.
+
 ## Architecture
 
 ```mermaid
 flowchart LR
-    A[Shipment input<br/>events + documents] --> B[ingest<br/>validate, compute facts]
-    B --> C[classify<br/>deterministic rules]
-    C --> D[retrieve<br/>policy context]
-    D --> E[draft<br/>mock or LLM backend]
+    A[Shipment input<br/>events + documents] --> X[extract<br/>LLM fields + confidence,<br/>cross-checked by code]
+    X --> B[ingest<br/>compute facts]
+    B --> C[classify<br/>rules × LLM cross-check]
+    C --> D[retrieve<br/>keyword / semantic / hybrid<br/>merge → rerank]
+    D --> DG[diagnose<br/>root cause, cited evidence]
+    DG --> O[options<br/>proposed, scored by code]
+    O --> E[draft<br/>grounded on the<br/>recommended option]
     E --> F[validate<br/>guardrails as code]
     F --> G[human approval gate]
     G --> H[END<br/>no external action]
@@ -312,42 +382,61 @@ accuracy claim. When a new phrasing is missed, add it as a case before
 changing the classifier; the case then guards the fix. Production accuracy
 would be measured on real, consented, anonymised exception data.
 
-Test suite: **82 tests, all passing** (`pytest -q`) — classifier, tools,
-retriever, guardrails, end-to-end graph, API approval/reject flow, the web
-UI, a negation suite covering the inputs humans try first ("no damage
-reported", "not damaged", "undamaged", "damage: none", "no discrepancy
-found" — none of which may fire the rule they negate), and the LLM wiring:
-`.env` loading and precedence, both provider backends with the SDK layer
-mocked (drafting, base-URL/timeout passthrough, loud failures, the
-classification suggestion), the semantic retriever's ranking, and the
-SYN-1013 guardrail-failure sample. No test touches the network or a real
-API key.
+**LLM-judge eval pack (opt-in).** `uv run python evals/run_llm_evals.py`
+(or `make llm-evals`) runs the golden set through a configured provider
+and adds what the deterministic gate cannot: the rules-vs-LLM agreement
+breakdown, and an **LLM judge** scoring each draft's groundedness against
+the verified facts (invented ETAs and prohibited promises fail the pack),
+with per-case tokens, latency, and estimated cost. It fails loudly
+without a real provider and is never part of the default gate or CI.
+
+Test suite: **135 tests, all passing** (`pytest -q`) — classifier, tools,
+retriever (keyword, semantic, hybrid + rerank, Chroma path with a faked
+client), extraction and its cross-check, the classification cross-check
+and its resolution policy, diagnosis, recovery-option scoring,
+guardrails, end-to-end graph, API approval/reject flow, SQLite
+persistence across instances, API-key auth, the web UI, a negation suite
+covering the inputs humans try first ("no damage reported", "not
+damaged", "undamaged", "damage: none", "no discrepancy found" — none of
+which may fire the rule they negate), every LLM backend with the SDK
+layer mocked (OpenAI, Anthropic, Ollama — construction, base-URL/timeout
+passthrough, loud failures, usage accounting), the LLM-judge eval pack's
+plumbing, and the SYN-1013 guardrail-failure sample. No test touches the
+network or a real API key.
 
 ## Repository structure
 
 ```
-src/shipment_agent/   agent graph, classifier, retriever, guardrails,
-                      model backends (mock / OpenAI / Anthropic),
+src/shipment_agent/   agent graph (9 nodes), classifier + cross-check,
+                      extractor, diagnosis, options scorer, retriever
+                      (keyword / semantic / hybrid, Chroma or memory),
+                      guardrails, model backends (mock / OpenAI /
+                      Anthropic / Ollama), SQLite approval store,
                       FastAPI app + web UI (static/), demo trace, CLI,
                       service layer, bundled samples (data/)
 docs/architecture.md  full architecture and productionisation notes
 data/sample/          synthetic shipments (13) + policy corpus mirror
-evals/                golden dataset (32 cases) + run_evals.py
-tests/                82 pytest tests: unit, integration, API, UI, negation,
-                      LLM backends (mocked SDKs), config, semantic retrieval
-Makefile              make demo · make test · make evals · make serve
+evals/                golden dataset (32 cases) + run_evals.py +
+                      run_llm_evals.py (opt-in LLM-judge pack)
+tests/                135 pytest tests: unit, integration, API, UI,
+                      negation, persistence, auth, LLM backends and
+                      eval pack (mocked SDKs), config, retrieval
+docker-compose.yml    agent only (offline fallback) — unchanged default
+docker-compose.local.yml  local stack profile: agent + Ollama + Chroma
+Makefile              make demo · make test · make evals · make llm-evals · make serve
 ```
 
 ## Production hardening — what changes for a real deployment
 
-This prototype deliberately omits, and a production build must add:
-authenticated API and per-client data isolation; TMS/carrier event
-integrations and OCR document extraction; semantic retrieval (LlamaIndex +
-vector store) over real SOPs; an approval queue UI with a full audit log;
-a post-approval action layer (messaging, claim filing) with idempotency
-and rate limits; tracing/observability; and an eval set grown from real
-approver corrections. Section 9 of the architecture doc covers each in
-detail.
+Shipped in this blueprint already: SQLite-persisted approvals, optional
+API-key auth, a local vector store, and a one-command local stack. A
+production build must still add: per-client data isolation and per-user
+identity (the shipped auth is one shared key); TMS/carrier event
+integrations and a real OCR pipeline feeding extraction; an approval
+queue UI with a full audit log; a post-approval action layer (messaging,
+claim filing) with idempotency and rate limits;
+tracing/observability; and an eval set grown from real approver
+corrections. Section 9 of the architecture doc covers each in detail.
 
 ## Limitations
 
@@ -355,12 +444,19 @@ detail.
   wording can be missed (classified `none`). It does handle negation
   ("no damage reported" is not damage) and recovery ("back on schedule"
   cancels a keyword delay, never a computed one) — both covered by tests.
-- Default retrieval is keyword matching. An embedding-based semantic
-  retriever ships as an option (`RETRIEVER=semantic`), but there is no
-  vector store, no corpus-indexing pipeline, and the corpus is embedded
-  in memory per process.
-- Approvals are in-memory; nothing persists across restarts.
-- No OCR, no carrier integration, no sending — by design.
+  The provider-mode cross-check mitigates the miss (a confident LLM
+  result is adopted, flagged) but does not remove it in default mode.
+- Extraction reads document *text*; there is no OCR engine and no
+  photo/VLM damage assessment. Scanned documents need an OCR step in
+  front of this agent in production.
+- No real carrier/TMS execution and no claims filing — drafts and
+  packets stop at the approval gate, by design.
+- API auth is a single optional shared key — enough to gate a small
+  deployment, not a substitute for per-user identity and tenancy.
+- The LLM-judge eval pack is a model judging a model: a useful
+  regression signal for groundedness, not a human evaluation.
+- The Docker local stack is reviewed but not build-verified (no Docker
+  daemon in the development environment).
 
 ## License
 
