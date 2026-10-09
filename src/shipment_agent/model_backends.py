@@ -12,12 +12,13 @@ feed the same pipeline as the mock: the graph assembles the claim packet
 and citations, and the guardrails in ``guardrails.py`` run on the model's
 draft afterwards, exactly as they do on a template draft.
 
-Extra LLM-only capability: when a real backend is active, the graph may ask
-it for an advisory *classification suggestion* on low-confidence or
-``none`` rule results (see ``graph.py``). The rule result stays
-authoritative; the suggestion is recorded alongside it. The mock backend
-deliberately has no such method, so the suggestion can never fire in the
-default mode.
+Extra LLM-only capabilities: when a real backend is active, the graph
+also uses it for document extraction (``extractor.py``), an independent
+classification that is cross-checked against the deterministic rules
+(``crosscheck.py``), the root-cause diagnosis, and recovery-option
+proposals. The mock backend deliberately exposes none of those methods,
+so none of them can fire in the default mode — the deterministic
+fallbacks run instead.
 
 Missing key or missing SDK raises a loud, actionable ``RuntimeError`` —
 the backends never run implicitly and never fail silently.
@@ -169,11 +170,12 @@ def parse_json_object(text: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def _parse_suggestion(text: str, backend_name: str) -> dict | None:
-    """Parse an LLM classification suggestion; ``None`` when unusable.
+def _parse_classification(text: str, backend_name: str) -> dict | None:
+    """Parse an LLM classification reply; ``None`` when unusable.
 
-    The suggestion is advisory, so a malformed reply drops the suggestion
-    instead of failing the run — the rule result stands on its own.
+    The cross-check degrades gracefully, so a malformed reply records
+    "no LLM classification" instead of failing the run — the rule result
+    stands on its own.
     """
     data = parse_json_object(text)
     if data is None:
@@ -234,12 +236,15 @@ class _BaseLLMBackend:
         text = self._complete(DRAFT_SYSTEM_PROMPT, self._render_prompt(context))
         return self._split_subject(text, f"Update on shipment {context['shipment_id']}")
 
-    def suggest_classification(self, context: DraftContext) -> dict | None:
-        """Advisory classification suggestion (LLM backends only).
+    def classify_with_llm(self, context: DraftContext) -> dict | None:
+        """Independent LLM classification for the cross-check (LLM only).
 
-        Returns a dict with exception_type / severity / confidence /
-        rationale / backend, or ``None`` when the model's reply is not a
-        usable suggestion. Never raises for a malformed reply.
+        The model is deliberately NOT shown the rule classifier's result
+        — the two paths classify independently and the graph cross-checks
+        them (see ``crosscheck.py`` for the resolution policy). Returns a
+        dict with exception_type / severity / confidence / rationale /
+        backend, or ``None`` when the reply is unusable. Never raises
+        for a malformed reply.
         """
         user = CLASSIFY_USER_TEMPLATE.format(
             shipment_id=context["shipment_id"],
@@ -251,14 +256,9 @@ class _BaseLLMBackend:
             condition_notes=context.get("condition_notes") or "none recorded",
             delay_hours=context.get("delay_hours"),
             mismatches=context.get("mismatches") or "none",
-            rule_exception_type=context["rule_exception_type"],
-            rule_severity=context["rule_severity"],
-            rule_confidence=context["rule_confidence"],
-            rule_rationale=context["rule_rationale"],
-            rule_signals="; ".join(context.get("rule_signals", [])) or "none",
         )
         text = self._complete(CLASSIFY_SYSTEM_PROMPT, user, max_tokens=300)
-        return _parse_suggestion(text, self.name)
+        return _parse_classification(text, self.name)
 
     def extract_document_fields(
         self, doc_type: str, document_id: str, raw_text: str, fields: list[str]

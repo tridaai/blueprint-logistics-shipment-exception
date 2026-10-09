@@ -73,7 +73,7 @@ class _FakeCompletions:
 
     def create(self, model=None, max_tokens=None, messages=None):
         system = " ".join(messages[0]["content"].split())  # normalise line wraps
-        kind = "classify" if "suggesting an exception classification" in system else "draft"
+        kind = "classify" if "classifying a shipment exception" in system else "draft"
         self._client.calls.append({"kind": kind, "model": model})
         text = self._client.suggestion_text if kind == "classify" else self._client.draft_text
         message = SimpleNamespace(content=text)
@@ -101,7 +101,7 @@ class _FakeMessages:
 
     def create(self, model=None, max_tokens=None, system=None, messages=None):
         system = " ".join((system or "").split())  # normalise line wraps
-        kind = "classify" if "suggesting an exception classification" in system else "draft"
+        kind = "classify" if "classifying a shipment exception" in system else "draft"
         self._client.calls.append({"kind": kind, "model": model})
         text = self._client.suggestion_text if kind == "classify" else self._client.draft_text
         return SimpleNamespace(content=[SimpleNamespace(type="text", text=text)])
@@ -276,60 +276,121 @@ def test_llm_draft_with_banned_phrase_fails_guardrails(monkeypatch, fake_openai)
 
 
 # --------------------------------------------------------------------------
-# Classification suggestion (LLM backends only, advisory)
+# Classification cross-check (LLM backends only; policy in crosscheck.py)
 # --------------------------------------------------------------------------
 
-def test_suggestion_fires_on_none_result(monkeypatch, fake_anthropic):
+def _classify_step(result):
+    return next(s for s in result.trace if s.name == "classify")
+
+
+def test_cross_check_agrees_with_confident_rule_result(monkeypatch, fake_openai):
+    """In v2 the LLM classifies independently on EVERY provider-mode run —
+    including confident rule results — and the cross-check records the pair."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    fake_openai.draft_text = CLEAN_DRAFT.format(sid="INT-1")
+    fake_openai.suggestion_text = (
+        '{"exception_type": "delay", "severity": "high", "confidence": 0.88,'
+        ' "rationale": "A 36-hour computed delay with a weather hold event."}'
+    )
+    result = _run(DELAY_SHIPMENT, OpenAIBackend())  # computed delay, rules 0.94
+    kinds = [call["kind"] for call in fake_openai.instances[-1].calls]
+    assert "classify" in kinds and "draft" in kinds
+    cc = result.cross_check
+    assert cc is not None
+    assert cc.resolution == "agree"
+    assert cc.agrees is True
+    assert cc.adopted_source == "rules"
+    # The rule result is the classification — same conclusion, auditable path.
+    assert result.classification.exception_type.value == "delay"
+    assert result.classification.confidence == 0.94
+    # Back-compat mirror of the LLM half.
+    assert result.llm_suggestion is not None
+    assert result.llm_suggestion.agrees_with_rules is True
+    assert any("cross-check: AGREE" in d for d in _classify_step(result).details)
+
+
+def test_cross_check_adopts_llm_when_rules_none_and_llm_confident(monkeypatch, fake_anthropic):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     fake_anthropic.draft_text = CLEAN_DRAFT.format(sid="SUG-1")
+    fake_anthropic.suggestion_text = (
+        '{"exception_type": "damage", "severity": "high", "confidence": 0.92,'
+        ' "rationale": "The notes describe handling damage the rules did not match."}'
+    )
     result = _run(CLEAN_SHIPMENT, AnthropicBackend())
-    # Rule result stands; the suggestion is recorded next to it.
+    cc = result.cross_check
+    assert cc.resolution == "llm_adopted"
+    assert cc.adopted_source == "llm"
+    assert cc.rule_exception_type == "none"
+    # The adopted LLM classification drives the rest of the pipeline…
+    assert result.classification.exception_type.value == "damage"
+    assert result.classification.confidence == 0.92
+    # …and the adoption is flagged in the signals for the approver.
+    assert any("llm-adopted" in s for s in result.classification.signals)
+    assert result.llm_suggestion is not None
+    assert result.llm_suggestion.agrees_with_rules is False
+    assert any("ADOPTED" in d for d in _classify_step(result).details)
+
+
+def test_cross_check_rules_authoritative_when_rules_confident(monkeypatch, fake_openai):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    fake_openai.draft_text = CLEAN_DRAFT.format(sid="INT-1")
+    # Default fake suggestion: damage at 0.77 — disagrees with a 0.94 rule result.
+    result = _run(DELAY_SHIPMENT, OpenAIBackend())
+    cc = result.cross_check
+    assert cc.resolution == "rules_authoritative"
+    assert cc.agrees is False
+    assert result.classification.exception_type.value == "delay"
+    assert result.classification.confidence == 0.94
+    assert any("DISAGREEMENT" in d for d in _classify_step(result).details)
+
+
+def test_cross_check_no_adoption_when_llm_confidence_low(monkeypatch, fake_anthropic):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    fake_anthropic.draft_text = CLEAN_DRAFT.format(sid="SUG-1")
+    # Default fake suggestion: damage at 0.77 — below the 0.85 adopt bar.
+    result = _run(CLEAN_SHIPMENT, AnthropicBackend())
+    cc = result.cross_check
+    assert cc.rule_exception_type == "none"
+    assert cc.resolution == "rules_authoritative"
     assert result.classification.exception_type.value == "none"
     assert result.llm_suggestion is not None
-    assert result.llm_suggestion.exception_type == "damage"
     assert result.llm_suggestion.confidence == 0.77
-    assert result.llm_suggestion.backend == "anthropic"
-    assert result.llm_suggestion.agrees_with_rules is False
-    classify_step = next(s for s in result.trace if s.name == "classify")
-    assert any("llm suggestion" in d for d in classify_step.details)
-    assert any("DISAGREEMENT" in d for d in classify_step.details)
 
 
-def test_suggestion_fires_on_low_confidence_and_can_agree(monkeypatch, fake_openai):
+def test_cross_check_adopts_over_low_confidence_rules(monkeypatch, fake_openai):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     fake_openai.draft_text = CLEAN_DRAFT.format(sid="SUG-2")
     fake_openai.suggestion_text = (
-        '{"exception_type": "delay", "severity": "medium", "confidence": 0.83,'
-        ' "rationale": "The event text reports a delay and nothing else."}'
+        '{"exception_type": "damage", "severity": "medium", "confidence": 0.9,'
+        ' "rationale": "The hub note mentions crushed packaging, not just a delay."}'
     )
-    result = _run(KEYWORD_DELAY_SHIPMENT, OpenAIBackend())
-    assert result.classification.exception_type.value == "delay"
-    assert result.classification.confidence == 0.8  # below the 0.85 threshold
-    assert result.llm_suggestion is not None
-    assert result.llm_suggestion.agrees_with_rules is True
+    result = _run(KEYWORD_DELAY_SHIPMENT, OpenAIBackend())  # keyword delay, rules 0.8
+    cc = result.cross_check
+    assert cc.rule_exception_type == "delay"
+    assert cc.rule_confidence == 0.8  # below the 0.85 weak-rules bar
+    assert cc.resolution == "llm_adopted"
+    assert result.classification.exception_type.value == "damage"
 
 
-def test_suggestion_does_not_fire_on_confident_rule_result(monkeypatch, fake_openai):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    fake_openai.draft_text = CLEAN_DRAFT.format(sid="INT-1")
-    result = _run(DELAY_SHIPMENT, OpenAIBackend())  # computed delay, confidence 0.94
-    assert result.llm_suggestion is None
-    kinds = [call["kind"] for call in fake_openai.instances[-1].calls]
-    assert "classify" not in kinds
-    assert kinds == ["draft"]
-
-
-def test_suggestion_never_fires_with_mock_backend():
+def test_cross_check_absent_with_mock_backend():
     result = _run(CLEAN_SHIPMENT, MockModelBackend())
+    assert result.cross_check is None
     assert result.llm_suggestion is None
     result = _run(KEYWORD_DELAY_SHIPMENT, MockModelBackend())
+    assert result.cross_check is None
     assert result.llm_suggestion is None
+    # The classify trace still shows the rule result on its own.
+    assert any(d.startswith("rules:") for d in _classify_step(result).details)
 
 
-def test_malformed_suggestion_reply_is_dropped(monkeypatch, fake_anthropic):
+def test_malformed_classification_degrades_to_rules_only(monkeypatch, fake_anthropic):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     fake_anthropic.draft_text = CLEAN_DRAFT.format(sid="SUG-1")
     fake_anthropic.suggestion_text = "I think it might be damage, probably."
     result = _run(CLEAN_SHIPMENT, AnthropicBackend())
     assert result.classification.exception_type.value == "none"
     assert result.llm_suggestion is None
+    cc = result.cross_check
+    assert cc is not None
+    assert cc.resolution == "rules_only"
+    assert cc.llm_exception_type is None

@@ -18,6 +18,7 @@ from typing import TypedDict
 from langgraph.graph import END, StateGraph
 
 from .classifier import classify_shipment
+from .crosscheck import resolve_classification
 from .extractor import discrepancies_from_dicts, extract_documents
 from .guardrails import validate_draft
 from .model_backends import DraftContext, ModelBackend, MockModelBackend
@@ -25,29 +26,48 @@ from .retriever import KeywordRetriever, Retriever
 from .schemas import AgentResult, DraftOutput, ExceptionType, ShipmentInput, TraceStep
 from .tools import compare_documents, compute_delay_hours
 
-# When a real LLM backend is active, rule results below this confidence —
-# and every `none` result — also get an advisory LLM classification
-# suggestion recorded next to them (see the classify node). The rule
-# result always stays authoritative.
-SUGGESTION_CONFIDENCE_THRESHOLD = 0.85
+# Sentinel distinguishing "no LLM backend configured" (default mode — no
+# cross-check is recorded at all) from "LLM configured but its reply was
+# unusable" (cross-check records rules_only). See crosscheck.py for the
+# resolution policy itself.
+_NO_LLM_BACKEND = object()
 
 
 def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
     """Assemble the inspectable per-step trace from the final graph state."""
     classification = final["classification"]
-    suggestion = final.get("classification_suggestion")
+    rule_classification = final.get("rule_classification") or classification
+    cross_check = final.get("cross_check")
     classify_details = [f"evidence: {s}" for s in classification.get("signals", [])] or ["evidence: (no signals)"]
-    if suggestion:
-        classify_details.append(
-            f"llm suggestion ({suggestion['backend']}): {suggestion['exception_type']} · "
-            f"severity {suggestion['severity']} · confidence {suggestion['confidence']} — "
-            f"{suggestion['rationale']}"
-        )
-        classify_details.append(
-            "llm suggestion agrees with the rule result"
-            if suggestion["agrees_with_rules"]
-            else "DISAGREEMENT: llm suggestion differs from the rule result — the rule result stays authoritative"
-        )
+    classify_details.append(
+        f"rules: {rule_classification['exception_type']} · severity "
+        f"{rule_classification['severity']} · confidence {rule_classification['confidence']}"
+    )
+    if cross_check:
+        if cross_check.get("llm_exception_type"):
+            classify_details.append(
+                f"llm cross-check ({cross_check['llm_backend']}): "
+                f"{cross_check['llm_exception_type']} · severity {cross_check['llm_severity']} · "
+                f"confidence {cross_check['llm_confidence']}"
+            )
+        else:
+            classify_details.append(
+                "llm cross-check: no usable LLM classification (provider error or "
+                "unusable reply) — rules only"
+            )
+        resolution_lines = {
+            "agree": "cross-check: AGREE — both paths classified this shipment the same way",
+            "rules_authoritative": (
+                "cross-check: DISAGREEMENT — the rule result stays authoritative; "
+                "the disagreement is recorded for the approver"
+            ),
+            "llm_adopted": (
+                "cross-check: DISAGREEMENT — LLM classification ADOPTED (rules were "
+                "none/low-confidence, LLM highly confident) and flagged for the approver"
+            ),
+            "rules_only": "cross-check: rules only — no LLM classification available",
+        }
+        classify_details.append(resolution_lines[cross_check["resolution"]])
     mismatches = final.get("document_mismatches", [])
     delay = final.get("delay_hours")
     policies = final.get("policies", [])
@@ -159,6 +179,9 @@ class AgentState(TypedDict, total=False):
     delay_hours: float | None
     document_mismatches: list[dict]
     classification: dict
+    rule_classification: dict
+    llm_classification: dict | None
+    cross_check: dict | None
     classification_suggestion: dict | None
     policies: list[dict]
     draft: dict
@@ -193,29 +216,43 @@ def build_graph(
     def classify(state: AgentState) -> AgentState:
         shipment = ShipmentInput.model_validate(state["shipment"])
         mismatches = compare_documents(shipment.documents)
-        result = classify_shipment(shipment, mismatches)
+        rule_result = classify_shipment(shipment, mismatches)
+        llm = _llm_classify(state, shipment)
+        if llm is _NO_LLM_BACKEND:
+            return {
+                "classification": rule_result.model_dump(mode="json"),
+                "rule_classification": rule_result.model_dump(mode="json"),
+                "llm_classification": None,
+                "cross_check": None,
+                "classification_suggestion": None,
+            }
+        final, cross = resolve_classification(rule_result, llm, getattr(backend, "name", ""))
+        suggestion = None
+        if llm:
+            suggestion = dict(llm)
+            suggestion["agrees_with_rules"] = (
+                llm["exception_type"] == rule_result.exception_type.value
+            )
         return {
-            "classification": result.model_dump(mode="json"),
-            "classification_suggestion": _maybe_suggest(state, shipment, result),
+            "classification": final.model_dump(mode="json"),
+            "rule_classification": rule_result.model_dump(mode="json"),
+            "llm_classification": llm,
+            "cross_check": cross.model_dump(),
+            "classification_suggestion": suggestion,
         }
 
-    def _maybe_suggest(state: AgentState, shipment: ShipmentInput, rule_result) -> dict | None:
-        """Advisory LLM classification suggestion — LLM backends only.
+    def _llm_classify(state: AgentState, shipment: ShipmentInput):
+        """The LLM half of the cross-check — LLM backends only.
 
-        Fires only when the rule result is ``none`` or below the confidence
-        threshold. The mock backend has no ``suggest_classification``
-        method, so this can never fire in the default mode. The suggestion
-        is advisory: a provider error or an unusable reply records no
-        suggestion and the run continues on the rule result alone.
+        Returns the ``_NO_LLM_BACKEND`` sentinel when the backend has no
+        LLM classification (default mode: no cross-check at all), a parsed
+        classification dict in provider mode, or ``None`` when the
+        provider call failed or its reply was unusable — the cross-check
+        then records ``rules_only`` and the run continues.
         """
-        suggest = getattr(backend, "suggest_classification", None)
-        if suggest is None:
-            return None
-        if (
-            rule_result.exception_type != ExceptionType.NONE
-            and rule_result.confidence >= SUGGESTION_CONFIDENCE_THRESHOLD
-        ):
-            return None
+        classify_fn = getattr(backend, "classify_with_llm", None)
+        if classify_fn is None:
+            return _NO_LLM_BACKEND
         context = DraftContext(
             shipment_id=shipment.shipment_id,
             origin=shipment.origin,
@@ -226,22 +263,11 @@ def build_graph(
             condition_notes=shipment.condition_notes,
             delay_hours=state.get("delay_hours"),
             mismatches=state.get("document_mismatches", []),
-            rule_exception_type=rule_result.exception_type.value,
-            rule_severity=rule_result.severity.value,
-            rule_confidence=rule_result.confidence,
-            rule_rationale=rule_result.rationale,
-            rule_signals=rule_result.signals,
         )
         try:
-            suggestion = suggest(context)
-        except Exception:  # advisory path — never fail the run over it
+            return classify_fn(context)
+        except Exception:  # the cross-check never fails the run
             return None
-        if not suggestion:
-            return None
-        suggestion["agrees_with_rules"] = (
-            suggestion["exception_type"] == rule_result.exception_type.value
-        )
-        return suggestion
 
     def retrieve(state: AgentState) -> AgentState:
         classification = state["classification"]
@@ -341,6 +367,7 @@ def run_shipment(
         shipment_id=shipment_model.shipment_id,
         classification=final["classification"],
         llm_suggestion=final.get("classification_suggestion"),
+        cross_check=final.get("cross_check"),
         extractions=final.get("extractions", []),
         delay_hours=final.get("delay_hours"),
         document_mismatches=final.get("document_mismatches", []),

@@ -96,7 +96,7 @@ class _FakeCompletions:
         system = " ".join(messages[0]["content"].split())
         if "extracting structured fields" in system:
             text = self._client.extraction_text
-        elif "suggesting an exception classification" in system:
+        elif "classifying a shipment exception" in system:
             text = self._client.suggestion_text
         else:
             text = self._client.draft_text

@@ -66,12 +66,16 @@ class Classification(BaseModel):
 
 
 class ClassificationSuggestion(BaseModel):
-    """Advisory LLM classification suggestion, recorded next to the rule result.
+    """The LLM half of the classification cross-check, in its original shape.
 
-    Only ever produced when a real LLM backend is active and the rule
-    result is low-confidence or ``none``. It never overrides the rule
-    classification in ``AgentResult.classification`` — ``agrees_with_rules``
-    flags disagreements for the human reviewer instead.
+    Kept for API compatibility: ``AgentResult.cross_check`` carries the
+    full cross-check record (both results + the resolution). This field
+    mirrors the LLM classification itself; ``agrees_with_rules`` compares
+    it against the rule result. In v2 the resolution policy in
+    ``crosscheck.py`` decides which result ``AgentResult.classification``
+    carries — an LLM result is adopted only when the rules landed on
+    ``none``/low confidence and the LLM was highly confident, and that
+    adoption is always flagged.
     """
 
     exception_type: str

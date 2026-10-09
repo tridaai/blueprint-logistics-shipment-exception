@@ -71,15 +71,14 @@ def print_trace(
     print("    Evidence (signals):")
     for signal in c.signals or ["(none)"]:
         print(f"      - {signal}")
-    if result.llm_suggestion is not None:
-        s = result.llm_suggestion
-        print(f"    LLM suggestion ({s.backend}): {s.exception_type} · severity {s.severity} · confidence {s.confidence}")
-        print(f"      - {s.rationale}")
-        print(
-            "      - agrees with the rule result"
-            if s.agrees_with_rules
-            else "      - DISAGREEMENT with the rule result — the rule result stays authoritative"
-        )
+    if result.cross_check is not None:
+        cc = result.cross_check
+        print(f"    Rules       : {cc.rule_exception_type} · severity {cc.rule_severity} · confidence {cc.rule_confidence}")
+        if cc.llm_exception_type is not None:
+            print(f"    LLM check   : {cc.llm_exception_type} · severity {cc.llm_severity} · confidence {cc.llm_confidence} (via {cc.llm_backend})")
+        else:
+            print("    LLM check   : no usable LLM classification — rules only")
+        print(f"    Cross-check : {cc.resolution} — {cc.note}")
 
     print("\n[3] RETRIEVED POLICY CONTEXT")
     for policy in result.policies:

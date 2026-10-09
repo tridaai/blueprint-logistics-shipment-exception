@@ -60,18 +60,19 @@ Extract the fields now, as JSON only.
 """
 
 CLASSIFY_SYSTEM_PROMPT = """\
-You are a logistics operations analyst suggesting an exception
-classification for a shipment. The deterministic rule classifier has
-already produced the authoritative result; your answer is an advisory
-suggestion that a human reviewer will see next to it.
+You are a logistics operations analyst classifying a shipment exception.
+You work independently: a deterministic rule classifier is classifying
+the same shipment separately, and the two results are cross-checked —
+yours is not shown the rule result, and you must not assume it.
 
 Respond with a single JSON object and nothing else:
 {"exception_type": one of "delay" | "damage" | "document_mismatch" |
 "missed_appointment" | "none", "severity": one of "low" | "medium" |
 "high" | "critical", "confidence": a number between 0 and 1,
 "rationale": one or two sentences grounded only in the facts given}.
-Base the suggestion only on the facts provided. Do not invent events,
-times, or document contents.
+Base the classification only on the facts provided — the computed delay
+hours and document mismatches are exact. Do not invent events, times,
+or document contents.
 """
 
 CLASSIFY_USER_TEMPLATE = """\
@@ -82,9 +83,6 @@ Latest event: {latest_event}
 Condition notes: {condition_notes}
 Computed delay hours: {delay_hours}
 Computed document mismatches: {mismatches}
-Rule classifier result: {rule_exception_type} (severity {rule_severity},
-confidence {rule_confidence}) — {rule_rationale}
-Rule signals: {rule_signals}
 
-Suggest the classification now, as JSON only.
+Classify this shipment now, as JSON only.
 """

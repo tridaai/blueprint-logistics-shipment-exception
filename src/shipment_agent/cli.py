@@ -43,10 +43,14 @@ def _print_result(
     print(f"Shipment {result.shipment_id}: {shipment.origin} -> {shipment.destination}")
     print(f"Exception : {c.exception_type.value} (severity {c.severity.value}, confidence {c.confidence})")
     print(f"Rationale : {c.rationale}")
-    if result.llm_suggestion is not None:
-        s = result.llm_suggestion
-        agreement = "agrees with rules" if s.agrees_with_rules else "DISAGREES with rules — rule result stands"
-        print(f"LLM sugg. : {s.exception_type} (severity {s.severity}, confidence {s.confidence}, via {s.backend}; {agreement})")
+    if result.cross_check is not None:
+        cc = result.cross_check
+        llm_part = (
+            f"llm={cc.llm_exception_type} ({cc.llm_confidence})"
+            if cc.llm_exception_type is not None
+            else "llm=unavailable"
+        )
+        print(f"Cross-check: rules={cc.rule_exception_type} ({cc.rule_confidence}) vs {llm_part} -> {cc.resolution}")
     if result.delay_hours is not None:
         print(f"Delay     : {result.delay_hours} hours vs schedule")
     if result.document_mismatches:
