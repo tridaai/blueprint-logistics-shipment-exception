@@ -29,6 +29,25 @@ def _find_doc(documents: list[DocumentInput], doc_type: str) -> DocumentInput | 
     return next((d for d in documents if d.doc_type.lower() == doc_type), None)
 
 
+def document_pair_warning(documents: list[DocumentInput]) -> str | None:
+    """Explain a skipped document-mismatch check, or ``None`` when it ran.
+
+    The BOL-vs-invoice comparison needs one of each. When the pair is
+    absent the check is skipped — and that must never be silent: the
+    result and the trace carry this warning so a clean mismatch list is
+    never mistaken for "documents agree".
+    """
+    bol = _find_doc(documents, "bol")
+    invoice = _find_doc(documents, "invoice")
+    if bol is not None and invoice is not None:
+        return None
+    present = ", ".join(d.doc_type for d in documents) or "none"
+    return (
+        "no bill_of_lading/invoice pair found — document mismatch check "
+        f"skipped (documents present: {present})"
+    )
+
+
 def compare_documents(documents: list[DocumentInput]) -> list[DocumentMismatch]:
     """Compare BOL vs invoice structured fields; return every disagreement."""
     bol = _find_doc(documents, "bol")

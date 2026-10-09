@@ -7,10 +7,11 @@ dicts invented mid-flight.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ExceptionType(str, Enum):
@@ -28,16 +29,105 @@ class Severity(str, Enum):
     CRITICAL = "critical"
 
 
+# The canonical document-type vocabulary. Callers (a TMS export, a
+# carrier webhook) name documents in their own dialect — bill_of_lading,
+# BOL, commercial_invoice, POD — so intake normalises onto this set.
+CANONICAL_DOC_TYPES = ("bol", "invoice", "tracking", "delivery_note", "other")
+
+_DOC_TYPE_ALIASES = {
+    "bol": "bol",
+    "bill_of_lading": "bol",
+    "bill_of_lading_(bol)": "bol",
+    "invoice": "invoice",
+    "commercial_invoice": "invoice",
+    "tracking": "tracking",
+    "tracking_note": "tracking",
+    "tracking_update": "tracking",
+    "delivery_note": "delivery_note",
+    "delivery_receipt": "delivery_note",
+    "pod": "delivery_note",
+    "proof_of_delivery": "delivery_note",
+    "other": "other",
+}
+
+
+def normalize_doc_type(raw: str) -> tuple[str, bool]:
+    """Map a caller-supplied doc_type onto the canonical vocabulary.
+
+    Returns ``(canonical, flagged)``. Aliases and case/spelling variants
+    resolve to the canonical type; an unknown type is kept as supplied
+    (normalised for case and separators) but flagged, so downstream code
+    — and the approver — can see it was not recognised.
+    """
+    key = re.sub(r"[\s\-]+", "_", str(raw).strip().lower())
+    canonical = _DOC_TYPE_ALIASES.get(key, key)
+    return canonical, canonical not in CANONICAL_DOC_TYPES
+
+
+def _coerce_field_value(value: object) -> object:
+    """Coerce a document field value to the string shape the pipeline uses.
+
+    TMS/webhook payloads carry numbers as numbers (``120``,
+    ``840.5``); the pipeline compares field values as strings, so intake
+    coerces scalars instead of rejecting the payload. ``None`` values
+    are dropped by the caller. Non-scalars pass through untouched and
+    fail validation loudly, as they should.
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return str(int(value)) if value.is_integer() else str(value)
+    return value
+
+
 class DocumentInput(BaseModel):
     """One shipment document (BOL, invoice, tracking note, …)."""
 
-    doc_type: str = Field(description="bol | invoice | tracking | delivery_note | other")
+    doc_type: str = Field(
+        description=(
+            "Canonical: bol | invoice | tracking | delivery_note | other. "
+            "Aliases (bill_of_lading, BOL, commercial_invoice, POD, …) are "
+            "normalised at intake; unknown types are kept and flagged."
+        )
+    )
+    doc_type_provided: str = Field(
+        default="", description="The doc_type exactly as the caller supplied it."
+    )
+    doc_type_flagged: bool = Field(
+        default=False,
+        description="True when the supplied doc_type is outside the canonical vocabulary.",
+    )
     document_id: str
     raw_text: str = ""
     fields: dict[str, str] = Field(
         default_factory=dict,
-        description="Structured fields extracted from the document, e.g. quantity_units, weight_kg, consignee.",
+        description="Structured fields extracted from the document, e.g. quantity_units, weight_kg, consignee. Numeric values are coerced to strings at intake.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_intake(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        raw_type = data.get("doc_type")
+        if isinstance(raw_type, str):
+            canonical, flagged = normalize_doc_type(raw_type)
+            data.setdefault("doc_type_provided", raw_type)
+            data["doc_type"] = canonical
+            data["doc_type_flagged"] = flagged
+        fields = data.get("fields")
+        if isinstance(fields, dict):
+            data["fields"] = {
+                key: _coerce_field_value(value)
+                for key, value in fields.items()
+                if value is not None
+            }
+        return data
 
 
 class ShipmentInput(BaseModel):
@@ -232,6 +322,7 @@ class AgentResult(BaseModel):
     recommended_option_id: str | None = None
     delay_hours: float | None = None
     document_mismatches: list[DocumentMismatch] = Field(default_factory=list)
+    document_check_warning: str | None = None
     policies: list[RetrievedPolicy] = Field(default_factory=list)
     draft: DraftOutput
     validation: ValidationResult

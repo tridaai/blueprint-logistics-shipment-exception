@@ -33,7 +33,7 @@ from .schemas import (
     ShipmentInput,
     TraceStep,
 )
-from .tools import compare_documents, compute_delay_hours
+from .tools import compare_documents, compute_delay_hours, document_pair_warning
 
 # Sentinel distinguishing "no LLM backend configured" (default mode — no
 # cross-check is recorded at all) from "LLM configured but its reply was
@@ -147,11 +147,14 @@ def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
         f"tool call: compare_documents(bol, invoice) -> {len(mismatches)} mismatch(es)",
         f"documents compared: {len(shipment.documents)}",
     ]
+    pair_warning = final.get("document_check_warning")
+    if pair_warning:
+        ingest_details.append(f"warning: {pair_warning}")
     for m in mismatches:
         ingest_details.append(
             f"mismatch — {m['field']}: BOL={m.get('bol_value')} vs invoice={m.get('invoice_value')}"
         )
-    if not mismatches:
+    if not mismatches and not pair_warning:
         ingest_details.append("no document mismatches found")
 
     return [
@@ -250,6 +253,7 @@ class AgentState(TypedDict, total=False):
     extractions: list[dict]
     delay_hours: float | None
     document_mismatches: list[dict]
+    document_check_warning: str | None
     classification: dict
     rule_classification: dict
     llm_classification: dict | None
@@ -287,6 +291,7 @@ def build_graph(
             "document_mismatches": [
                 m.model_dump() for m in compare_documents(shipment.documents)
             ],
+            "document_check_warning": document_pair_warning(shipment.documents),
         }
 
     def classify(state: AgentState) -> AgentState:
@@ -538,6 +543,7 @@ def run_shipment(
         recommended_option_id=final.get("recommended_option_id"),
         delay_hours=final.get("delay_hours"),
         document_mismatches=final.get("document_mismatches", []),
+        document_check_warning=final.get("document_check_warning"),
         policies=final.get("policies", []),
         draft=final["draft"],
         validation=final["validation"],
