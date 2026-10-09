@@ -42,6 +42,32 @@ from .tools import compare_documents, compute_delay_hours
 _NO_LLM_BACKEND = object()
 
 
+def _retrieve_details(final: dict, policies: list[dict]) -> list[str]:
+    """Retrieve-step details: the tool call, the hybrid merge → rerank
+    steps when they ran, then the cited policies."""
+    info = final.get("retrieval_info", {})
+    mode = info.get("mode", "keyword")
+    details = [
+        f"tool call: search_policies(query, mode={mode}) -> {len(policies)} cited"
+    ]
+    if mode == "hybrid":
+        details.append(
+            f"merge: keyword pool {info.get('keyword_pool', 0)} + semantic pool "
+            f"{info.get('semantic_pool', 0)}, deduped by policy ID"
+        )
+        details.append(
+            "rerank: reciprocal-rank score fusion over the merged pool "
+            "(score-fusion reranking in code — no cross-encoder)"
+        )
+    details += [
+        f"[{p['policy_id']}] {p['title']} (score {p['score']}"
+        + (f", via {p['retrieval']}" if p.get("retrieval") else "")
+        + f"): {p['snippet']}"
+        for p in policies
+    ]
+    return details
+
+
 def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
     """Assemble the inspectable per-step trace from the final graph state."""
     classification = final["classification"]
@@ -149,11 +175,11 @@ def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
         TraceStep(
             name="retrieve",
             title="Retrieve policy context",
-            summary=f"{len(policies)} policy snippet(s) retrieved from the synthetic SOP corpus.",
-            details=[
-                f"[{p['policy_id']}] {p['title']} (score {p['score']}): {p['snippet']}"
-                for p in policies
-            ],
+            summary=(
+                f"{len(policies)} policy snippet(s) retrieved from the synthetic SOP corpus "
+                f"(mode: {final.get('retrieval_info', {}).get('mode', 'keyword')})."
+            ),
+            details=_retrieve_details(final, policies),
         ),
         TraceStep(
             name="diagnose",
@@ -221,6 +247,7 @@ class AgentState(TypedDict, total=False):
     cross_check: dict | None
     classification_suggestion: dict | None
     policies: list[dict]
+    retrieval_info: dict
     diagnosis: dict
     recovery_options: list[dict]
     recommended_option_id: str | None
@@ -316,7 +343,12 @@ def build_graph(
             f"customer update claim packet escalation"
         )
         policies = retriever.retrieve(query, top_k=3)
-        return {"policies": [p.model_dump() for p in policies]}
+        info = {"mode": getattr(retriever, "name", "keyword")}
+        info.update(getattr(retriever, "last_stats", {}) or {})
+        return {
+            "policies": [p.model_dump() for p in policies],
+            "retrieval_info": info,
+        }
 
     def diagnose(state: AgentState) -> AgentState:
         shipment = ShipmentInput.model_validate(state["shipment"])

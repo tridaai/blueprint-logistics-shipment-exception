@@ -1,6 +1,6 @@
 """Retrieval behind a small interface — the LlamaIndex-style layer.
 
-Two implementations ship in the repo, selected with the ``RETRIEVER``
+Three implementations ship in the repo, selected with the ``RETRIEVER``
 environment variable (see :func:`get_retriever`):
 
 - ``keyword`` (default) — transparent token overlap, deterministic, offline.
@@ -10,11 +10,15 @@ environment variable (see :func:`get_retriever`):
   Anthropic has no embeddings API, so ``MODEL_BACKEND=anthropic`` still
   needs ``OPENAI_API_KEY`` for this retriever — the failure message says
   exactly that when the key is missing.
+- ``hybrid`` — runs both, merges the candidate pools, and applies an
+  explicit rerank step: reciprocal-rank score fusion in code (see
+  :func:`rerank_fused`). This is score-fusion reranking, not a
+  cross-encoder — the repo ships no cross-encoder and claims none.
 
-Production deployments would swap either for LlamaIndex over a vector
-store (pgvector, Qdrant, …) fed by the client's document systems. The
-agent only depends on the ``Retriever`` protocol, so that swap touches
-one file, not the graph.
+Production deployments would swap any of these for LlamaIndex over a
+vector store (pgvector, Qdrant, …) fed by the client's document
+systems. The agent only depends on the ``Retriever`` protocol, so that
+swap touches one file, not the graph.
 """
 
 from __future__ import annotations
@@ -49,6 +53,8 @@ class KeywordRetriever:
     offline. Score = shared tokens normalised by policy length.
     """
 
+    name = "keyword"
+
     def __init__(self, policies: list[dict[str, str]] | None = None) -> None:
         self._policies = policies if policies is not None else POLICIES
         self._index = [
@@ -71,6 +77,7 @@ class KeywordRetriever:
                     title=policy["title"],
                     snippet=policy["text"],
                     score=score,
+                    retrieval="keyword",
                 )
             )
         scored.sort(key=lambda r: r.score, reverse=True)
@@ -90,6 +97,8 @@ class SemanticRetriever:
     query is embedded per call. Same return shape as the keyword
     retriever: ``RetrievedPolicy`` snippets with similarity scores.
     """
+
+    name = "semantic"
 
     def __init__(self, policies: list[dict[str, str]] | None = None) -> None:
         self._policies = policies if policies is not None else POLICIES
@@ -151,11 +160,82 @@ class SemanticRetriever:
                 title=policy["title"],
                 snippet=policy["text"],
                 score=round(_cosine(query_vector, vector), 4),
+                retrieval="semantic",
             )
             for policy, vector in zip(self._policies, self._corpus_vectors)
         ]
         scored.sort(key=lambda r: r.score, reverse=True)
         return scored[:top_k]
+
+
+def rerank_fused(
+    keyword_results: list[RetrievedPolicy],
+    semantic_results: list[RetrievedPolicy],
+    top_k: int = 3,
+    *,
+    rrf_k: int = 60,
+) -> list[RetrievedPolicy]:
+    """The hybrid rerank step: reciprocal-rank score fusion, in code.
+
+    Keyword scores (token overlap) and semantic scores (cosine) live on
+    incomparable scales, so the merge never compares them directly.
+    Each list contributes ``1 / (rrf_k + rank)`` per policy; the fused
+    score is the sum across lists, and policies found by both retrievers
+    rank above single-list finds at similar ranks. The returned score
+    IS the fused score — labelled as such via ``retrieval`` ("keyword",
+    "semantic", or "keyword+semantic"). This is score-fusion reranking:
+    transparent and deterministic, not a cross-encoder model.
+    """
+    fused: dict[str, dict] = {}
+    for source, results in (("keyword", keyword_results), ("semantic", semantic_results)):
+        for rank, result in enumerate(results):
+            entry = fused.setdefault(
+                result.policy_id, {"policy": result, "score": 0.0, "sources": []}
+            )
+            entry["score"] += 1.0 / (rrf_k + rank + 1)
+            entry["sources"].append(source)
+            if result.score > entry["policy"].score:
+                entry["policy"] = result
+    merged = sorted(
+        fused.values(), key=lambda e: (-e["score"], e["policy"].policy_id)
+    )
+    reranked: list[RetrievedPolicy] = []
+    for entry in merged[:top_k]:
+        sources = [s for s in ("keyword", "semantic") if s in entry["sources"]]
+        reranked.append(
+            entry["policy"].model_copy(
+                update={"score": round(entry["score"], 4), "retrieval": "+".join(sources)}
+            )
+        )
+    return reranked
+
+
+class HybridRetriever:
+    """Keyword + semantic retrieval with an explicit rerank step.
+
+    Pipeline: both retrievers produce a candidate pool → the pools are
+    merged by policy ID → :func:`rerank_fused` reranks by reciprocal-rank
+    fusion → the top-k are returned and cited exactly like the other
+    retrievers' results. ``last_stats`` records the pool sizes of the
+    most recent call so the trace can show merge → rerank honestly.
+    """
+
+    name = "hybrid"
+
+    def __init__(self, policies: list[dict[str, str]] | None = None) -> None:
+        self._keyword = KeywordRetriever(policies)
+        self._semantic = SemanticRetriever(policies)
+        self.last_stats: dict[str, int] = {}
+
+    def retrieve(self, query: str, top_k: int = 3) -> list[RetrievedPolicy]:
+        pool = top_k * 2
+        keyword_results = self._keyword.retrieve(query, top_k=pool)
+        semantic_results = self._semantic.retrieve(query, top_k=pool)
+        self.last_stats = {
+            "keyword_pool": len(keyword_results),
+            "semantic_pool": len(semantic_results),
+        }
+        return rerank_fused(keyword_results, semantic_results, top_k=top_k)
 
 
 def get_retriever(name: str | None = None) -> Retriever:
@@ -170,4 +250,8 @@ def get_retriever(name: str | None = None) -> Retriever:
         return KeywordRetriever()
     if selected == "semantic":
         return SemanticRetriever()
-    raise ValueError(f"Unknown RETRIEVER: {selected!r} (expected keyword | semantic)")
+    if selected == "hybrid":
+        return HybridRetriever()
+    raise ValueError(
+        f"Unknown RETRIEVER: {selected!r} (expected keyword | semantic | hybrid)"
+    )
