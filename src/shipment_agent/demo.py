@@ -135,6 +135,12 @@ def print_trace(
     for warning in result.validation.warnings:
         print(f"    [warn] {warning}")
     print(f"    Overall: {'PASSED' if result.validation.passed else 'FAILED'}")
+    if result.repair_attempted:
+        outcome = "redraft passed" if result.repaired else "redraft still failed"
+        print(f"    Repair: bounded repair attempted ({result.repair_attempts} attempt(s)) — {outcome}")
+        if result.original_validation is not None:
+            for error in result.original_validation.errors:
+                print(f"    Original failure: {error}")
 
     print("\n[10] FINAL STATE")
     print("    PENDING_HUMAN_APPROVAL" if result.approval_status == "awaiting_approval" else f"    {result.approval_status}")

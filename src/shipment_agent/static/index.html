@@ -326,6 +326,11 @@ function render(result) {
       + (v.issues && v.issues.length ? ' — ' + v.issues.join('; ') : '')
       + (v.note ? ` <small>(${v.note})</small>` : ''));
   }
+  if (result.repair_attempted) {
+    facts.push(`Bounded repair: <strong>${result.repaired ? 'redraft passed the guardrails' : 'attempted — redraft still failed'}</strong> (${result.repair_attempts} attempt(s))`
+      + (result.original_validation && result.original_validation.errors && result.original_validation.errors.length
+        ? ' · original failure: ' + result.original_validation.errors.join('; ') : ''));
+  }
   $('facts').innerHTML = facts.join('<br>');
   renderExtractions(result.extractions);
   $('signals').innerHTML = (result.classification.signals || []).map(s => `<li>${s}</li>`).join('') || '<li>(none)</li>';

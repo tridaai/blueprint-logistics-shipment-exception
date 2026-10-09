@@ -104,3 +104,14 @@ def env_float(name: str, default: float) -> float:
         return float(raw)
     except ValueError:
         return default
+
+
+def env_int(name: str, default: int) -> int:
+    """Read an int variable, falling back to ``default`` when unset/invalid."""
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default

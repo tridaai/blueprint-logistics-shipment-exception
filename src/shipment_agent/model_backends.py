@@ -278,7 +278,7 @@ class _BaseLLMBackend:
             f"- [{p['policy_id']}] {p['title']}: {p['snippet']}"
             for p in context.get("policy_details", [])
         )
-        return DRAFT_USER_TEMPLATE.format(
+        prompt = DRAFT_USER_TEMPLATE.format(
             shipment_id=context["shipment_id"],
             origin=context["origin"],
             destination=context["destination"],
@@ -295,6 +295,17 @@ class _BaseLLMBackend:
             recommended_option=context.get("recommended_option_text") or "none scored",
             policies=policies or "none retrieved",
         )
+        feedback = context.get("repair_feedback")
+        if feedback:
+            # Bounded-repair redraft: the previous attempt failed
+            # validation — hand the model exactly what to fix.
+            prompt += (
+                "\n\nCORRECTION REQUIRED — a previous draft of this update "
+                "failed validation. Rewrite it, fixing every problem "
+                "below, and introduce no claim the facts above do not "
+                f"support:\n{feedback}"
+            )
+        return prompt
 
     @staticmethod
     def _split_subject(text: str, fallback_subject: str) -> tuple[str, str]:

@@ -25,6 +25,7 @@ from .guardrails import validate_draft
 from .model_backends import DraftContext, ModelBackend, MockModelBackend
 from .options import build_recovery_options
 from .retriever import KeywordRetriever, Retriever
+from .config import env_int, env_str, load_dotenv
 from .schemas import (
     AgentResult,
     DocumentExtraction,
@@ -32,6 +33,8 @@ from .schemas import (
     ExceptionType,
     ShipmentInput,
     TraceStep,
+    ValidationResult,
+    VerificationResult,
 )
 from .tools import compare_documents, compute_delay_hours, document_pair_warning
 from .verify import verify_draft
@@ -76,6 +79,23 @@ def _retrieve_details(final: dict, policies: list[dict]) -> list[str]:
         for p in policies
     ]
     return details
+
+
+def _repair_settings() -> tuple[bool, int]:
+    """Bounded-repair configuration (env, read at run time).
+
+    ``GUARDRAIL_REPAIR`` — on by default; ``off``/``0``/``false``/``no``
+    disables the repair loop entirely (a failed draft then behaves
+    exactly as a no-repair pipeline: it stays failed and approval is
+    refused). ``GUARDRAIL_REPAIR_MAX_ATTEMPTS`` — redraft attempts
+    allowed per run, default 1, hard-capped at 3 so a misconfigured
+    value cannot turn the loop unbounded.
+    """
+    load_dotenv()
+    raw = (env_str("GUARDRAIL_REPAIR") or "on").strip().lower()
+    enabled = raw not in {"off", "0", "false", "no"}
+    attempts = min(max(env_int("GUARDRAIL_REPAIR_MAX_ATTEMPTS", 1), 0), 3)
+    return enabled, attempts
 
 
 def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
@@ -266,7 +286,23 @@ def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
                 f"{'PASS' if c['passed'] else 'FAIL'} {c['name']} — {c['detail']}"
                 for c in validation.get("checks", [])
             ]
-            + [f"warning: {w}" for w in validation.get("warnings", [])],
+            + [f"warning: {w}" for w in validation.get("warnings", [])]
+            + (
+                [
+                    f"repair: bounded repair attempted ({final.get('repair_attempts', 0)} attempt(s)) — "
+                    + (
+                        "redraft passed the guardrails"
+                        if final.get("repaired")
+                        else "redraft still failed; original failure preserved on the result"
+                    ),
+                    *[
+                        f"original failure: {e}"
+                        for e in (final.get("original_validation") or {}).get("errors", [])
+                    ],
+                ]
+                if final.get("repair_attempted")
+                else []
+            ),
         ),
         TraceStep(
             name="human_approval",
@@ -299,6 +335,10 @@ class AgentState(TypedDict, total=False):
     draft: dict
     verification: dict
     validation: dict
+    repair_attempted: bool
+    repaired: bool
+    repair_attempts: int
+    original_validation: dict | None
     approval_status: str
 
 
@@ -472,7 +512,7 @@ def build_graph(
             "options_notes": notes,
         }
 
-    def draft(state: AgentState) -> AgentState:
+    def _build_draft(state: AgentState, repair_feedback: str = "") -> DraftOutput:
         shipment = ShipmentInput.model_validate(state["shipment"])
         classification = state["classification"]
         citations = [p["policy_id"] for p in state.get("policies", [])]
@@ -501,6 +541,7 @@ def build_graph(
                 if recommended
                 else ""
             ),
+            repair_feedback=repair_feedback,
         )
         subject, body = backend.draft_customer_update(context)
         claim_packet = {
@@ -515,10 +556,12 @@ def build_graph(
             "recommended_option_id": state.get("recommended_option_id"),
             "status": "draft — not filed",
         }
-        draft_output = DraftOutput(
+        return DraftOutput(
             subject=subject, body=body, claim_packet=claim_packet, citations=citations
         )
-        return {"draft": draft_output.model_dump()}
+
+    def draft(state: AgentState) -> AgentState:
+        return {"draft": _build_draft(state).model_dump()}
 
     def verify(state: AgentState) -> AgentState:
         draft = DraftOutput.model_validate(state["draft"])
@@ -540,16 +583,86 @@ def build_graph(
         }
         return {"verification": verification.model_dump(), "draft": draft.model_dump()}
 
-    def validate(state: AgentState) -> AgentState:
-        from .schemas import ExceptionType
-
-        result = validate_draft(
-            body=state["draft"]["body"],
+    def _run_guardrails(state: AgentState, draft: DraftOutput) -> ValidationResult:
+        return validate_draft(
+            body=draft.body,
             shipment_id=state["shipment"]["shipment_id"],
             exception_type=ExceptionType(state["classification"]["exception_type"]),
-            citations=state["draft"]["citations"],
+            citations=draft.citations,
         )
-        return {"validation": result.model_dump()}
+
+    def validate(state: AgentState) -> AgentState:
+        """Guardrails, with a bounded repair loop on failure.
+
+        On failure — and only when repair is enabled (GUARDRAIL_REPAIR,
+        default on, GUARDRAIL_REPAIR_MAX_ATTEMPTS default 1) — the agent
+        redrafts once with the guardrail failure reasons and the
+        self-verification issues fed back into the drafting prompt, then
+        re-verifies and re-validates. The original failure is preserved
+        on the result (``original_validation``) and the attempt is
+        flagged (``repair_attempted`` / ``repaired``); the guardrail
+        rules themselves never change. With repair off, a failed draft
+        stays failed, exactly as a no-repair pipeline behaves.
+        """
+        draft = DraftOutput.model_validate(state["draft"])
+        validation = _run_guardrails(state, draft)
+        update: AgentState = {
+            "validation": validation.model_dump(),
+            "repair_attempted": False,
+            "repaired": False,
+            "repair_attempts": 0,
+            "original_validation": None,
+        }
+        if validation.passed:
+            return update
+        enabled, max_attempts = _repair_settings()
+        if not enabled or max_attempts == 0:
+            return update
+        verification = (
+            VerificationResult.model_validate(state["verification"])
+            if state.get("verification")
+            else None
+        )
+        feedback_lines = ["Guardrail failures to fix:"] + [
+            f"- {error}" for error in validation.errors
+        ]
+        if verification is not None and verification.issues:
+            feedback_lines.append("Self-verification issues to address:")
+            feedback_lines += [f"- {issue}" for issue in verification.issues]
+        feedback = "\n".join(feedback_lines)
+        original = validation
+        attempts = 0
+        working = dict(state)
+        while attempts < max_attempts and not validation.passed:
+            attempts += 1
+            draft = _build_draft(working, repair_feedback=feedback)
+            verification = verify_draft(
+                draft=draft,
+                classification=state["classification"],
+                delay_hours=state.get("delay_hours"),
+                mismatches=state.get("document_mismatches", []),
+                policies=state.get("policies", []),
+                shipment_id=state["shipment"]["shipment_id"],
+                backend=backend,
+            )
+            draft.claim_packet = {
+                **draft.claim_packet,
+                "verification": verification.model_dump(),
+            }
+            validation = _run_guardrails(state, draft)
+            working = {**working, "draft": draft.model_dump()}
+        update.update(
+            {
+                "validation": validation.model_dump(),
+                "draft": draft.model_dump(),
+                "verification": verification.model_dump() if verification else None,
+                "repair_attempted": attempts > 0,
+                "repaired": validation.passed,
+                "repair_attempts": attempts,
+                "original_validation": original.model_dump(),
+            }
+        )
+        return update
 
     def human_approval(state: AgentState) -> AgentState:
         # The gate. Nothing leaves the system from here — a human must
@@ -611,6 +724,10 @@ def run_shipment(
         draft=final["draft"],
         verification=final.get("verification"),
         validation=final["validation"],
+        repair_attempted=bool(final.get("repair_attempted")),
+        repaired=bool(final.get("repaired")),
+        repair_attempts=int(final.get("repair_attempts") or 0),
+        original_validation=final.get("original_validation"),
         trace=_build_trace(shipment_model, final),
         approval_status=final.get("approval_status", "awaiting_approval"),
         external_action_taken=False,

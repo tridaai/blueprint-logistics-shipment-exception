@@ -345,6 +345,10 @@ class AgentResult(BaseModel):
     draft: DraftOutput
     verification: VerificationResult | None = None
     validation: ValidationResult
+    repair_attempted: bool = False
+    repaired: bool = False
+    repair_attempts: int = 0
+    original_validation: ValidationResult | None = None
     trace: list[TraceStep] = Field(default_factory=list)
     approval_status: str = "awaiting_approval"
     decided_by: str | None = None  # who approved/rejected, once decided
