@@ -40,6 +40,19 @@ def test_index_is_demo_console_with_brand():
     assert "docs/architecture.md" in html
     assert "Hallucination class eliminated" not in html
     assert "the graph ends here by design" not in html
+    # v2 surfaces: extraction confidences, cross-check, diagnosis, options.
+    assert 'id="extractions"' in html
+    assert 'id="crosscheck"' in html
+    assert 'id="diagnosis"' in html
+    assert 'id="options"' in html
+    assert "renderExtractions" in html and "renderCrossCheck" in html
+    assert "renderDiagnosis" in html and "renderOptions" in html
+    # The 9-step v2 pipeline diagram.
+    for label in ["1 · Extract", "3 · Classify", "5 · Diagnose", "6 · Options", "9 · Human approval"]:
+        assert label in html
+    # Anti-toy-smell: the mock is labelled an offline fallback, never
+    # presented as the agent itself.
+    assert "offline fallback" in html
 
 
 def test_brand_assets_served():

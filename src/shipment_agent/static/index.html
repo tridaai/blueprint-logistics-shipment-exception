@@ -78,7 +78,8 @@
     <img class="logo" src="/static/brand/tridaai-logo.png" alt="Trida AI">
     <div class="titles">
       <h1>Blueprint Demo Console — <span class="accent">Logistics Shipment Exception Agent</span></h1>
-      <p>Reference prototype · synthetic data only · drafts stop at a human-approval gate — nothing is ever sent.</p>
+      <p>Reference prototype · synthetic data only · drafts stop at a human-approval gate — nothing is ever sent.<br>
+      The default backend is the <strong>offline fallback</strong> (mock). Set MODEL_BACKEND to run a real provider — or a local Ollama model — through the full pipeline.</p>
     </div>
     <span class="pill">Prototype</span>
   </div>
@@ -107,11 +108,15 @@
     </p>
     <p id="rationale" style="font-size:14px"></p>
     <div id="facts" style="font-size:14px"></div>
+    <div id="extractions"></div>
     <p style="font-size:14px; margin-bottom:4px"><strong>Evidence (signals)</strong></p>
     <ul class="signals" id="signals"></ul>
+    <div id="crosscheck"></div>
 
     <p style="font-size:14px; margin:16px 0 6px"><strong>Retrieved policy context</strong></p>
     <div id="policies"></div>
+    <div id="diagnosis"></div>
+    <div id="options"></div>
 
     <p style="font-size:14px; margin:16px 0 6px"><strong>Draft customer update</strong></p>
     <pre id="draft"></pre>
@@ -138,43 +143,33 @@
 
   <section class="card">
     <h2>Architecture — how this blueprint is built</h2>
-    <svg class="arch-svg" viewBox="0 0 1040 250" role="img" aria-label="Agent pipeline architecture diagram" xmlns="http://www.w3.org/2000/svg">
+    <svg class="arch-svg" viewBox="0 0 1040 372" role="img" aria-label="Agent pipeline architecture diagram" xmlns="http://www.w3.org/2000/svg">
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0,0 L10,5 L0,10 z" fill="#4F46E5"></path>
         </marker>
       </defs>
-      <!-- row 1 -->
       <g font-family="system-ui, sans-serif">
-        <rect x="10" y="20" width="190" height="72" rx="12" fill="#EEF2FF" stroke="#4F46E5" stroke-width="1.5"></rect>
-        <text x="105" y="50" text-anchor="middle" font-size="15" font-weight="700" fill="#0A0A0A">1 · Ingest</text>
-        <text x="105" y="72" text-anchor="middle" font-size="12" fill="#6B7280">facts computed by code</text>
-        <rect x="240" y="20" width="190" height="72" rx="12" fill="#EEF2FF" stroke="#4F46E5" stroke-width="1.5"></rect>
-        <text x="335" y="50" text-anchor="middle" font-size="15" font-weight="700" fill="#0A0A0A">2 · Classify</text>
-        <text x="335" y="72" text-anchor="middle" font-size="12" fill="#6B7280">deterministic rules</text>
-        <rect x="470" y="20" width="190" height="72" rx="12" fill="#EEF2FF" stroke="#4F46E5" stroke-width="1.5"></rect>
-        <text x="565" y="50" text-anchor="middle" font-size="15" font-weight="700" fill="#0A0A0A">3 · Retrieve</text>
-        <text x="565" y="72" text-anchor="middle" font-size="12" fill="#6B7280">policy context (RAG seam)</text>
-        <rect x="700" y="20" width="190" height="72" rx="12" fill="#EEF2FF" stroke="#4F46E5" stroke-width="1.5"></rect>
-        <text x="795" y="50" text-anchor="middle" font-size="15" font-weight="700" fill="#0A0A0A">4 · Draft</text>
-        <text x="795" y="72" text-anchor="middle" font-size="12" fill="#6B7280">mock backend · LLM swap</text>
-        <line x1="202" y1="56" x2="236" y2="56" stroke="#4F46E5" stroke-width="2" marker-end="url(#arr)"></line>
-        <line x1="432" y1="56" x2="466" y2="56" stroke="#4F46E5" stroke-width="2" marker-end="url(#arr)"></line>
-        <line x1="662" y1="56" x2="696" y2="56" stroke="#4F46E5" stroke-width="2" marker-end="url(#arr)"></line>
-        <line x1="795" y1="94" x2="795" y2="126" stroke="#4F46E5" stroke-width="2" marker-end="url(#arr)"></line>
-        <!-- row 2 -->
-        <rect x="700" y="130" width="190" height="72" rx="12" fill="#EEF2FF" stroke="#4F46E5" stroke-width="1.5"></rect>
-        <text x="795" y="160" text-anchor="middle" font-size="15" font-weight="700" fill="#0A0A0A">5 · Validate</text>
-        <text x="795" y="182" text-anchor="middle" font-size="12" fill="#6B7280">guardrails as code</text>
-        <rect x="470" y="130" width="190" height="72" rx="12" fill="#FFFFFF" stroke="#B91C1C" stroke-width="1.5"></rect>
-        <text x="565" y="160" text-anchor="middle" font-size="15" font-weight="700" fill="#0A0A0A">6 · Human approval</text>
-        <text x="565" y="182" text-anchor="middle" font-size="12" fill="#B91C1C">GATE — nothing is sent</text>
-        <rect x="240" y="130" width="190" height="72" rx="12" fill="#F9FAFB" stroke="#E5E7EB" stroke-width="1.5"></rect>
-        <text x="335" y="160" text-anchor="middle" font-size="15" font-weight="700" fill="#0A0A0A">END</text>
-        <text x="335" y="182" text-anchor="middle" font-size="12" fill="#6B7280">no external action in graph</text>
-        <line x1="696" y1="166" x2="664" y2="166" stroke="#4F46E5" stroke-width="2" marker-end="url(#arr)"></line>
-        <line x1="466" y1="166" x2="434" y2="166" stroke="#4F46E5" stroke-width="2" marker-end="url(#arr)"></line>
-        <text x="10" y="232" font-size="12.5" fill="#6B7280">LangGraph StateGraph (src/shipment_agent/graph.py) · FastAPI + CLI · Pydantic schemas define inputs and results</text>
+        <rect x="10" y="20" width="240" height="76" rx="12" fill="#EEF2FF" stroke="#4F46E5" stroke-width="1.5"></rect><text x="130" y="52" text-anchor="middle" font-size="15" font-weight="700" fill="#0A0A0A">1 · Extract</text><text x="130" y="76" text-anchor="middle" font-size="11.5" fill="#6B7280">fields + confidence, cross-checked</text>
+        <rect x="270" y="20" width="240" height="76" rx="12" fill="#EEF2FF" stroke="#4F46E5" stroke-width="1.5"></rect><text x="390" y="52" text-anchor="middle" font-size="15" font-weight="700" fill="#0A0A0A">2 · Ingest</text><text x="390" y="76" text-anchor="middle" font-size="11.5" fill="#6B7280">facts computed by code (tools)</text>
+        <rect x="530" y="20" width="240" height="76" rx="12" fill="#EEF2FF" stroke="#4F46E5" stroke-width="1.5"></rect><text x="650" y="52" text-anchor="middle" font-size="15" font-weight="700" fill="#0A0A0A">3 · Classify</text><text x="650" y="76" text-anchor="middle" font-size="11.5" fill="#6B7280">rules × LLM, explicit resolution</text>
+        <rect x="790" y="20" width="240" height="76" rx="12" fill="#EEF2FF" stroke="#4F46E5" stroke-width="1.5"></rect><text x="910" y="52" text-anchor="middle" font-size="15" font-weight="700" fill="#0A0A0A">4 · Retrieve</text><text x="910" y="76" text-anchor="middle" font-size="11.5" fill="#6B7280">hybrid retrieval + rerank</text>
+        <line x1="252" y1="58" x2="266" y2="58" stroke="#4F46E5" stroke-width="2" marker-end="url(#arr)"></line>
+        <line x1="512" y1="58" x2="526" y2="58" stroke="#4F46E5" stroke-width="2" marker-end="url(#arr)"></line>
+        <line x1="772" y1="58" x2="786" y2="58" stroke="#4F46E5" stroke-width="2" marker-end="url(#arr)"></line>
+        <line x1="910" y1="98" x2="910" y2="136" stroke="#4F46E5" stroke-width="2" marker-end="url(#arr)"></line>
+        <rect x="790" y="140" width="240" height="76" rx="12" fill="#EEF2FF" stroke="#4F46E5" stroke-width="1.5"></rect><text x="910" y="172" text-anchor="middle" font-size="15" font-weight="700" fill="#0A0A0A">5 · Diagnose</text><text x="910" y="196" text-anchor="middle" font-size="11.5" fill="#6B7280">root cause, cited evidence</text>
+        <rect x="530" y="140" width="240" height="76" rx="12" fill="#EEF2FF" stroke="#4F46E5" stroke-width="1.5"></rect><text x="650" y="172" text-anchor="middle" font-size="15" font-weight="700" fill="#0A0A0A">6 · Options</text><text x="650" y="196" text-anchor="middle" font-size="11.5" fill="#6B7280">scored by deterministic code</text>
+        <rect x="270" y="140" width="240" height="76" rx="12" fill="#EEF2FF" stroke="#4F46E5" stroke-width="1.5"></rect><text x="390" y="172" text-anchor="middle" font-size="15" font-weight="700" fill="#0A0A0A">7 · Draft</text><text x="390" y="196" text-anchor="middle" font-size="11.5" fill="#6B7280">grounded in verified facts</text>
+        <rect x="10" y="140" width="240" height="76" rx="12" fill="#EEF2FF" stroke="#4F46E5" stroke-width="1.5"></rect><text x="130" y="172" text-anchor="middle" font-size="15" font-weight="700" fill="#0A0A0A">8 · Validate</text><text x="130" y="196" text-anchor="middle" font-size="11.5" fill="#6B7280">guardrails as code</text>
+        <line x1="786" y1="178" x2="774" y2="178" stroke="#4F46E5" stroke-width="2" marker-end="url(#arr)"></line>
+        <line x1="526" y1="178" x2="514" y2="178" stroke="#4F46E5" stroke-width="2" marker-end="url(#arr)"></line>
+        <line x1="266" y1="178" x2="254" y2="178" stroke="#4F46E5" stroke-width="2" marker-end="url(#arr)"></line>
+        <line x1="130" y1="218" x2="130" y2="256" stroke="#4F46E5" stroke-width="2" marker-end="url(#arr)"></line>
+        <rect x="10" y="260" width="500" height="76" rx="12" fill="#FFFFFF" stroke="#B91C1C" stroke-width="1.5"></rect><text x="260" y="292" text-anchor="middle" font-size="15" font-weight="700" fill="#0A0A0A">9 · Human approval</text><text x="260" y="316" text-anchor="middle" font-size="11.5" fill="#B91C1C">GATE — nothing is sent</text>
+        <rect x="530" y="260" width="500" height="76" rx="12" fill="#F9FAFB" stroke="#E5E7EB" stroke-width="1.5"></rect><text x="780" y="292" text-anchor="middle" font-size="15" font-weight="700" fill="#0A0A0A">END</text><text x="780" y="316" text-anchor="middle" font-size="11.5" fill="#6B7280">no external action in graph</text>
+        <line x1="512" y1="298" x2="526" y2="298" stroke="#4F46E5" stroke-width="2" marker-end="url(#arr)"></line>
+        <text x="10" y="360" font-size="12.5" fill="#6B7280">LangGraph StateGraph (src/shipment_agent/graph.py) · FastAPI + CLI · SQLite approval store · Pydantic schemas define inputs and results</text>
       </g>
     </svg>
     <p class="note">Full design decisions, trade-offs and failure modes: <code>docs/architecture.md</code> in this repository.</p>
@@ -187,7 +182,9 @@
     </div>
     <p class="note">Honest framing: this is a <strong>synthetic regression gate</strong> — it proves the code
     keeps passing its own golden cases. It is <strong>not</strong> a real-world accuracy claim. Regenerate with
-    <code>python evals/run_evals.py</code>.</p>
+    <code>python evals/run_evals.py</code>.<br>
+    Provider mode adds an opt-in LLM-judge pack (<code>evals/run_llm_evals.py</code>) that scores draft
+    groundedness with a judge model — it needs a real provider key, so it is not part of this offline gate.</p>
   </section>
 
   <section class="card">
@@ -258,6 +255,54 @@ function renderTrace(trace) {
   });
 }
 
+function renderExtractions(extractions) {
+  const wrap = $('extractions');
+  if (!extractions || !extractions.length) { wrap.innerHTML = ''; return; }
+  const statusMark = { match: '✅ match', mismatch: '❌ mismatch', missing_in_text: '⚠️ missing in text', extracted_only: 'ℹ️ extracted only', source_provided: 'source-provided' };
+  const rows = [];
+  extractions.forEach(ex => {
+    (ex.comparisons || []).forEach(c => {
+      const conf = c.confidence === null || c.confidence === undefined ? '—' : c.confidence;
+      rows.push(`<tr><td>${ex.document_id} (${ex.source.replace('_', ' ')})</td><td>${c.field}</td><td>${c.provided_value ?? '—'}</td><td>${c.extracted_value ?? '—'}</td><td>${conf}</td><td>${statusMark[c.status] || c.status}</td></tr>`);
+    });
+  });
+  wrap.innerHTML = `<p style="font-size:14px; margin:16px 0 6px"><strong>Document extraction — LLM fields vs provided, cross-checked by code</strong></p>
+    <table><thead><tr><th>Document</th><th>Field</th><th>Provided</th><th>Extracted</th><th>Confidence</th><th>Status</th></tr></thead><tbody>${rows.join('')}</tbody></table>`;
+}
+
+function renderCrossCheck(cc) {
+  const wrap = $('crosscheck');
+  if (!cc) { wrap.innerHTML = ''; return; }
+  const llm = cc.llm_suggestion;
+  const llmLine = llm
+    ? `LLM (${cc.llm_backend}): <strong>${llm.exception_type}</strong> / ${llm.severity} · confidence ${llm.confidence} — ${llm.rationale}`
+    : `LLM: no usable suggestion (${cc.note})`;
+  wrap.innerHTML = `<p style="font-size:14px; margin:16px 0 6px"><strong>Classification cross-check</strong></p>
+    <div class="policy">Rules: <strong>${cc.rule_exception_type}</strong> / ${cc.rule_severity} · confidence ${cc.rule_confidence}<br>
+    ${llmLine}<br>
+    Outcome: <strong>${cc.resolution}</strong>${cc.agreement ? ' — rules and LLM agree' : ' — they disagree'} · ${cc.note}</div>`;
+}
+
+function renderDiagnosis(d) {
+  const wrap = $('diagnosis');
+  if (!d) { wrap.innerHTML = ''; return; }
+  const evidence = (d.evidence || []).map(e => `<li>${e}</li>`).join('');
+  wrap.innerHTML = `<p style="font-size:14px; margin:16px 0 6px"><strong>Diagnosis — root cause</strong> <small>(source: ${d.source})</small></p>
+    <div class="policy"><strong>${d.root_cause}</strong><br>${d.summary}
+    ${evidence ? `<br><small>Evidence:</small><ul class="signals">${evidence}</ul>` : ''}
+    ${(d.citations || []).length ? `<small>Cited policies: ${d.citations.join(', ')}</small>` : ''}</div>`;
+}
+
+function renderOptions(options, recommendedId) {
+  const wrap = $('options');
+  if (!options || !options.length) { wrap.innerHTML = ''; return; }
+  const rows = options.map(o =>
+    `<tr><td>${o.title}${o.option_id === recommendedId ? ' <span class="badge">recommended</span>' : ''}<br><small>${o.description}</small></td><td>${o.kind.replaceAll('_', ' ')}</td><td>${o.eta_impact_hours > 0 ? '+' : ''}${o.eta_impact_hours}h</td><td>$${o.cost_estimate_usd}</td><td>${o.sla_impact}</td><td><strong>${o.score}</strong></td></tr>`).join('');
+  wrap.innerHTML = `<p style="font-size:14px; margin:16px 0 6px"><strong>Recovery options — proposed, then scored by deterministic code</strong></p>
+    <table><thead><tr><th>Option</th><th>Kind</th><th>ETA impact</th><th>Cost est.</th><th>SLA impact</th><th>Score</th></tr></thead><tbody>${rows}</tbody></table>
+    <p class="note">The draft below grounds on the recommended option. Scores are computed in code from the delay and severity — never by the model.</p>`;
+}
+
 function render(result) {
   currentId = result.shipment_id;
   currentMeta = { type: result.classification.exception_type, severity: result.classification.severity };
@@ -274,9 +319,13 @@ function render(result) {
   (result.document_mismatches || []).forEach(m =>
     facts.push(`Document mismatch — <strong>${m.field}</strong>: BOL=${m.bol_value} vs invoice=${m.invoice_value}`));
   $('facts').innerHTML = facts.join('<br>');
+  renderExtractions(result.extractions);
   $('signals').innerHTML = (result.classification.signals || []).map(s => `<li>${s}</li>`).join('') || '<li>(none)</li>';
+  renderCrossCheck(result.cross_check);
   $('policies').innerHTML = (result.policies || []).map(p =>
-    `<div class="policy"><strong>[${p.policy_id}]</strong> ${p.title} <small>(score ${p.score})</small><br><small>${p.snippet}</small></div>`).join('');
+    `<div class="policy"><strong>[${p.policy_id}]</strong> ${p.title} <small>(score ${p.score}${p.retrieval ? ' · via ' + p.retrieval : ''})</small><br><small>${p.snippet}</small></div>`).join('');
+  renderDiagnosis(result.diagnosis);
+  renderOptions(result.recovery_options, result.recommended_option_id);
   $('draft').textContent = 'Subject: ' + result.draft.subject + '\n\n' + result.draft.body;
   $('packet').textContent = JSON.stringify(result.draft.claim_packet, null, 2);
   $('checks').innerHTML = (result.validation.checks || []).map(c =>
