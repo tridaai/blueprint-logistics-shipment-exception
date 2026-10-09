@@ -11,7 +11,9 @@ from datetime import datetime
 from .schemas import DocumentInput, DocumentMismatch
 
 # Fields that must agree between the bill of lading and the invoice.
-_COMPARE_FIELDS = ("quantity_units", "weight_kg", "consignee", "sku")
+# These are also the fields the extraction node pulls out of document text.
+COMPARE_FIELDS = ("quantity_units", "weight_kg", "consignee", "sku")
+_COMPARE_FIELDS = COMPARE_FIELDS
 
 
 def compute_delay_hours(

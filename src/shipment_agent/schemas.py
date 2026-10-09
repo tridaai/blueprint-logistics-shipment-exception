@@ -82,11 +82,94 @@ class ClassificationSuggestion(BaseModel):
     agrees_with_rules: bool = True
 
 
+class FieldExtraction(BaseModel):
+    """One document field as extracted, cross-checked against the provided value.
+
+    ``confidence`` is the model's per-field confidence in provider mode;
+    it is ``None`` in the default mode, where fields are source-provided
+    (``status == "source_provided"``) and no extraction ran.
+    """
+
+    field: str
+    provided_value: str | None = None
+    extracted_value: str | None = None
+    confidence: float | None = None
+    status: str  # match | mismatch | missing_in_text | extracted_only | source_provided
+
+
+class DocumentExtraction(BaseModel):
+    """Extraction result for one document, with the deterministic cross-check."""
+
+    document_id: str
+    doc_type: str
+    source: str  # llm | provided
+    fields: list[FieldExtraction] = Field(default_factory=list)
+
+
+class ClassificationCrossCheck(BaseModel):
+    """Rules-vs-LLM classification cross-check and its resolution.
+
+    The deterministic rules and (in provider mode) the LLM classify
+    independently. ``resolution`` records what happened:
+
+    - ``rules_only`` — no LLM classification was available (default mode,
+      or the provider call failed); the rule result stands alone.
+    - ``agree`` — both paths landed on the same exception type.
+    - ``rules_authoritative`` — disagreement; the rule result stands.
+    - ``llm_adopted`` — disagreement, but the rules landed on ``none`` or
+      low confidence while the LLM was highly confident, so the LLM
+      result was adopted — always flagged for the approver.
+    """
+
+    rule_exception_type: str
+    rule_severity: str
+    rule_confidence: float
+    llm_exception_type: str | None = None
+    llm_severity: str | None = None
+    llm_confidence: float | None = None
+    llm_backend: str = ""
+    agrees: bool | None = None
+    resolution: str  # rules_only | agree | rules_authoritative | llm_adopted
+    adopted_source: str  # rules | llm
+    note: str = ""
+
+
+class Diagnosis(BaseModel):
+    """Root-cause note over the computed evidence, with citations."""
+
+    root_cause: str
+    summary: str
+    evidence: list[str] = Field(default_factory=list)
+    citations: list[str] = Field(default_factory=list)
+    source: str  # template | llm
+
+
+class RecoveryOption(BaseModel):
+    """One proposed recovery option with deterministic impact scores.
+
+    The proposer (template in default mode, LLM in provider mode) only
+    names the option. Every number here — ETA improvement, added cost,
+    SLA score, and the total ``score`` — is computed by deterministic
+    code in ``options.py``; a model never does this arithmetic.
+    """
+
+    option_id: str
+    kind: str
+    title: str
+    description: str
+    eta_improvement_hours: float
+    added_cost_units: float
+    sla_score: float
+    score: float
+    recommended: bool = False
+
+
 class RetrievedPolicy(BaseModel):
     policy_id: str
     title: str
     snippet: str
     score: float
+    retrieval: str = ""  # keyword | semantic | keyword+semantic (hybrid merge info)
 
 
 class DocumentMismatch(BaseModel):
@@ -122,11 +205,12 @@ class TraceStep(BaseModel):
     """One pipeline step, with the actual output it produced.
 
     Additive field for the demo console: the UI renders these as the
-    pipeline trace (ingest → classify → retrieve → draft → validate →
-    human approval) so a reviewer can inspect what each node really did.
+    pipeline trace (extract → ingest → classify → retrieve → diagnose →
+    options → draft → validate → human approval) so a reviewer can
+    inspect what each node really did, including its tool calls.
     """
 
-    name: str  # ingest | classify | retrieve | draft | validate | human_approval
+    name: str  # extract | ingest | classify | retrieve | diagnose | options | draft | validate | human_approval
     title: str
     status: str = "completed"  # completed | passed | failed | awaiting
     summary: str = ""
@@ -137,6 +221,11 @@ class AgentResult(BaseModel):
     shipment_id: str
     classification: Classification
     llm_suggestion: ClassificationSuggestion | None = None
+    cross_check: ClassificationCrossCheck | None = None
+    extractions: list[DocumentExtraction] = Field(default_factory=list)
+    diagnosis: Diagnosis | None = None
+    recovery_options: list[RecoveryOption] = Field(default_factory=list)
+    recommended_option_id: str | None = None
     delay_hours: float | None = None
     document_mismatches: list[DocumentMismatch] = Field(default_factory=list)
     policies: list[RetrievedPolicy] = Field(default_factory=list)

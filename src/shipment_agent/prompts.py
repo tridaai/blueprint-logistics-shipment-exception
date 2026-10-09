@@ -33,6 +33,32 @@ Write the customer update now, with the subject line on the first line
 prefixed by "Subject: ".
 """
 
+EXTRACT_SYSTEM_PROMPT = """\
+You are extracting structured fields from a logistics document (a bill
+of lading, invoice, or delivery note). Read the document text and pull
+out exactly the fields listed — nothing else, nothing invented.
+
+Respond with a single JSON object and nothing else, mapping each field
+name to an object: {"value": the exact value as written in the document
+(or null when the field does not appear), "confidence": a number
+between 0 and 1 reflecting how certain you are of that value}.
+Copy values verbatim from the text (same units, same spelling). When a
+field is absent, use value null and confidence 0.
+"""
+
+EXTRACT_USER_TEMPLATE = """\
+Document type: {doc_type}
+Document ID: {document_id}
+Fields to extract: {fields}
+
+Document text:
+---
+{raw_text}
+---
+
+Extract the fields now, as JSON only.
+"""
+
 CLASSIFY_SYSTEM_PROMPT = """\
 You are a logistics operations analyst suggesting an exception
 classification for a shipment. The deterministic rule classifier has

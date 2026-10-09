@@ -2,7 +2,8 @@
 
 Pipeline — every step is a named, inspectable node:
 
-    ingest ──► classify ──► retrieve ──► draft ──► validate ──► human_approval ──► END
+    extract ──► ingest ──► classify ──► retrieve ──► draft ──► validate
+        ──► human_approval ──► END
 
 The graph deliberately has NO node that sends a message, files a claim, or
 touches an external system. It ends at the human-approval gate. Acting on an
@@ -17,6 +18,7 @@ from typing import TypedDict
 from langgraph.graph import END, StateGraph
 
 from .classifier import classify_shipment
+from .extractor import discrepancies_from_dicts, extract_documents
 from .guardrails import validate_draft
 from .model_backends import DraftContext, ModelBackend, MockModelBackend
 from .retriever import KeywordRetriever, Retriever
@@ -51,9 +53,36 @@ def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
     policies = final.get("policies", [])
     validation = final["validation"]
 
-    ingest_details = [f"documents compared: {len(shipment.documents)}"]
-    if delay is not None:
-        ingest_details.append(f"delay vs schedule computed: {delay} hours")
+    extract_details: list[str] = []
+    extractions = final.get("extractions", [])
+    for extraction in extractions:
+        if extraction["source"] == "llm":
+            extract_details.append(
+                f"tool call: extract_document_fields({extraction['document_id']}) "
+                f"-> {len(extraction['fields'])} field(s) with confidences"
+            )
+            for f in extraction["fields"]:
+                confidence = f" · confidence {f['confidence']}" if f["confidence"] is not None else ""
+                extract_details.append(
+                    f"{f['field']}: provided {f['provided_value']!r} vs extracted "
+                    f"{f['extracted_value']!r}{confidence} — {f['status']}"
+                )
+        else:
+            extract_details.append(
+                f"{extraction['document_id']}: fields source-provided "
+                "(LLM extraction runs only with a provider backend configured)"
+            )
+    extract_details += [
+        f"discrepancy — {d}" for d in discrepancies_from_dicts(extractions)
+    ]
+    if not extract_details:
+        extract_details.append("no documents on this shipment — nothing to extract")
+
+    ingest_details = [
+        f"tool call: compute_delay_hours(scheduled_delivery, estimated_delivery) -> {delay}",
+        f"tool call: compare_documents(bol, invoice) -> {len(mismatches)} mismatch(es)",
+        f"documents compared: {len(shipment.documents)}",
+    ]
     for m in mismatches:
         ingest_details.append(
             f"mismatch — {m['field']}: BOL={m.get('bol_value')} vs invoice={m.get('invoice_value')}"
@@ -62,6 +91,17 @@ def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
         ingest_details.append("no document mismatches found")
 
     return [
+        TraceStep(
+            name="extract",
+            title="Extract document fields",
+            summary=(
+                "Typed fields extracted from document text with per-field confidence "
+                "and cross-checked against the provided values by code."
+                if any(e["source"] == "llm" for e in extractions)
+                else "Document fields taken as source-provided (LLM extraction runs in provider mode)."
+            ),
+            details=extract_details,
+        ),
         TraceStep(
             name="ingest",
             title="Ingest & compute facts",
@@ -115,6 +155,7 @@ def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
 
 class AgentState(TypedDict, total=False):
     shipment: dict
+    extractions: list[dict]
     delay_hours: float | None
     document_mismatches: list[dict]
     classification: dict
@@ -132,6 +173,11 @@ def build_graph(
     """Compile the LangGraph pipeline with injectable backend + retriever."""
     backend = backend or MockModelBackend()
     retriever = retriever or KeywordRetriever()
+
+    def extract(state: AgentState) -> AgentState:
+        shipment = ShipmentInput.model_validate(state["shipment"])
+        extractions = extract_documents(shipment, backend)
+        return {"extractions": [e.model_dump() for e in extractions]}
 
     def ingest(state: AgentState) -> AgentState:
         shipment = ShipmentInput.model_validate(state["shipment"])
@@ -259,14 +305,16 @@ def build_graph(
         return {"approval_status": "awaiting_approval"}
 
     graph = StateGraph(AgentState)
+    graph.add_node("extract", extract)
     graph.add_node("ingest", ingest)
     graph.add_node("classify", classify)
     graph.add_node("retrieve", retrieve)
     graph.add_node("draft", draft)
     graph.add_node("validate", validate)
     graph.add_node("human_approval", human_approval)
-    graph.set_entry_point("ingest")
+    graph.set_entry_point("extract")
     for source, target in [
+        ("extract", "ingest"),
         ("ingest", "classify"),
         ("classify", "retrieve"),
         ("retrieve", "draft"),
@@ -293,6 +341,7 @@ def run_shipment(
         shipment_id=shipment_model.shipment_id,
         classification=final["classification"],
         llm_suggestion=final.get("classification_suggestion"),
+        extractions=final.get("extractions", []),
         delay_hours=final.get("delay_hours"),
         document_mismatches=final.get("document_mismatches", []),
         policies=final.get("policies", []),

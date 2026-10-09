@@ -290,7 +290,7 @@ def test_suggestion_fires_on_none_result(monkeypatch, fake_anthropic):
     assert result.llm_suggestion.confidence == 0.77
     assert result.llm_suggestion.backend == "anthropic"
     assert result.llm_suggestion.agrees_with_rules is False
-    classify_step = result.trace[1]
+    classify_step = next(s for s in result.trace if s.name == "classify")
     assert any("llm suggestion" in d for d in classify_step.details)
     assert any("DISAGREEMENT" in d for d in classify_step.details)
 

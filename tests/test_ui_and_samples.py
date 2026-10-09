@@ -60,15 +60,16 @@ def test_analyze_returns_pipeline_trace():
     body = client.post("/shipments/analyze", json=samples[0]).json()
     trace = body["trace"]
     assert [s["name"] for s in trace] == [
-        "ingest", "classify", "retrieve", "draft", "validate", "human_approval",
+        "extract", "ingest", "classify", "retrieve", "draft", "validate",
+        "human_approval",
     ]
-    classify = trace[1]
+    classify = trace[2]
     assert body["classification"]["exception_type"] in classify["summary"]
     assert classify["details"], "classify step must expose evidence details"
-    validate = trace[4]
+    validate = trace[5]
     assert validate["status"] == "passed"
     assert any("references_shipment_id" in d for d in validate["details"])
-    assert trace[5]["status"] == "awaiting"
+    assert trace[6]["status"] == "awaiting"
 
 
 def test_evals_results_endpoint():

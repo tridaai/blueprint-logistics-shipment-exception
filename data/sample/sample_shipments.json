@@ -14,7 +14,7 @@
      "sku": "SKU-100",
      "weight_kg": "840"
     },
-    "raw_text": "Synthetic BOL"
+    "raw_text": "BILL OF LADING BOL-SYN-1001 Carrier: Synthetic Carrier. Route: Memphis, TN to Charlotte, NC. Consignee: Synthetic Retail Co. SKU: SKU-100. Quantity: 120 units. Weight: 840 kg."
    },
    {
     "doc_type": "invoice",
@@ -25,7 +25,7 @@
      "sku": "SKU-100",
      "weight_kg": "840"
     },
-    "raw_text": "Synthetic invoice"
+    "raw_text": "COMMERCIAL INVOICE INV-SYN-1001 Billed for freight on route Memphis, TN to Charlotte, NC. Consignee: Synthetic Retail Co. SKU: SKU-100. Quantity: 120 units. Weight: 840 kg."
    }
   ],
   "estimated_delivery": "2026-10-11T21:00:00",
@@ -51,7 +51,7 @@
      "sku": "SKU-220",
      "weight_kg": "300"
     },
-    "raw_text": "Synthetic BOL"
+    "raw_text": "BILL OF LADING BOL-SYN-1002 Carrier: Synthetic Carrier. Route: Dallas, TX to Atlanta, GA. Consignee: Synthetic Parts Ltd. SKU: SKU-220. Quantity: 40 units. Weight: 300 kg."
    }
   ],
   "estimated_delivery": "2026-10-10T15:00:00",
@@ -77,7 +77,7 @@
      "sku": "SKU-310",
      "weight_kg": "1500"
     },
-    "raw_text": "Synthetic BOL"
+    "raw_text": "BILL OF LADING BOL-SYN-1003 Carrier: Synthetic Carrier. Route: Chicago, IL to Columbus, OH. Consignee: Synthetic Foods Inc. SKU: SKU-310. Quantity: 200 units. Weight: 1500 kg."
    },
    {
     "doc_type": "invoice",
@@ -88,7 +88,7 @@
      "sku": "SKU-310",
      "weight_kg": "1350"
     },
-    "raw_text": "Synthetic invoice"
+    "raw_text": "COMMERCIAL INVOICE INV-SYN-1003 Billed for freight on route Chicago, IL to Columbus, OH. Consignee: Synthetic Foods Inc. SKU: SKU-310. Quantity: 180 units. Weight: 1350 kg."
    }
   ],
   "estimated_delivery": "2026-10-12T09:30:00",
@@ -156,7 +156,7 @@
      "sku": "SKU-410",
      "weight_kg": "420"
     },
-    "raw_text": "Synthetic BOL"
+    "raw_text": "BILL OF LADING BOL-SYN-1007 Carrier: Synthetic Carrier. Route: Savannah, GA to Jacksonville, FL. Consignee: Synthetic Garden Supply. SKU: SKU-410. Quantity: 60 units. Weight: 420 kg."
    }
   ],
   "estimated_delivery": "2026-10-10T16:00:00",
@@ -196,7 +196,7 @@
      "sku": "SKU-520",
      "weight_kg": "640"
     },
-    "raw_text": "Synthetic BOL"
+    "raw_text": "BILL OF LADING BOL-SYN-1009 Carrier: Synthetic Carrier. Route: Norfolk, VA to Richmond, VA. Consignee: Synthetic Hardware Co. SKU: SKU-520. Quantity: 80 units. Weight: 640 kg."
    },
    {
     "doc_type": "invoice",
@@ -207,7 +207,7 @@
      "sku": "SKU-520",
      "weight_kg": "640"
     },
-    "raw_text": "Synthetic invoice"
+    "raw_text": "COMMERCIAL INVOICE INV-SYN-1009 Billed for freight on route Norfolk, VA to Richmond, VA. Consignee: Synthetic Hardware Co. SKU: SKU-520. Quantity: 75 units. Weight: 640 kg."
    }
   ],
   "estimated_delivery": "2026-10-12T09:30:00",
@@ -275,7 +275,7 @@
      "sku": "SKU-310",
      "weight_kg": "512"
     },
-    "raw_text": "Synthetic BOL"
+    "raw_text": "BILL OF LADING BOL-SYN-1013 Carrier: Synthetic Carrier. Route: Columbus, OH to Nashville, TN. Consignee: Synthetic Home Goods Inc. SKU: SKU-310. Quantity: 64 units. Weight: 512 kg."
    },
    {
     "doc_type": "invoice",
@@ -286,7 +286,7 @@
      "sku": "SKU-310",
      "weight_kg": "512"
     },
-    "raw_text": "Synthetic invoice"
+    "raw_text": "COMMERCIAL INVOICE INV-SYN-1013 Billed for freight on route Columbus, OH to Nashville, TN. Consignee: Synthetic Home Goods Inc. SKU: SKU-310. Quantity: 64 units. Weight: 512 kg."
    }
   ],
   "estimated_delivery": "2026-10-11T18:00:00",

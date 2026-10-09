@@ -35,6 +35,8 @@ from .prompts import (
     CLASSIFY_USER_TEMPLATE,
     DRAFT_SYSTEM_PROMPT,
     DRAFT_USER_TEMPLATE,
+    EXTRACT_SYSTEM_PROMPT,
+    EXTRACT_USER_TEMPLATE,
 )
 
 # Shared request timeout for provider API calls (seconds), overridable
@@ -144,11 +146,13 @@ def _missing_sdk_error(backend: str, package: str) -> RuntimeError:
     )
 
 
-def _parse_suggestion(text: str, backend_name: str) -> dict | None:
-    """Parse an LLM classification suggestion; ``None`` when unusable.
+def parse_json_object(text: str) -> dict | None:
+    """Parse a model reply that should be a single JSON object.
 
-    The suggestion is advisory, so a malformed reply drops the suggestion
-    instead of failing the run — the rule result stands on its own.
+    Tolerates markdown fences and surrounding prose by falling back to
+    the outermost ``{...}`` span. Returns ``None`` when nothing usable
+    parses — callers treat an unparseable LLM reply as "no result" and
+    fall back to the deterministic path, never as a run failure.
     """
     cleaned = text.strip()
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.IGNORECASE)
@@ -162,7 +166,17 @@ def _parse_suggestion(text: str, backend_name: str) -> dict | None:
             data = json.loads(cleaned[start:end + 1])
         except (json.JSONDecodeError, ValueError):
             return None
-    if not isinstance(data, dict):
+    return data if isinstance(data, dict) else None
+
+
+def _parse_suggestion(text: str, backend_name: str) -> dict | None:
+    """Parse an LLM classification suggestion; ``None`` when unusable.
+
+    The suggestion is advisory, so a malformed reply drops the suggestion
+    instead of failing the run — the rule result stands on its own.
+    """
+    data = parse_json_object(text)
+    if data is None:
         return None
     exception_type = str(data.get("exception_type", "")).strip().lower()
     severity = str(data.get("severity", "")).strip().lower()
@@ -245,6 +259,43 @@ class _BaseLLMBackend:
         )
         text = self._complete(CLASSIFY_SYSTEM_PROMPT, user, max_tokens=300)
         return _parse_suggestion(text, self.name)
+
+    def extract_document_fields(
+        self, doc_type: str, document_id: str, raw_text: str, fields: list[str]
+    ) -> dict[str, dict] | None:
+        """Extract typed fields from one document's text (LLM backends only).
+
+        Returns ``{field: {"value": str | None, "confidence": float}}``
+        covering exactly the requested fields, or ``None`` when the
+        reply is unusable — the extraction node then falls back to the
+        source-provided fields for that document.
+        """
+        user = EXTRACT_USER_TEMPLATE.format(
+            doc_type=doc_type,
+            document_id=document_id,
+            fields=", ".join(fields),
+            raw_text=raw_text,
+        )
+        text = self._complete(EXTRACT_SYSTEM_PROMPT, user, max_tokens=400)
+        data = parse_json_object(text)
+        if data is None:
+            return None
+        extracted: dict[str, dict] = {}
+        for field in fields:
+            entry = data.get(field)
+            if not isinstance(entry, dict):
+                extracted[field] = {"value": None, "confidence": 0.0}
+                continue
+            value = entry.get("value")
+            try:
+                confidence = float(entry.get("confidence", 0.0))
+            except (TypeError, ValueError):
+                confidence = 0.0
+            extracted[field] = {
+                "value": None if value is None else str(value),
+                "confidence": min(max(confidence, 0.0), 1.0),
+            }
+        return extracted
 
 
 class OpenAIBackend(_BaseLLMBackend):

@@ -49,7 +49,7 @@ def test_syn1013_stops_at_the_gate_with_nothing_sent():
     result = run_shipment(ShipmentInput.model_validate(_sample("SYN-1013")))
     assert result.approval_status == "awaiting_approval"
     assert result.external_action_taken is False
-    validate_step = result.trace[4]
+    validate_step = next(s for s in result.trace if s.name == "validate")
     assert validate_step.status == "failed"
     assert any("no_prohibited_promises" in d for d in validate_step.details)
 
