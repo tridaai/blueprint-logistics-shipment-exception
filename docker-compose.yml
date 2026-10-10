@@ -1,9 +1,117 @@
+# Production-shaped stack for the Shipment Exception Agent.
+#
+#   docker compose up --build
+#
+# opens the console at http://localhost:8000 — fully wired, no host
+# state: decisions and graph checkpoints live in PostgreSQL (db),
+# policy vectors in pgvector in the same database, shipment
+# documents in object storage (minio). The api service is stateless;
+# scale it by adding replicas against the same db/minio.
+#
+# The default model backend is the offline mock. For a real model,
+# set MODEL_BACKEND + the provider key in your shell (or a local
+# .env — never committed):
+#   MODEL_BACKEND=openai OPENAI_API_KEY=... docker compose up --build
+# For a fully local model, layer the dev override, which re-points
+# the api at a local Ollama server (see docker-compose.local.yml):
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml \
+#     --profile local-llm up --build
+#
+# Credentials below are local-stack defaults for this reference
+# stack, overridable via the environment. A real deployment injects
+# them from a secrets manager and puts TLS in front of every hop —
+# see "What a production deploy still needs" in docs/architecture.md.
+#
+# NOT YET VERIFIED: this stack has not been built in CI (the repo has
+# no Docker build gate); the first `docker compose up --build` on a
+# developer machine is its first full exercise. The Python suite —
+# including the Postgres/pgvector integration tests — is verified.
+
 services:
   api:
-    build: .
+    build:
+      context: .
+      args:
+        # Provider SDKs (openai/anthropic) in the image; the mock
+        # backend needs none of them, a real one does.
+        UV_EXTRA_ARGS: "--extra llm"
     ports:
       - "8000:8000"
     environment:
-      MODEL_BACKEND: mock
-    # For a real LLM backend: set MODEL_BACKEND and pass your key via .env
-    # env_file: .env
+      MODEL_BACKEND: ${MODEL_BACKEND:-mock}
+      DATABASE_URL: postgresql://logistics:logistics@db:5432/logistics
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET: shipment-documents
+      S3_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      OPENAI_API_KEY: <redacted>
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      ANTHROPIC_API_KEY: <redacted>
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
+    depends_on:
+      db:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  db:
+    # PostgreSQL 16 + pgvector: records, checkpoints, vectors.
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: logistics
+      POSTGRES_PASSWORD: <redacted>
+      POSTGRES_DB: logistics
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U logistics -d logistics"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  minio:
+    # S3-compatible object storage for shipment documents.
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: <redacted>
+    ports:
+      - "9001:9001" # console; the S3 API stays on the compose network
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  minio-init:
+    # One-shot: create the documents bucket, then exit.
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: <redacted>
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD
+      && mc mb --ignore-existing local/shipment-documents"
+
+  ollama:
+    # Optional fully local model server (profile-gated; the dev
+    # override in docker-compose.local.yml wires the api to it).
+    profiles: ["local-llm"]
+    image: ollama/ollama:latest
+    volumes:
+      - ollamadata:/root/.ollama
+
+volumes:
+  pgdata:
+  miniodata:
+  ollamadata:

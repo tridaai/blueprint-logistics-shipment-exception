@@ -1,60 +1,48 @@
-# Local real stack — agent + Ollama (local LLM) + Chroma (local vectors).
+# Local development overrides — layer on top of the production-shaped
+# base stack:
 #
-#   docker compose -f docker-compose.yml -f docker-compose.local.yml --profile local up
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up
 #
-# This override reconfigures the SAME api service (no second agent to
-# drift): it rebuilds the image with the llm + vectordb extras and
-# points the agent at the Ollama and Chroma services, purely via env.
-# The default `docker compose up` (agent only, offline mock) is
-# unchanged.
-#
-# One-time model pull (after the stack is up):
-#   docker compose -f docker-compose.yml -f docker-compose.local.yml exec ollama ollama pull llama3.1
-#   docker compose -f docker-compose.yml -f docker-compose.local.yml exec ollama ollama pull nomic-embed-text
-# Then open http://localhost:8000 — extraction, cross-check, diagnosis
-# and options all run on the local model; approvals persist in the
-# agent-data volume.
-#
-# NOTE: this stack is carefully reviewed against the Dockerfile and the
-# services' documented configuration, but it has not been build-verified
-# in the blueprint's CI environment (no Docker daemon there).
+# Two jobs:
+#  1. Publish the database and the MinIO S3 API on the host, so local
+#     tooling (psql, an S3 browser, the gated integration tests) can
+#     reach them. The base file publishes neither — in the production
+#     shape only the api is exposed. With db published, the Postgres
+#     integration tests run against the stack:
+#       DATABASE_URL=postgresql://logistics:logistics@localhost:5432/logistics \
+#         uv run pytest tests/test_postgres_integration.py
+#  2. A fully local model: with the `local-llm` profile the api is
+#     re-pointed at a local Ollama server (same service, env only) —
+#     records, checkpoints and vectors still live in Postgres/pgvector
+#     and documents in MinIO; only the model moves in-house.
+#       docker compose -f docker-compose.yml -f docker-compose.local.yml \
+#         --profile local-llm up --build
+#     One-time model pulls (after the stack is up):
+#       ... exec ollama ollama pull llama3.1
+#       ... exec ollama ollama pull nomic-embed-text
+
 services:
+  db:
+    ports:
+      - "5432:5432"
+
+  minio:
+    ports:
+      - "9000:9000"
+
   api:
-    build:
-      context: .
-      args:
-        UV_EXTRA_ARGS: "--extra llm --extra vectordb"
     environment:
-      MODEL_BACKEND: ollama
+      # Local model by default in this override; force the offline
+      # mock with MODEL_BACKEND=mock in the shell if you only want
+      # the published db/minio ports.
+      MODEL_BACKEND: ${MODEL_BACKEND:-ollama}
       OLLAMA_BASE_URL: http://ollama:11434/v1
       OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1}
       OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-nomic-embed-text}
       RETRIEVER: hybrid
-      CHROMA_HOST: chroma
-      CHROMA_PORT: "8000"
-      STATE_DB_PATH: /app/.data/state.db
-    volumes:
-      - agent-data:/app/.data
     depends_on:
       - ollama
-      - chroma
 
   ollama:
-    profiles: ["local"]
-    image: ollama/ollama:latest
     ports:
       - "11434:11434"
-    volumes:
-      - ollama-models:/root/.ollama
-
-  chroma:
-    profiles: ["local"]
-    image: chromadb/chroma:latest
-    ports:
-      - "8001:8000"
-    # No data volume on purpose: the agent re-indexes the policy corpus
-    # into Chroma on first use, so an ephemeral store is self-healing.
-
-volumes:
-  agent-data:
-  ollama-models:

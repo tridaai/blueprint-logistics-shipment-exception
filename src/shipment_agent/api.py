@@ -8,8 +8,11 @@ Docs: http://localhost:8000/docs
 from __future__ import annotations
 
 import json
+import logging
 import queue
 import threading
+import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -18,6 +21,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .config import env_str, load_dotenv, silence_langchain_deprecation_warnings
+from .db import database_url, ensure_migrated
+from .db import ping as db_ping
+from .observability import configure_json_logging, new_request_id, request_id_ctx
 
 # Must precede the service import (which loads the graph/langgraph).
 silence_langchain_deprecation_warnings()
@@ -55,13 +61,71 @@ def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
 
 _AUTH = [Depends(require_api_key)]
 
+logger = logging.getLogger("shipment_agent.api")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup: JSON logging, schema migrations. Shutdown: drain.
+
+    With ``DATABASE_URL`` set, migrations run before the first
+    request is served — a production process never starts against a
+    half-migrated database. Shutdown closes the checkpointer's
+    connection pool; uvicorn's own SIGTERM handling (stop accepting,
+    finish in-flight requests, then this lifespan exit) provides the
+    graceful drain.
+    """
+    configure_json_logging(env_str("LOG_LEVEL", "INFO") or "INFO")
+    if database_url():
+        ensure_migrated()
+        logger.info("startup: migrations current, database configured")
+    else:
+        logger.info("startup: no DATABASE_URL — in-memory test doubles")
+    yield
+    try:
+        # Only an already-resolved checkpointer can hold a pool —
+        # never construct one just to shut down.
+        if service._checkpointer_resolved:
+            pool = getattr(service._resolved_checkpointer, "conn", None)
+            if pool is not None and hasattr(pool, "close"):
+                pool.close()
+    except Exception:  # shutdown must not fail on cleanup
+        pass
+    logger.info("shutdown: drained")
+
+
 app = FastAPI(
     title="Trida AI Blueprint — Logistics Shipment Exception Agent",
     description="Reference prototype. Synthetic data only. Drafts stop at a human-approval gate; no external action is ever taken.",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 service = build_service_from_env()
+
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    """Assign/propagate X-Request-ID; one JSON access line per request."""
+    request_id = request.headers.get("x-request-id") or new_request_id()
+    token = request_id_ctx.set(request_id)
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        logger.info(
+            "request",
+            extra={
+                "method": request.method,
+                "path": request.url.path,
+                "status": response.status_code,
+                "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+                "event": "http_request",
+            },
+        )
+        return response
+    finally:
+        request_id_ctx.reset(token)
 
 
 @app.exception_handler(ProviderError)
@@ -142,6 +206,32 @@ def index() -> str:
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "prototype": "trida-blueprint-logistics-shipment-exception"}
+
+
+@app.get("/readiness")
+def readiness() -> JSONResponse:
+    """Readiness = the process can serve real work.
+
+    With ``DATABASE_URL`` configured that means the system of record
+    answers a ping — a replica that cannot reach its database is not
+    ready and says so (503), so a load balancer drains it. Without a
+    database the process serves on in-memory test doubles and is
+    ready by definition; the payload names that mode honestly.
+    """
+    if database_url():
+        if db_ping():
+            return JSONResponse(
+                status_code=200,
+                content={"status": "ready", "database": "postgres"},
+            )
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not_ready", "database": "unreachable"},
+        )
+    return JSONResponse(
+        status_code=200,
+        content={"status": "ready", "database": "in-memory test doubles"},
+    )
 
 
 @app.get("/policies", dependencies=_AUTH)
