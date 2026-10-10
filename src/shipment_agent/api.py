@@ -47,7 +47,19 @@ from .wiring import build_service_from_env
 load_dotenv()
 
 
+def _auth_now():
+    """The clock the key-rotation grace check reads.
+
+    A named seam so tests can drive a fixed moment (monkeypatch
+    ``shipment_agent.api._auth_now``) instead of racing real time
+    against a grace deadline."""
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc)
+
+
 def require_api_key(
+    request: Request,
     x_api_key: str | None = Header(default=None),
     x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
 ) -> None:
@@ -73,6 +85,21 @@ def require_api_key(
     tenant is a 403 (authenticated, wrong partition); a missing or
     unrecognised key is a 401.
 
+    **Rotation.** A tenant mid-rotation holds two keys (see
+    ``config.py``): the current one, and the outgoing *previous* one,
+    which keeps working until the grace deadline
+    (``TENANT_KEY_ROTATED_AT`` + ``TENANT_KEY_GRACE_HOURS``). A
+    previous key past its deadline earns a precise 401 — the window
+    closed — rather than the generic one.
+
+    Whichever key authenticated, its **key id** is recorded on
+    ``request.state.auth_info`` — ``<tenant>:current`` /
+    ``<tenant>:previous``, or ``shared`` — an identifier, never the
+    secret. The analyze endpoint stamps it on the stored record, so
+    the audit export shows which generation each analysis arrived
+    under and an operator can watch the old key's use die out before
+    closing the window (``GET /auth/rotation``).
+
     The console page and /health stay open either way; the console
     carries API-key and tenant fields for the gated calls.
     """
@@ -81,6 +108,8 @@ def require_api_key(
         known_api_keys,
         per_tenant_keys_configured,
         tenant_api_key,
+        tenant_key_generation,
+        tenant_previous_api_key,
     )
     from .service import resolve_tenant_id
 
@@ -93,18 +122,44 @@ def require_api_key(
                 status_code=401,
                 detail="Invalid or missing API key (send the X-API-Key header).",
             )
+        request.state.auth_info = {
+            "tenant_id": resolve_tenant_id(x_tenant_id),
+            "key_id": "shared",
+            "generation": "shared",
+        }
         return
     tenant = resolve_tenant_id(x_tenant_id)
-    expected = tenant_api_key(tenant)
-    if expected is not None and x_api_key == expected:
+    generation = tenant_key_generation(tenant, x_api_key, now=_auth_now())
+    if generation is not None:
+        request.state.auth_info = {
+            "tenant_id": tenant,
+            "key_id": f"{tenant}:{generation}",
+            "generation": generation,
+        }
         return
+    expected = tenant_api_key(tenant)
     if (
         expected is None
         and tenant == DEFAULT_TENANT_ID
         and shared
         and x_api_key == shared
     ):
+        request.state.auth_info = {
+            "tenant_id": tenant,
+            "key_id": "shared",
+            "generation": "shared",
+        }
         return  # the shared key's one remaining home: the default tenant
+    previous = tenant_previous_api_key(tenant)
+    if x_api_key and previous is not None and x_api_key == previous:
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                f"That is tenant {tenant!r}'s previous API key, and its "
+                "rotation grace window has closed — send the tenant's "
+                "current key."
+            ),
+        )
     if x_api_key and x_api_key in known_api_keys():
         raise HTTPException(
             status_code=403,
@@ -325,11 +380,40 @@ def metrics(
     — the workers serve every tenant from one process, so their
     rows are deployment-wide by nature and labelled per tenant
     inside."""
+    from .config import (
+        tenant_api_keys,
+        tenant_previous_api_keys,
+        tenant_rotation_status,
+    )
     from .service import resolve_tenant_id
 
     records = service._get_store().records(tenant_id=resolve_tenant_id(x_tenant_id))
+    # Key-rotation usage is operator data like the worker rows:
+    # deployment-wide (every tenant's records), because a rotation
+    # is watched across partitions, and it carries key ids only.
+    all_records = service._get_store().records()
+    usage_tenants = (
+        set(tenant_api_keys()) | set(tenant_previous_api_keys())
+        | {record.tenant_id for record in all_records}
+    )
+    key_usage: dict[str, dict] = {}
+    for tenant in sorted(usage_tenants):
+        status = tenant_rotation_status(tenant, now=_auth_now())
+        previous_requests = sum(
+            1
+            for record in all_records
+            if record.tenant_id == tenant
+            and record.auth_key_id == f"{tenant}:previous"
+        )
+        if status["previous_key_configured"] or previous_requests:
+            key_usage[tenant] = {
+                "previous_key_requests": previous_requests,
+                "grace_open": status["grace_open"],
+            }
     payload = render_prometheus(
-        compute_metrics(records), worker_status=service.worker_status()
+        compute_metrics(records),
+        worker_status=service.worker_status(),
+        key_usage=key_usage,
     )
     return PlainTextResponse(payload, media_type="text/plain; version=0.0.4")
 
@@ -465,9 +549,51 @@ def list_samples() -> list[dict]:
     return load_sample_shipments()
 
 
+def _auth_key_id(request: Request) -> str | None:
+    """The id of the key that authenticated this request
+    (``<tenant>:current`` / ``<tenant>:previous`` / ``shared``),
+    or None when the API is open (no key configured — nothing
+    authenticated, so nothing is recorded). Set by
+    :func:`require_api_key` on ``request.state``."""
+    info = getattr(request.state, "auth_info", None)
+    return info.get("key_id") if info else None
+
+
+@app.get("/auth/rotation", dependencies=_AUTH)
+def key_rotation_status(
+    x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
+) -> dict:
+    """The operator view of the caller's tenant key rotation.
+
+    Non-secret facts only: whether a current and a previous key are
+    configured, when the rotation happened, the grace deadline, and
+    whether the window is still open — plus the previous key's
+    recorded use from the store (how many stored analyses arrived
+    under it, and the most recent one's time): the signal that says
+    when the old key can be retired. Key material is never shown —
+    the view names generations, not secrets."""
+    from .config import tenant_rotation_status
+    from .service import resolve_tenant_id
+
+    tenant = resolve_tenant_id(x_tenant_id)
+    status = tenant_rotation_status(tenant, now=_auth_now())
+    previous_id = f"{tenant}:previous"
+    used = [
+        record
+        for record in service._get_store().records(tenant_id=tenant)
+        if record.auth_key_id == previous_id
+    ]
+    status["previous_key_requests"] = {
+        "count": len(used),
+        "last_at": max((record.created_at for record in used), default=None),
+    }
+    return status
+
+
 @app.post("/shipments/analyze", response_model=AgentResult, dependencies=_AUTH)
 def analyze(
     shipment: ShipmentInput,
+    request: Request,
     response: Response,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
@@ -478,9 +604,15 @@ def analyze(
     ``idempotent_replay`` in the body and with an
     ``X-Idempotent-Replay: true`` response header — instead of
     running the pipeline (and spending model calls) again. The run
-    is recorded in the caller's tenant partition (``X-Tenant-ID``)."""
+    is recorded in the caller's tenant partition (``X-Tenant-ID``),
+    stamped with the id of the key that authenticated the request
+    (visible in the audit export — a rotation in progress shows
+    which generation each analysis arrived under)."""
     result = service.analyze(
-        shipment, idempotency_key=idempotency_key, tenant_id=x_tenant_id
+        shipment,
+        idempotency_key=idempotency_key,
+        tenant_id=x_tenant_id,
+        auth_key_id=_auth_key_id(request),
     )
     if result.idempotent_replay:
         response.headers["X-Idempotent-Replay"] = "true"
@@ -494,6 +626,7 @@ def _sse(payload: dict) -> str:
 @app.post("/shipments/analyze/stream", dependencies=_AUTH)
 def analyze_stream(
     shipment: ShipmentInput,
+    request: Request,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
 ) -> StreamingResponse:
@@ -539,6 +672,7 @@ def analyze_stream(
                 event_sink=sink,
                 idempotency_key=idempotency_key,
                 tenant_id=x_tenant_id,
+                auth_key_id=_auth_key_id(request),
             )
         except Exception as exc:  # surfaced as the run_failed event below
             outcome["error"] = exc

@@ -760,6 +760,7 @@ class ShipmentService:
         event_sink: EventSink | None = None,
         idempotency_key: str | None = None,
         tenant_id: str | None = None,
+        auth_key_id: str | None = None,
     ) -> AgentResult:
         # Backend and retriever come from the environment (MODEL_BACKEND /
         # RETRIEVER, with the repo-root .env loaded) unless injected.
@@ -776,6 +777,14 @@ class ShipmentService:
         # belongs to (see resolve_tenant_id for the precedence); the
         # record, its memory reads, and its idempotency scope all live
         # in that partition.
+        #
+        # ``auth_key_id`` (optional) is the id of the API key that
+        # authenticated the request (``<tenant>:current`` /
+        # ``<tenant>:previous`` / ``shared`` — an identifier, never
+        # the secret; the API resolves it, see api.require_api_key).
+        # It is stamped on the record so the audit export shows which
+        # key generation each analysis arrived under — how an
+        # operator watches a rotated-out key's use die out.
         model = (
             shipment
             if isinstance(shipment, ShipmentInput)
@@ -797,6 +806,7 @@ class ShipmentService:
             event_sink=event_sink,
             idempotency_key=key,
             tenant_id=tenant,
+            auth_key_id=auth_key_id,
         )
 
     def _analyze_model(
@@ -807,6 +817,7 @@ class ShipmentService:
         event_sink: EventSink | None = None,
         idempotency_key: str | None = None,
         tenant_id: str = DEFAULT_TENANT_ID,
+        auth_key_id: str | None = None,
     ) -> AgentResult:
         # Key-only documents get their text through the object-store
         # port before anything reads them (single + batch paths share
@@ -890,6 +901,7 @@ class ShipmentService:
                 shipment=self._archive_documents(model),
                 created_at=_now_iso(),
                 idempotency_key=idempotency_key,
+                auth_key_id=auth_key_id,
             )
         )
         return result

@@ -120,14 +120,22 @@ def _escape_label(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
-def render_prometheus(metrics: dict, worker_status: dict | None = None) -> str:
+def render_prometheus(
+    metrics: dict,
+    worker_status: dict | None = None,
+    key_usage: dict | None = None,
+) -> str:
     """The metrics payload as Prometheus text exposition.
 
     One HELP/TYPE header per metric family, then one sample line per
     label set — the shape strict parsers expect. ``worker_status``
     (the store's worker rows, keyed by worker name) adds the worker
     families when given: the background processes' heartbeat beside
-    the record aggregates.
+    the record aggregates. ``key_usage`` (per tenant:
+    ``previous_key_requests`` / ``grace_open``, computed by the API
+    from the records' key ids and the rotation configuration) adds
+    the key-rotation families — the "old key still in use" signal an
+    operator watches before closing a rotation grace window.
     """
     lines: list[str] = []
 
@@ -233,5 +241,25 @@ def render_prometheus(metrics: dict, worker_status: dict | None = None) -> str:
             "shipment_agent_worker_outcomes_total",
             "Cumulative outcomes recorded by each background worker, per tenant.",
             outcome_samples,
+        )
+    if key_usage:
+        family(
+            "shipment_agent_tenant_previous_key_requests_total",
+            "Stored analyses that arrived under a tenant's previous "
+            "(rotated-out) API key. Non-zero means the old key is "
+            "still in use; the grace window can close when it stops moving.",
+            [
+                ({"tenant": tenant}, usage["previous_key_requests"])
+                for tenant, usage in sorted(key_usage.items())
+            ],
+        )
+        family(
+            "shipment_agent_tenant_key_grace_open",
+            "Whether a tenant's key-rotation grace window is still open "
+            "(1) — the previous key still authenticates.",
+            [
+                ({"tenant": tenant}, 1 if usage["grace_open"] else 0)
+                for tenant, usage in sorted(key_usage.items())
+            ],
         )
     return "\n".join(lines) + "\n"

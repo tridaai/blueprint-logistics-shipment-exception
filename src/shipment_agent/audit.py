@@ -28,6 +28,7 @@ AUDIT_FIELDS = (
     "dispatch_status",
     "created_at",
     "decided_at",
+    "api_key_id",
 )
 
 
@@ -63,6 +64,10 @@ def audit_rows(records: list[ApprovalRecord]) -> list[dict]:
                 "dispatch_status": record.dispatch_status or "",
                 "created_at": record.created_at,
                 "decided_at": record.decided_at,
+                # Which key generation the analysis arrived under
+                # (an id like "acme:previous", never the secret) —
+                # the per-record trace of a key rotation.
+                "api_key_id": record.auth_key_id or "",
             }
         )
     return rows

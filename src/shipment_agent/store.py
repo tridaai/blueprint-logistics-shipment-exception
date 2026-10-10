@@ -67,6 +67,14 @@ class ApprovalRecord:
     # the same key for the same shipment returns this record instead
     # of re-running the pipeline.
     idempotency_key: str | None = None
+    # The id of the API key that authenticated the analysis request
+    # (``<tenant>:current`` / ``<tenant>:previous`` / ``shared``) —
+    # an identifier naming the key's generation, never the secret
+    # itself (see service.analyze). The audit export carries it, so
+    # a key rotation in progress is visible per record: analyses
+    # still arriving under ``:previous`` are the old key's remaining
+    # users. None when the API ran open or the caller was not the API.
+    auth_key_id: str | None = None
     # SLA breach event bookkeeping (see service.sla_breach_sweep):
     # when the sweep first fired the record's signed ``sla_breach``
     # webhook event (None = never fired — the dedupe marker, so a
@@ -213,6 +221,7 @@ def _record_to_dict(record: ApprovalRecord) -> dict:
         "dispatch_status": record.dispatch_status,
         "dispatch_attempts": record.dispatch_attempts,
         "idempotency_key": record.idempotency_key,
+        "auth_key_id": record.auth_key_id,
         "sla_breach_event_at": record.sla_breach_event_at,
         "sla_dispatch_attempts": record.sla_dispatch_attempts,
         "sla_breach_age_seconds": record.sla_breach_age_seconds,
@@ -237,6 +246,7 @@ def _record_from_dict(data: dict) -> ApprovalRecord:
         dispatch_status=data.get("dispatch_status"),
         dispatch_attempts=data.get("dispatch_attempts") or [],
         idempotency_key=data.get("idempotency_key"),
+        auth_key_id=data.get("auth_key_id"),
         sla_breach_event_at=data.get("sla_breach_event_at"),
         sla_dispatch_attempts=data.get("sla_dispatch_attempts") or [],
         sla_breach_age_seconds=data.get("sla_breach_age_seconds"),
@@ -373,7 +383,7 @@ class SQLiteStore:
         "approve_reason, created_at, decided_at, dispatch_attempts_json, "
         "idempotency_key, sla_breach_event_at, sla_dispatch_attempts_json, "
         "decision_idempotency_key, sla_breach_age_seconds, "
-        "sla_escalation_event_at, sla_escalation_attempts_json"
+        "sla_escalation_event_at, sla_escalation_attempts_json, auth_key_id"
     )
 
     def __init__(self, path: Path | str) -> None:
@@ -453,6 +463,10 @@ class SQLiteStore:
                 conn.execute(
                     "ALTER TABLE approvals ADD COLUMN sla_escalation_attempts_json TEXT NOT NULL DEFAULT '[]'"
                 )
+            if "auth_key_id" not in columns:
+                conn.execute(
+                    "ALTER TABLE approvals ADD COLUMN auth_key_id TEXT"
+                )
             # Tenancy changed the identity: a table created before it
             # keys rows by shipment_id alone, so two tenants' records
             # with the same id would shadow each other. Rebuild such a
@@ -488,6 +502,7 @@ class SQLiteStore:
                         sla_breach_age_seconds REAL,
                         sla_escalation_event_at TEXT,
                         sla_escalation_attempts_json TEXT NOT NULL DEFAULT '[]',
+                        auth_key_id TEXT,
                         PRIMARY KEY (tenant_id, shipment_id)
                     )
                     """
@@ -550,7 +565,7 @@ class SQLiteStore:
             conn.execute(
                 f"""
                 INSERT OR REPLACE INTO approvals ({self._COLUMNS})
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.tenant_id,
@@ -573,6 +588,7 @@ class SQLiteStore:
                     record.sla_breach_age_seconds,
                     record.sla_escalation_event_at,
                     json.dumps(record.sla_escalation_attempts),
+                    record.auth_key_id,
                 ),
             )
 
@@ -642,6 +658,9 @@ class SQLiteStore:
                 row["decision_idempotency_key"]
                 if "decision_idempotency_key" in keys
                 else None
+            ),
+            auth_key_id=(
+                row["auth_key_id"] if "auth_key_id" in keys else None
             ),
             created_at=row["created_at"] if "created_at" in keys else "",
             decided_at=row["decided_at"] if "decided_at" in keys else "",
