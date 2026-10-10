@@ -22,10 +22,10 @@
 # them from a secrets manager and puts TLS in front of every hop —
 # see "What a production deploy still needs" in docs/architecture.md.
 #
-# NOT YET VERIFIED: this stack has not been built in CI (the repo has
-# no Docker build gate); the first `docker compose up --build` on a
-# developer machine is its first full exercise. The Python suite —
-# including the Postgres/pgvector integration tests — is verified.
+# BUILD-VERIFIED on a developer machine (2026-10-10): the image
+# builds and the stack runs healthy. It is not built in CI (the repo
+# has no Docker build gate). The Python suite — including the
+# Postgres/pgvector integration tests — is verified.
 
 services:
   api:
