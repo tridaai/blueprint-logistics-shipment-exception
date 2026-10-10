@@ -16,7 +16,7 @@ Run it, point the agent at it, and watch real events land:
     ACTION_WEBHOOK_SECRET=<the same secret> \
     SLA_BREACH_WEBHOOK=on            # for the SLA + staleness families
 
-The four families (route on the returned ``family``):
+The five families (route on the returned ``family``):
 
 - ``approval``       — the approved claim packet (ACTION_WEBHOOK_URL).
                        The original output-routing payload: it carries
@@ -26,6 +26,9 @@ The four families (route on the returned ``family``):
 - ``sla_escalation`` — a reported breach kept aging past the ladder's
                        second threshold.
 - ``worker_stale``   — a background worker stopped reporting.
+- ``corpus_changed`` — a tenant's operator added, replaced, or
+                       removed one of the tenant's own policy
+                       documents. Carries text hashes, never text.
 
 The rules this file exists to demonstrate (receivers keep getting
 them wrong, which is why it ships):
@@ -69,8 +72,19 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-EVENT_FAMILIES = ("approval", "sla_breach", "sla_escalation", "worker_stale")
-_EVENT_FIELD_FAMILIES = ("sla_breach", "sla_escalation", "worker_stale")
+EVENT_FAMILIES = (
+    "approval",
+    "sla_breach",
+    "sla_escalation",
+    "worker_stale",
+    "corpus_changed",
+)
+_EVENT_FIELD_FAMILIES = (
+    "sla_breach",
+    "sla_escalation",
+    "worker_stale",
+    "corpus_changed",
+)
 
 
 def verify_signature(body: bytes, signature: str | None, secret: str) -> bool:
@@ -140,7 +154,7 @@ class EventLog:
 
 
 def make_handler(secret: str, log: EventLog):
-    """The request handler: one code path for all four families."""
+    """The request handler: one code path for all five families."""
 
     class WebhookHandler(BaseHTTPRequestHandler):
         def do_POST(self):  # noqa: N802 - http.server API

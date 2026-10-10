@@ -151,6 +151,21 @@ class Store(Protocol):
 
     def delete_tenant_policy(self, tenant_id: str, policy_id: str) -> bool: ...
 
+    # The tenant policy change ledger: one append-only entry per
+    # add / replace / remove of a stored document (actor key id,
+    # timestamps, text hashes, the corpus_changed webhook's
+    # outcome — never document text). The audit trail for the
+    # knowledge base, in the same ledger idiom as the delivery
+    # ledgers on the records. Partitioned by tenant exactly like
+    # the documents themselves: a tenant's history read sees only
+    # its own partition. See service.upsert_tenant_policy.
+
+    def record_tenant_policy_change(self, tenant_id: str, entry: dict) -> None: ...
+
+    def tenant_policy_history(
+        self, tenant_id: str, policy_id: str
+    ) -> list[dict]: ...
+
 
 class ObjectStore(Protocol):
     """The document-storage seam: shipment documents as objects.

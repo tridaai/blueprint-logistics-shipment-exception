@@ -639,6 +639,36 @@ async function loadCorpus() {
           loadCorpus();
         });
         div.appendChild(btn);
+        div.appendChild(document.createTextNode(' '));
+        const histBtn = document.createElement('button');
+        histBtn.textContent = 'History';
+        const histDiv = document.createElement('div');
+        histDiv.className = 'note';
+        histDiv.style.display = 'none';
+        histBtn.addEventListener('click', async () => {
+          if (histDiv.style.display !== 'none') { histDiv.style.display = 'none'; return; }
+          histDiv.style.display = 'block';
+          histDiv.textContent = 'Loading change history…';
+          try {
+            const res = await fetch('/policies/' + encodeURIComponent(doc.policy_id) + '/history', {headers: apiHeaders()});
+            if (!res.ok) throw new Error('history failed (' + res.status + ')');
+            const h = await res.json();
+            histDiv.textContent = '';
+            if (!h.changes.length) {
+              histDiv.textContent = 'No recorded changes yet.';
+            } else {
+              h.changes.forEach(ch => {
+                const line = document.createElement('div');
+                line.textContent = `${ch.at} — ${ch.action} by ${ch.actor_key_id || 'an unauthenticated caller'} · text ${(ch.text_hash || '—').slice(0, 12)}… (was ${(ch.prior_text_hash || '—').slice(0, 12)}…) · corpus_changed webhook: ${ch.webhook ? ch.webhook.outcome : '—'}`;
+                histDiv.appendChild(line);
+              });
+            }
+          } catch (e) {
+            histDiv.textContent = 'History unavailable — ' + e.message;
+          }
+        });
+        div.appendChild(histBtn);
+        div.appendChild(histDiv);
       }
       list.appendChild(div);
     });

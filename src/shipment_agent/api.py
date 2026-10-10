@@ -627,6 +627,7 @@ class PolicyDocumentRequest(BaseModel):
 @app.post("/policies", status_code=201, dependencies=_AUTH)
 def upsert_policy(
     document: PolicyDocumentRequest,
+    request: Request,
     x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
 ) -> dict:
     """Add or replace one of the caller's tenant's own policy documents.
@@ -639,10 +640,16 @@ def upsert_policy(
     tenant's bundled documents replaces it (until removed, when the
     bundled original resurfaces); an id naming a *shared* document
     is refused (422) — the shared corpus is not a tenant's to
-    redefine."""
+    redefine. The write is ledgered (see
+    ``GET /policies/{id}/history``) under the id of the key that
+    authenticated this request."""
     try:
         return service.upsert_tenant_policy(
-            x_tenant_id, document.policy_id, document.title, document.text
+            x_tenant_id,
+            document.policy_id,
+            document.title,
+            document.text,
+            actor_key_id=_auth_key_id(request),
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -651,6 +658,7 @@ def upsert_policy(
 @app.delete("/policies/{policy_id}", dependencies=_AUTH)
 def delete_policy(
     policy_id: str,
+    request: Request,
     x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
 ) -> dict:
     """Remove one of the caller's tenant's stored policy documents.
@@ -659,10 +667,14 @@ def delete_policy(
     documents are code. A 404 therefore means one of: the id is
     unknown, it names a bundled document (managed in code, not
     here), or it belongs to another tenant (whose documents are
-    invisible in this partition, as everywhere)."""
+    invisible in this partition, as everywhere). The removal is
+    ledgered like any other change (see
+    ``GET /policies/{id}/history``)."""
     from .service import resolve_tenant_id
 
-    if service.remove_tenant_policy(x_tenant_id, policy_id):
+    if service.remove_tenant_policy(
+        x_tenant_id, policy_id, actor_key_id=_auth_key_id(request)
+    ):
         return {
             "deleted": policy_id,
             "tenant_id": resolve_tenant_id(x_tenant_id),
@@ -674,6 +686,45 @@ def delete_policy(
             "corpus — bundled documents are managed in code."
         ),
     )
+
+
+@app.get("/policies/{policy_id}/history", dependencies=_AUTH)
+def policy_history(
+    policy_id: str,
+    x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
+) -> dict:
+    """One document's change ledger: who changed the corpus, when.
+
+    Every add / replace / remove of a stored document in the
+    caller's tenant partition, oldest first: the actor's key id
+    (never the secret), the change time, the SHA-256 of the text
+    before and after (hashes, never text), and the
+    ``corpus_changed`` webhook's delivery outcome. A 404 means this
+    partition holds neither the document nor any change to it —
+    another tenant's history is invisible here, exactly as its
+    documents are."""
+    from .service import resolve_tenant_id
+
+    tenant = resolve_tenant_id(x_tenant_id)
+    changes = service.tenant_policy_history(tenant, policy_id)
+    stored = any(
+        document["policy_id"] == policy_id
+        for document in service.tenant_documents(tenant)
+    )
+    if not changes and not stored:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No policy {policy_id!r} and no change history for it "
+                "in this tenant's corpus."
+            ),
+        )
+    return {
+        "policy_id": policy_id,
+        "tenant_id": tenant,
+        "count": len(changes),
+        "changes": changes,
+    }
 
 
 @app.get("/samples", dependencies=_AUTH)

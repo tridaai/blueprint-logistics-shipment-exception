@@ -276,6 +276,7 @@ class InMemoryStore:
         self._worker_status: dict[str, dict] = {}
         self._summaries: dict[str, dict] = {}
         self._tenant_policies: dict[tuple[str, str], dict] = {}
+        self._tenant_policy_history: dict[tuple[str, str], list[dict]] = {}
         self._lock = threading.Lock()
 
     # Worker status rows (see ports.Store): one summary per worker
@@ -324,6 +325,22 @@ class InMemoryStore:
     def delete_tenant_policy(self, tenant_id: str, policy_id: str) -> bool:
         with self._lock:
             return self._tenant_policies.pop((tenant_id, policy_id), None) is not None
+
+    # The tenant policy change ledger (see ports.Store): append-only
+    # entries per (tenant, policy), read back oldest first.
+    def record_tenant_policy_change(self, tenant_id: str, entry: dict) -> None:
+        with self._lock:
+            key = (tenant_id, entry["policy_id"])
+            self._tenant_policy_history.setdefault(key, []).append(dict(entry))
+
+    def tenant_policy_history(self, tenant_id: str, policy_id: str) -> list[dict]:
+        with self._lock:
+            return [
+                dict(entry)
+                for entry in self._tenant_policy_history.get(
+                    (tenant_id, policy_id), []
+                )
+            ]
 
     def save(self, record: ApprovalRecord) -> None:
         with self._lock:
@@ -675,6 +692,37 @@ class SQLiteStore:
                 (tenant_id, policy_id),
             )
             return cursor.rowcount > 0
+
+    def _ensure_tenant_policy_history_table(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tenant_policy_history (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id TEXT NOT NULL,
+                policy_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            )
+            """
+        )
+
+    def record_tenant_policy_change(self, tenant_id: str, entry: dict) -> None:
+        with self._connect() as conn:
+            self._ensure_tenant_policy_history_table(conn)
+            conn.execute(
+                "INSERT INTO tenant_policy_history "
+                "(tenant_id, policy_id, payload_json) VALUES (?, ?, ?)",
+                (tenant_id, entry["policy_id"], json.dumps(entry)),
+            )
+
+    def tenant_policy_history(self, tenant_id: str, policy_id: str) -> list[dict]:
+        with self._connect() as conn:
+            self._ensure_tenant_policy_history_table(conn)
+            rows = conn.execute(
+                "SELECT payload_json FROM tenant_policy_history "
+                "WHERE tenant_id = ? AND policy_id = ? ORDER BY seq",
+                (tenant_id, policy_id),
+            ).fetchall()
+        return [json.loads(row["payload_json"]) for row in rows]
 
     def save(self, record: ApprovalRecord) -> None:
 
@@ -1035,6 +1083,29 @@ class PostgresStore:
             )
             conn.commit()
             return cursor.rowcount > 0
+
+    # The tenant policy change ledger (see ports.Store): the
+    # tenant_policy_history table is migration 0009's; this class
+    # issues no DDL, as everywhere.
+    def record_tenant_policy_change(self, tenant_id: str, entry: dict) -> None:
+        from psycopg.types.json import Jsonb
+
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO tenant_policy_history (tenant_id, policy_id, payload) "
+                "VALUES (%s, %s, %s)",
+                (tenant_id, entry["policy_id"], Jsonb(entry)),
+            )
+            conn.commit()
+
+    def tenant_policy_history(self, tenant_id: str, policy_id: str) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT payload FROM tenant_policy_history "
+                "WHERE tenant_id = %s AND policy_id = %s ORDER BY seq",
+                (tenant_id, policy_id),
+            ).fetchall()
+        return [row[0] for row in rows]
 
     def _all_records(self, tenant_id: str | None = None) -> list[ApprovalRecord]:
         with self._connect() as conn:

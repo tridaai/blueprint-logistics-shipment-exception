@@ -110,6 +110,18 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _text_hash(text: str | None) -> str | None:
+    """SHA-256 hex of a document text, or None for no text.
+
+    The change ledger records hashes, never content: enough for an
+    operator (or a receiver of the corpus_changed event) to verify
+    exactly which text a change replaced without the corpus itself
+    travelling into ledgers and webhooks."""
+    if text is None:
+        return None
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def resolve_tenant_id(tenant_id: str | None = None) -> str:
     """Resolve the tenant a call operates on.
 
@@ -607,6 +619,45 @@ def attempt_worker_stale_dispatch(
     if not url:
         return None
     payload = build_worker_stale_payload(worker, info, detected_at)
+    return _deliver_webhook_payload(payload, url)
+
+
+def build_corpus_changed_payload(change: dict) -> dict:
+    """The ``corpus_changed`` event body for one corpus change.
+
+    A tenant's operator added, replaced, or removed one of the
+    tenant's own policy documents — the knowledge base the agent
+    retrieves from just changed, and downstream systems (a cache
+    to invalidate, an audit mirror) may need to know. The body
+    carries the change's identity and its text *hashes*, never the
+    document text: a receiver learns what changed and can verify
+    what it holds against the hashes without the corpus content
+    travelling the webhook channel.
+    """
+    return {
+        "event": "corpus_changed",
+        "tenant_id": change["tenant_id"],
+        "policy_id": change["policy_id"],
+        "action": change["action"],
+        "actor_key_id": change.get("actor_key_id"),
+        "prior_text_hash": change.get("prior_text_hash"),
+        "text_hash": change.get("text_hash"),
+        "changed_at": change["at"],
+    }
+
+
+def attempt_corpus_changed_dispatch(change: dict) -> DispatchOutcome | None:
+    """Make ONE ``corpus_changed`` delivery attempt.
+
+    Same channel, same signing, same None-when-unconfigured
+    contract as the SLA ladder's events (see
+    :func:`attempt_sla_breach_dispatch`): a corpus change is an
+    operations event, so it rides the SLA event channel
+    (``SLA_BREACH_WEBHOOK_URL`` or the approval webhook URL)."""
+    url = sla_breach_webhook_url()
+    if not url:
+        return None
+    payload = build_corpus_changed_payload(change)
     return _deliver_webhook_payload(payload, url)
 
 
@@ -2055,12 +2106,90 @@ class ShipmentService:
                 listing.append(entry)
         return listing
 
+    def _record_policy_change(
+        self,
+        tenant: str,
+        policy_id: str,
+        action: str,
+        *,
+        actor_key_id: str | None,
+        prior_text: str | None,
+        new_text: str | None,
+    ) -> dict:
+        """Ledger one corpus change and fire its event.
+
+        The change has already landed in the store when this runs;
+        the entry (action, actor key id, time, text hashes — never
+        text) is appended to the tenant's change ledger through the
+        store port, and the signed ``corpus_changed`` event is
+        delivered on the SLA event channel under its opt-in, its
+        outcome recorded on the entry itself (``disabled`` /
+        ``not_configured`` when the channel is off — observed, like
+        every event family here, not silently dropped). A store
+        double without the ledger methods simply keeps no history;
+        bookkeeping never undoes the change it records.
+        """
+        entry = {
+            "policy_id": policy_id,
+            "tenant_id": tenant,
+            "action": action,
+            "actor_key_id": actor_key_id,
+            "at": _now_iso(),
+            "prior_text_hash": _text_hash(prior_text),
+            "text_hash": _text_hash(new_text),
+        }
+        if not sla_breach_webhook_enabled():
+            entry["webhook"] = {"outcome": "disabled", "http_status": None, "error": None}
+        else:
+            outcome = attempt_corpus_changed_dispatch(entry)
+            if outcome is None:
+                entry["webhook"] = {
+                    "outcome": "not_configured",
+                    "http_status": None,
+                    "error": None,
+                }
+            else:
+                entry["webhook"] = {
+                    "outcome": outcome.status,
+                    "http_status": outcome.http_status,
+                    "error": outcome.error,
+                }
+        record = getattr(self._get_store(), "record_tenant_policy_change", None)
+        if callable(record):
+            try:
+                record(tenant, entry)
+            except Exception:  # the ledger records; it never gates the change
+                pass
+        return entry
+
+    def tenant_policy_history(
+        self, tenant_id: str | None, policy_id: str
+    ) -> list[dict]:
+        """One stored document's change ledger, oldest first.
+
+        Read through the store port, scoped to the resolved
+        tenant's partition: another tenant's changes to its own
+        documents are not visible here, exactly as the documents
+        themselves are not. A store double without the ledger
+        methods has no history.
+        """
+        tenant = resolve_tenant_id(tenant_id)
+        read = getattr(self._get_store(), "tenant_policy_history", None)
+        if not callable(read):
+            return []
+        try:
+            return read(tenant, policy_id)
+        except Exception:
+            return []
+
     def upsert_tenant_policy(
         self,
         tenant_id: str | None,
         policy_id: str,
         title: str,
         text: str,
+        *,
+        actor_key_id: str | None = None,
     ) -> dict:
         """Add or replace one of the tenant's own policy documents.
 
@@ -2074,12 +2203,20 @@ class ShipmentService:
         shipment documents: a failed archive never blocks the write).
         Retrieval picks the document up on the next run; no restart.
 
+        Every write is also a ledger entry (see
+        :meth:`_record_policy_change`): ``add`` when the corpus
+        gains a document it did not serve, ``replace`` when one it
+        did changes — the prior text being the stored document's,
+        or the bundled original's when a stored override first
+        replaces it. ``actor_key_id`` names the key generation that
+        made the change (never the secret).
+
         Refusals (``ValueError``): an empty id, title, or text; and
         an id that names a *shared* bundled policy — a tenant may
         revise its own documents, never redefine the corpus every
         tenant cites.
         """
-        from .policies_data import POLICIES
+        from .policies_data import POLICIES, policies_for_tenant
 
         tenant = resolve_tenant_id(tenant_id)
         policy_id = (policy_id or "").strip()
@@ -2094,6 +2231,22 @@ class ShipmentService:
             raise ValueError(
                 f"{policy_id} is a shared policy document — a tenant can "
                 "manage its own documents, not redefine the shared corpus."
+            )
+        # What the corpus serves under this id today is the change's
+        # "before": the stored document when one exists, else the
+        # tenant's bundled original this write would override.
+        store = self._get_store()
+        read = getattr(store, "tenant_policy", None)
+        prior = read(tenant, policy_id) if callable(read) else None
+        if prior is None:
+            prior = next(
+                (
+                    policy
+                    for policy in policies_for_tenant(tenant)
+                    if policy["policy_id"] == policy_id
+                    and policy.get("tenant_id") == tenant
+                ),
+                None,
             )
         document = {
             "policy_id": policy_id,
@@ -2121,10 +2274,22 @@ class ShipmentService:
                 "documents — there is nowhere for the document to live."
             )
         save(tenant, document)
+        self._record_policy_change(
+            tenant,
+            policy_id,
+            "replace" if prior is not None else "add",
+            actor_key_id=actor_key_id,
+            prior_text=prior["text"] if prior is not None else None,
+            new_text=text,
+        )
         return {**document, "source": "tenant"}
 
     def remove_tenant_policy(
-        self, tenant_id: str | None, policy_id: str
+        self,
+        tenant_id: str | None,
+        policy_id: str,
+        *,
+        actor_key_id: str | None = None,
     ) -> bool:
         """Remove one of the tenant's stored policy documents.
 
@@ -2134,7 +2299,10 @@ class ShipmentService:
         stored under it), and when a stored *override* of a bundled
         tenant document is removed, the bundled original simply
         resurfaces in the corpus. The archived object is deleted
-        best-effort, like every archive operation here.
+        best-effort, like every archive operation here. A removal
+        that lands is a ledger entry like any other change (see
+        :meth:`_record_policy_change`) — its ``prior_text_hash``
+        is the removed text's, so the trail survives the document.
         """
         tenant = resolve_tenant_id(tenant_id)
         store = self._get_store()
@@ -2154,4 +2322,13 @@ class ShipmentService:
                     drop(existing["object_key"])
                 except Exception:
                     pass
+        if removed:
+            self._record_policy_change(
+                tenant,
+                policy_id,
+                "remove",
+                actor_key_id=actor_key_id,
+                prior_text=existing["text"],
+                new_text=None,
+            )
         return bool(removed)

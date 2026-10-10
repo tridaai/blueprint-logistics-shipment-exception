@@ -7,12 +7,14 @@ written for the systems that consume the agent's events — and for
 the ``shipment-agent verify-webhook`` CLI, which runs the same
 checks over a captured payload:
 
-- **Family.** Every event the agent sends belongs to one of four
+- **Family.** Every event the agent sends belongs to one of five
   families: ``approval`` (the approved claim packet, the original
   output-routing payload — it predates the ``event`` field, so it
   is recognised by its shape), ``sla_breach`` and ``sla_escalation``
-  (the queue SLA ladder's two rungs), and ``worker_stale`` (the
-  observer observing the observers). One detection path names them
+  (the queue SLA ladder's two rungs), ``worker_stale`` (the
+  observer observing the observers), and ``corpus_changed`` (a
+  tenant's operator changed the knowledge base — the event carries
+  text hashes, never document text). One detection path names them
   all, so a receiver routes once instead of per-integration.
 - **Event id.** A redelivery is byte-identical to the delivery it
   retries (the approval ledger re-sends the recorded packet; the
@@ -34,9 +36,20 @@ import json
 from .service import verify_webhook_body
 
 #: The event families a receiver can be sent, in send order.
-EVENT_FAMILIES = ("approval", "sla_breach", "sla_escalation", "worker_stale")
+EVENT_FAMILIES = (
+    "approval",
+    "sla_breach",
+    "sla_escalation",
+    "worker_stale",
+    "corpus_changed",
+)
 
-_EVENT_FIELD_FAMILIES = ("sla_breach", "sla_escalation", "worker_stale")
+_EVENT_FIELD_FAMILIES = (
+    "sla_breach",
+    "sla_escalation",
+    "worker_stale",
+    "corpus_changed",
+)
 
 
 def event_family(payload: dict) -> str | None:
