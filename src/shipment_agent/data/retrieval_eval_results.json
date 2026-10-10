@@ -1,0 +1,485 @@
+{
+  "dataset": "retrieval_golden.jsonl (synthetic, labelled)",
+  "top_k": 3,
+  "embeddings": "stand-in (hashed bag-of-words)",
+  "summary": {
+    "keyword": {
+      "cases": 15,
+      "mean_recall_at_3": 1.0
+    },
+    "hybrid (stand-in embeddings)": {
+      "cases": 15,
+      "mean_recall_at_3": 1.0
+    }
+  },
+  "cases": [
+    {
+      "case_id": "RQ-01",
+      "expected": [
+        "POL-DELAY-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-COMM-01",
+            "POL-DELAY-01",
+            "POL-ESC-01"
+          ],
+          "hits": [
+            "POL-DELAY-01"
+          ],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-COMM-01",
+            "POL-DELAY-01",
+            "POL-CLAIM-01"
+          ],
+          "hits": [
+            "POL-DELAY-01"
+          ],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-02",
+      "expected": [
+        "POL-DELAY-01",
+        "POL-COMM-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-DELAY-01",
+            "POL-COMM-01",
+            "POL-NONE-01"
+          ],
+          "hits": [
+            "POL-DELAY-01",
+            "POL-COMM-01"
+          ],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-DELAY-01",
+            "POL-COMM-01",
+            "POL-NONE-01"
+          ],
+          "hits": [
+            "POL-DELAY-01",
+            "POL-COMM-01"
+          ],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-03",
+      "expected": [
+        "POL-DMG-01",
+        "POL-CLAIM-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-CLAIM-01",
+            "POL-ESC-01",
+            "POL-DMG-01"
+          ],
+          "hits": [
+            "POL-DMG-01",
+            "POL-CLAIM-01"
+          ],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-CLAIM-01",
+            "POL-ESC-01",
+            "POL-DMG-01"
+          ],
+          "hits": [
+            "POL-DMG-01",
+            "POL-CLAIM-01"
+          ],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-04",
+      "expected": [
+        "POL-OPS-77"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-OPS-77",
+            "POL-CLAIM-01",
+            "POL-ESC-01"
+          ],
+          "hits": [
+            "POL-OPS-77"
+          ],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-OPS-77",
+            "POL-CLAIM-01",
+            "POL-ESC-01"
+          ],
+          "hits": [
+            "POL-OPS-77"
+          ],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-05",
+      "expected": [
+        "POL-DOC-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-DOC-01",
+            "POL-CLAIM-01",
+            "POL-COMM-01"
+          ],
+          "hits": [
+            "POL-DOC-01"
+          ],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-DOC-01",
+            "POL-CLAIM-01",
+            "POL-COMM-01"
+          ],
+          "hits": [
+            "POL-DOC-01"
+          ],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-06",
+      "expected": [
+        "POL-APPT-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-APPT-01",
+            "POL-COMM-01",
+            "POL-CLAIM-01"
+          ],
+          "hits": [
+            "POL-APPT-01"
+          ],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-APPT-01",
+            "POL-COMM-01",
+            "POL-CLAIM-01"
+          ],
+          "hits": [
+            "POL-APPT-01"
+          ],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-07",
+      "expected": [
+        "POL-NONE-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-NONE-01",
+            "POL-COMM-01",
+            "POL-CLAIM-01"
+          ],
+          "hits": [
+            "POL-NONE-01"
+          ],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-NONE-01",
+            "POL-COMM-01",
+            "POL-ESC-01"
+          ],
+          "hits": [
+            "POL-NONE-01"
+          ],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-08",
+      "expected": [
+        "POL-ESC-01",
+        "POL-DELAY-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-ESC-01",
+            "POL-DELAY-01",
+            "POL-COMM-01"
+          ],
+          "hits": [
+            "POL-ESC-01",
+            "POL-DELAY-01"
+          ],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-ESC-01",
+            "POL-DELAY-01",
+            "POL-COMM-01"
+          ],
+          "hits": [
+            "POL-ESC-01",
+            "POL-DELAY-01"
+          ],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-09",
+      "expected": [
+        "POL-CLAIM-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-CLAIM-01",
+            "POL-DMG-01",
+            "POL-DOC-01"
+          ],
+          "hits": [
+            "POL-CLAIM-01"
+          ],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-CLAIM-01",
+            "POL-DMG-01",
+            "POL-COMM-01"
+          ],
+          "hits": [
+            "POL-CLAIM-01"
+          ],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-10",
+      "expected": [
+        "POL-COMM-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-COMM-01",
+            "POL-DELAY-01",
+            "POL-APPT-01"
+          ],
+          "hits": [
+            "POL-COMM-01"
+          ],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-COMM-01",
+            "POL-DELAY-01",
+            "POL-APPT-01"
+          ],
+          "hits": [
+            "POL-COMM-01"
+          ],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-11",
+      "expected": [
+        "POL-ESC-01",
+        "POL-DOC-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-ESC-01",
+            "POL-DOC-01",
+            "POL-DMG-01"
+          ],
+          "hits": [
+            "POL-ESC-01",
+            "POL-DOC-01"
+          ],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-ESC-01",
+            "POL-DOC-01",
+            "POL-DELAY-01"
+          ],
+          "hits": [
+            "POL-ESC-01",
+            "POL-DOC-01"
+          ],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-12",
+      "expected": [
+        "POL-DMG-01",
+        "POL-CLAIM-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-DMG-01",
+            "POL-CLAIM-01",
+            "POL-APPT-01"
+          ],
+          "hits": [
+            "POL-DMG-01",
+            "POL-CLAIM-01"
+          ],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-DMG-01",
+            "POL-CLAIM-01",
+            "POL-APPT-01"
+          ],
+          "hits": [
+            "POL-DMG-01",
+            "POL-CLAIM-01"
+          ],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-13",
+      "expected": [
+        "POL-DMG-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-CLAIM-01",
+            "POL-DMG-01",
+            "POL-ESC-01"
+          ],
+          "hits": [
+            "POL-DMG-01"
+          ],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-CLAIM-01",
+            "POL-DMG-01",
+            "POL-APPT-01"
+          ],
+          "hits": [
+            "POL-DMG-01"
+          ],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-14",
+      "expected": [
+        "POL-DELAY-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-COMM-01",
+            "POL-DELAY-01",
+            "POL-CLAIM-01"
+          ],
+          "hits": [
+            "POL-DELAY-01"
+          ],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-COMM-01",
+            "POL-CLAIM-01",
+            "POL-DELAY-01"
+          ],
+          "hits": [
+            "POL-DELAY-01"
+          ],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-15",
+      "expected": [
+        "POL-DOC-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-DOC-01",
+            "POL-ESC-01"
+          ],
+          "hits": [
+            "POL-DOC-01"
+          ],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-DOC-01",
+            "POL-ESC-01",
+            "POL-NONE-01"
+          ],
+          "hits": [
+            "POL-DOC-01"
+          ],
+          "recall_at_3": 1.0
+        }
+      }
+    }
+  ],
+  "keyword_threshold": 0.85,
+  "passed": true,
+  "framing": "Labelled relevance set used as a regression gate for retrieval ranking. Offline hybrid numbers use stand-in embeddings and measure the merge, not embedding quality.",
+  "generated_at": "2026-10-10T13:27:11+00:00"
+}

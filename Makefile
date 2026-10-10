@@ -1,4 +1,4 @@
-.PHONY: demo test evals llm-evals serve install install-pip
+.PHONY: demo test evals retrieval-evals llm-evals serve install install-pip
 
 install:  ## Install the locked set with uv (primary workflow)
 	uv sync --extra dev
@@ -14,6 +14,9 @@ test:  ## Run the pytest suite
 
 evals:  ## Run the golden-dataset evals (gate: type accuracy >= 90%)
 	uv run python evals/run_evals.py
+
+retrieval-evals:  ## Run the retrieval relevance evals (gate: keyword recall@3 >= 85%; --real measures configured embeddings)
+	uv run python evals/run_retrieval_evals.py
 
 llm-evals:  ## Opt-in LLM-mode eval pack (needs a provider key; NOT part of the default gate)
 	uv run python evals/run_llm_evals.py
