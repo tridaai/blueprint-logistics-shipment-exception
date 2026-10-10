@@ -10,10 +10,16 @@ configuration becomes concrete objects:
   their current resolution timing (the CLI and demo resolve once per
   invocation; the service resolves per analysis, which keeps batch
   runs free of shared usage counters — see ``service.py``);
-- the store comes from :func:`default_store` (``STATE_DB_PATH``);
+- the store comes from :func:`default_store` (``DATABASE_URL`` for
+  the Postgres system of record; ``STATE_DB_PATH`` selects the
+  SQLite test double);
+- the document object store comes from
+  :func:`~shipment_agent.object_store.get_object_store`
+  (``S3_BUCKET``) — resolved lazily by the service, like the
+  checkpointer;
 - the gate checkpointer comes from
   :func:`~shipment_agent.checkpoints.get_checkpointer`
-  (``CHECKPOINTS`` / ``CHECKPOINT_DB_PATH``) — resolved lazily by the
+  (``CHECKPOINTS`` / ``DATABASE_URL``) — resolved lazily by the
   service, like the backend;
 - :func:`build_service_from_env` assembles the service the API runs,
   and accepts overrides for callers that must not persist (the CLI
@@ -26,7 +32,8 @@ from __future__ import annotations
 
 from .checkpoints import get_checkpointer
 from .model_backends import get_backend
-from .ports import Checkpointer, ModelBackend, Retriever, Store
+from .object_store import get_object_store
+from .ports import Checkpointer, ModelBackend, ObjectStore, Retriever, Store
 from .retriever import get_retriever
 from .service import ShipmentService
 from .store import default_store
@@ -52,20 +59,27 @@ def build_checkpointer() -> Checkpointer | None:
     return get_checkpointer()
 
 
+def build_object_store() -> ObjectStore | None:
+    """The document object store the environment configures (see object_store)."""
+    return get_object_store()
+
+
 def build_service_from_env(
     store: Store | None = None,
     checkpointer: Checkpointer | bool | None = None,
+    object_store: ObjectStore | bool | None = None,
 ) -> ShipmentService:
     """Assemble the ShipmentService from configuration.
 
-    ``store`` / ``checkpointer`` override the configured collaborators
-    — used by the CLI batch path, which persists nothing (in-memory
-    store, checkpoints off). Backend, retriever, and (by default) the
-    checkpointer stay lazily resolved inside the service (its
-    documented behaviour: fresh per analysis unless a caller injects
-    doubles).
+    ``store`` / ``checkpointer`` / ``object_store`` override the
+    configured collaborators — used by the CLI batch path, which
+    persists nothing (in-memory store, checkpoints off). Backend,
+    retriever, and (by default) the checkpointer and object store
+    stay lazily resolved inside the service (its documented
+    behaviour: fresh per analysis unless a caller injects doubles).
     """
     return ShipmentService(
         store=store if store is not None else build_store(),
         checkpointer=checkpointer,
+        object_store=object_store,
     )

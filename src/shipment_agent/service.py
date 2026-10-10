@@ -33,7 +33,8 @@ from .checkpoints import get_checkpointer
 from .config import env_float, env_str, load_dotenv
 from .graph import resume_approval, run_shipment
 from .model_backends import ModelBackend, get_backend
-from .ports import Checkpointer, EventSink
+from .object_store import get_object_store
+from .ports import Checkpointer, EventSink, ObjectStore
 from .retriever import Retriever, get_retriever
 from .schemas import AgentResult, ShipmentInput
 from .store import ApprovalRecord, ApprovalStore, carrier_summary, default_store
@@ -107,9 +108,15 @@ class ShipmentService:
     # whatever the environment says — the CLI batch path uses this
     # because it persists nothing).
     checkpointer: Checkpointer | bool | None = None
+    # The document object store: an instance, None (= resolve from
+    # the environment, S3_BUCKET), or False (= disabled, whatever the
+    # environment says — tests and offline paths use this).
+    object_store: ObjectStore | bool | None = None
     _resolved_store: ApprovalStore | None = field(default=None, repr=False)
     _resolved_checkpointer: Checkpointer | None = field(default=None, repr=False)
     _checkpointer_resolved: bool = field(default=False, repr=False)
+    _resolved_object_store: ObjectStore | None = field(default=None, repr=False)
+    _object_store_resolved: bool = field(default=False, repr=False)
 
     def _get_store(self) -> ApprovalStore:
         if self._resolved_store is None:
@@ -126,6 +133,71 @@ class ShipmentService:
             else:
                 self._resolved_checkpointer = get_checkpointer()
         return self._resolved_checkpointer
+
+    def _get_object_store(self) -> ObjectStore | None:
+        if not self._object_store_resolved:
+            self._object_store_resolved = True
+            if self.object_store is False:
+                self._resolved_object_store = None
+            elif self.object_store is not None:
+                self._resolved_object_store = self.object_store  # type: ignore[assignment]
+            else:
+                self._resolved_object_store = get_object_store()
+        return self._resolved_object_store
+
+    def _resolve_document_texts(self, model: ShipmentInput) -> ShipmentInput:
+        """Fetch document text for key-only documents (production intake).
+
+        An adapter that already stored the document submits just its
+        ``object_key``; the pipeline needs the text, so it is fetched
+        through the port here — the one place raw bytes enter.
+        A failed fetch leaves the document text empty (the run
+        proceeds; the document checks see the gap), never raises.
+        """
+        store = self._get_object_store()
+        if store is None:
+            return model
+        documents = []
+        changed = False
+        for doc in model.documents:
+            if doc.object_key and not doc.raw_text:
+                try:
+                    text = store.get(doc.object_key).decode(
+                        "utf-8", errors="replace"
+                    )
+                except Exception:
+                    text = ""
+                if text:
+                    doc = doc.model_copy(update={"raw_text": text})
+                    changed = True
+            documents.append(doc)
+        if not changed:
+            return model
+        return model.model_copy(update={"documents": documents})
+
+    def _archive_documents(self, model: ShipmentInput) -> dict:
+        """Archive inline documents to the object store.
+
+        Returns the shipment payload to persist: the model's dump,
+        with ``object_key`` filled in for every document that was
+        written. Archiving is bookkeeping, not analysis — a failed
+        put skips that document's key and never fails the run.
+        """
+        payload = model.model_dump(mode="json")
+        store = self._get_object_store()
+        if store is None:
+            return payload
+        for index, doc in enumerate(model.documents):
+            if not doc.raw_text or doc.object_key:
+                continue
+            name = doc.document_id or f"doc-{index}"
+            key = f"shipments/{model.shipment_id}/documents/{name}.txt"
+            try:
+                store.put(key, doc.raw_text.encode("utf-8"), "text/plain; charset=utf-8")
+            except Exception:
+                continue
+            payload["documents"][index]["object_key"] = key
+        return payload
 
     def _resume_thread(self, shipment_id: str, decision: dict) -> None:
         """Complete the checkpointed graph thread with a decision.
@@ -168,6 +240,10 @@ class ShipmentService:
         retriever: Retriever,
         event_sink: EventSink | None = None,
     ) -> AgentResult:
+        # Key-only documents get their text through the object-store
+        # port before anything reads them (single + batch paths share
+        # this entry point).
+        model = self._resolve_document_texts(model)
         # Memory: what the store already knows about this consignee and
         # this lane becomes diagnosis evidence for the new analysis.
         # The raw entries ride along too — the diagnosis tool loop
@@ -195,7 +271,7 @@ class ShipmentService:
         self._get_store().save(
             ApprovalRecord(
                 result=result,
-                shipment=model.model_dump(mode="json"),
+                shipment=self._archive_documents(model),
                 created_at=_now_iso(),
             )
         )

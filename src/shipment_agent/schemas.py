@@ -102,6 +102,16 @@ class DocumentInput(BaseModel):
         description="True when the supplied doc_type is outside the canonical vocabulary.",
     )
     document_id: str
+    object_key: str = Field(
+        default="",
+        description=(
+            "Object-storage key of the document (see object_store.py). "
+            "An intake adapter may submit the key alone; the service "
+            "fetches the text through the ObjectStore port. After a "
+            "run with a store configured, inline documents are archived "
+            "and their key is recorded here on the stored shipment."
+        ),
+    )
     raw_text: str = ""
     fields: dict[str, str] = Field(
         default_factory=dict,
