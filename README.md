@@ -414,7 +414,7 @@ API, CLI, and traced demo — read the same variables.**
 | `MODEL_BACKEND` | `mock` when unset | Model backend: `anthropic` · `openai` (the standard, provider APIs) · `ollama` (local) · `mock` (offline smoke test) — `.env.example` ships set to `anthropic` |
 | `OPENAI_API_KEY` | — | Required when `MODEL_BACKEND=openai`; also the embeddings key for semantic/hybrid retrieval on cloud backends |
 | `OPENAI_MODEL` | `gpt-4o-mini` | OpenAI chat model (extraction, cross-check, diagnosis, options, drafting) |
-| `OPENAI_BASE_URL` | provider default | **The "other providers" switch**: any OpenAI-compatible endpoint — LiteLLM, Together, Groq, Azure OpenAI, a self-hosted gateway — applies to chat and embeddings |
+| `OPENAI_BASE_URL` | provider default | **The "other providers" switch**: any OpenAI-compatible endpoint — LiteLLM, Together, Groq, Azure OpenAI, a self-hosted gateway — applies to chat and embeddings. **NVIDIA NIM** (the endpoints NVIDIA's own blueprints deploy on): `https://integrate.api.nvidia.com/v1` with an `nvapi-` key from build.nvidia.com and a Nemotron model name, or a self-hosted NIM container at `http://localhost:8000/v1` |
 | `ANTHROPIC_API_KEY` | — | Required when `MODEL_BACKEND=anthropic` |
 | `ANTHROPIC_MODEL` | `claude-sonnet-4-5` | Anthropic model for the pipeline's model work |
 | `ANTHROPIC_BASE_URL` | provider default | Custom Anthropic-compatible endpoint |
