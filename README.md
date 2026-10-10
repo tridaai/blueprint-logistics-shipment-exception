@@ -37,7 +37,7 @@ the offline smoke-test backend. The primary workflow is
 ```bash
 uv sync --extra dev              # 1 · install the locked set (uv.lock)
 uv run shipment-agent-demo       # 2 · one shipment, end to end, with a trace
-uv run pytest -q                 # 3 · the full test suite (557 tests)
+uv run pytest -q                 # 3 · the full test suite (591 tests)
 ```
 
 No uv? Create a virtual environment and use pip. The direct dependencies
@@ -546,7 +546,9 @@ API, CLI, and traced demo — read the same variables.**
 | `STATE_DB_PATH` | — (unset) | SQLite **test-double** store for analyses + approval decisions (a file path, or `:memory:`). Only used when `DATABASE_URL` is unset |
 | `CHECKPOINTS` | `on` | Checkpointed approval gate: runs pause in the graph at the gate and approve/reject resume the thread. `off`/`0`/`false`/`no` = the store-only flow |
 | `CHECKPOINT_DB_PATH` | `<repo>/.data/checkpoints.db` | SQLite **test-double** checkpointer location, used when `DATABASE_URL` is unset (graph state only — the store above remains the record of decisions). With `DATABASE_URL`, the official LangGraph Postgres saver holds graph state in the same database |
-| `ACTION_WEBHOOK_SECRET` | — (unset) | When set, approval-webhook deliveries are signed: `X-Trida-Signature: sha256=<HMAC-SHA256 of the body>` so the receiver can verify the packet before acting on it |
+| `ACTION_WEBHOOK_SECRET` | — (unset) | When set, approval-webhook deliveries are signed: `X-Trida-Signature: sha256=<HMAC-SHA256 of the body>` so the receiver can verify the packet before acting on it. The receiver's half ships too: `docs/webhook-receiver.py` (a runnable reference receiver for all four event families) and `shipment-agent verify-webhook` for checking a captured payload |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | — (unset, off) | When set (with the `otel` extra installed), graph runs export OpenTelemetry spans — one per graph node, one per provider call, ids-and-counts attributes only — to this OTLP/HTTP endpoint |
+| `OTEL_SERVICE_NAME` | `shipment-agent` | The service name on exported traces |
 | `LOG_LEVEL` | `INFO` | Verbosity of the API's structured JSON logs (one JSON object per line, with `X-Request-ID` per request) |
 | `API_KEY` | — (unset) | The shared key: when set (and no per-tenant keys are configured), data endpoints require the `X-API-Key` header; when unset the API is open (local dev). Under the per-tenant model it keeps working for the `default` tenant only |
 | `LLM_JUDGE_MODEL` | backend's model | Judge model for the opt-in LLM eval pack |
@@ -787,7 +789,7 @@ the verified facts (invented ETAs and prohibited promises fail the pack),
 with per-case tokens, latency, and estimated cost. It fails loudly
 without a real provider and is never part of the default gate or CI.
 
-Test suite: **557 tests** (`pytest -q`: 552 passing, 5 Postgres
+Test suite: **591 tests** (`pytest -q`: 586 passing, 5 Postgres
 integration tests gated on `DATABASE_URL`) — classifier, tools,
 retriever (keyword, semantic, hybrid + rerank, Chroma path with a faked
 client, pgvector SQL formatting + a gated live round-trip), the retrieval query built from shipment content, intake
@@ -847,12 +849,24 @@ escalation factors (parsing and clamping, the item's own factor,
 only the critical case escalating under its faster factor),
 worker staleness (threshold parsing, the projection, one signed
 worker_stale event per episode, recovery and re-alert, the
-readiness and metrics flags), decision
+readiness and metrics flags), the escalation digest (stage
+counts, the 24h firing window naming the per-severity factors,
+oldest waiters per severity per tenant, stale workers and open
+rotation windows, the sweep storing the row the endpoint pulls),
+the signed-webhook receiver path (verification round-trips for
+all four families, the reference receiver served for real,
+dedupe across receiver restarts, the verify-webhook CLI),
+OpenTelemetry trace export (the span tree against an in-memory
+exporter — run span, node spans, provider spans parented to
+their node — ids-and-counts attributes only, off by default),
+decision
 idempotency (replay without re-dispatch or duplicated feedback,
 the spent-key conflict, the surviving 422s), and lane-conditioned
 reliability (lane dominance, the thin-lane fallback to the
 carrier-wide figures, the corridor scenario end to end), the retrieval relevance harness
-(labelled set, both rankings over the gate), provider-error translation
+(labelled set grown to 42 cases — tenant-SOP isolation scored on
+forbidden hits, stored documents hit-then-vanish through the
+service path — both rankings over the gate), provider-error translation
 (including client-construction failures) and
 recorded fallbacks, end-to-end graph, API approval/reject flow (including
 the unified `actor` field), store-contract persistence across instances
@@ -895,15 +909,16 @@ src/shipment_agent/   agent graph (11 traced steps + evidence fan-out
                       bundled samples (data/)
 migrations/           numbered SQL schema (approvals, pgvector
                       embeddings with the tenant axis, worker
-                      status, tenant policy documents), applied
+                      status, tenant policy documents, summary
+                      rows), applied
                       at startup by db.py
 docs/architecture.md  full architecture and productionisation notes
 data/sample/          synthetic shipments (14) + policy corpus mirror
 evals/                golden dataset (32 cases) + run_evals.py +
                       run_llm_evals.py (opt-in LLM-judge pack) +
-                      retrieval relevance set (15 labelled cases) +
+                      retrieval relevance set (42 labelled cases) +
                       run_retrieval_evals.py
-tests/                517 pytest tests: unit, integration, API, UI,
+tests/                591 pytest tests: unit, integration, API, UI,
                       negation, persistence, auth, LLM backends and
                       eval pack (mocked SDKs), config, retrieval,
                       object storage, observability, signed webhooks,
@@ -926,7 +941,9 @@ Shipped in this blueprint already: PostgreSQL-persisted approvals
 owned by numbered migrations), documents in S3-compatible object
 storage, optional API-key auth (a shared key, or per-tenant keys
 that bind each tenant partition to its own credential), a one-command production-shaped
-stack, structured JSON logs with request IDs, `/health` +
+stack, structured JSON logs with request IDs, OpenTelemetry trace
+export (a span per graph node and per provider call, attributes
+limited to ids and counts, behind `OTEL_EXPORTER_OTLP_ENDPOINT`), `/health` +
 `/readiness` probes, a `/metrics` endpoint (record aggregates plus
 the background workers' recorded run summaries) and an audit-trail export
 (`GET /audit/export`), multi-tenant data partitioning (records,
@@ -939,8 +956,7 @@ scopes data, keys gate partitions, neither is a person); TMS/carrier event integ
 extraction; a full post-approval action layer
 (messaging, claim filing) with idempotency and rate limits — the
 webhook's delivery ledger and bounded retries ship, and are the
-bookkeeping that layer builds on;
-distributed tracing beyond request IDs; and an eval set grown from
+bookkeeping that layer builds on; and an eval set grown from
 real approver corrections. Section 9 of the architecture doc covers
 each in detail.
 

@@ -482,7 +482,15 @@ approval. Unset (the default), approval performs no external action.
 When `ACTION_WEBHOOK_SECRET` is set, the delivery is signed —
 `X-Trida-Signature: sha256=<HMAC-SHA256 hex of the body>` — so the
 receiver can verify the packet came from the agent before acting on
-it; unset, deliveries are unsigned, as before.
+it; unset, deliveries are unsigned, as before. The receiver's half
+of the contract ships as code, not prose: `webhooks.py` names all
+four event families (approval, sla_breach, sla_escalation,
+worker_stale) through one detection path and derives the dedupe
+event id from the raw signed body, `docs/webhook-receiver.py` is a
+runnable stdlib-only reference receiver (verify over the raw bytes,
+dedupe on the event id, ack duplicates like originals), and
+`shipment-agent verify-webhook` runs the same checks over a
+captured payload.
 
 Every attempt is also written to the record's **delivery ledger**
 (`ApprovalRecord.dispatch_attempts`, persisted with the record):
@@ -808,9 +816,20 @@ Ordered by value when adapting this blueprint to your own operation:
    never swept — into a stale flag on `/readiness` and `/metrics`,
    and the SLA sweep fires one signed `worker_stale` event per
    staleness episode, ledgered on the worker's own row until a
-   fresh sweep closes the episode. Production adds distributed
-   tracing (e.g. Langfuse / OpenTelemetry) across the customer's
-   systems and classification drift dashboards.
+   fresh sweep closes the episode. Distributed tracing ships
+   in-process: behind `OTEL_EXPORTER_OTLP_ENDPOINT` (and the
+   `otel` extra), every run exports an OpenTelemetry span tree —
+   `shipment.run` over one span per graph node over one span per
+   provider call — with attributes allowlisted to ids and counts
+   (never shipment content), off by default (see `tracing.py`).
+   The queue also has its shift-level read: the SLA sweep composes
+   an **escalation digest** (breaches by stage, the last 24h of
+   ladder firings naming the per-severity factors, oldest waiter
+   per severity per tenant, stale workers, open key-rotation
+   windows) into a summary row (migration `0008`) that
+   `GET /queue/digest` pulls. Production extends the tracing
+   across the customer's own systems and adds classification
+   drift dashboards.
 6. **Evals as a regression gate:** the golden dataset grows from real
    (anonymised, consented) corrections made by approvers; every rule or
    prompt change runs against it locally (pytest + evals + demo via the
