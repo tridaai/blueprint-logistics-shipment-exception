@@ -240,12 +240,13 @@ Use these seams to adapt it — each is one file or one setting:
   `src/shipment_agent/tools_agent.py`). The deterministic mock remains
   only as the **offline fallback**. Backend interface:
   `src/shipment_agent/model_backends.py`.
-- **Hybrid retrieval + local vectors** — `RETRIEVER=keyword|semantic|hybrid`.
+- **Hybrid retrieval + vectors** — `RETRIEVER=keyword|semantic|hybrid`.
   Hybrid merges keyword and semantic candidates and reranks them by
-  reciprocal-rank fusion. With the `vectordb` extra installed, semantic
-  search runs on a local **Chroma** store (embedded, or a server via
-  `CHROMA_HOST`); without it, in-memory cosine serves behind the same
-  interface. Or implement the `Retriever` protocol in
+  reciprocal-rank fusion. Semantic vectors live in **pgvector** in the
+  application's PostgreSQL when `DATABASE_URL` is set (the production
+  path); a **Chroma** server (via `CHROMA_HOST`, the `vectordb` extra)
+  is the documented alternative, and in-memory cosine serves offline
+  behind the same interface. Or implement the `Retriever` protocol in
   `src/shipment_agent/retriever.py` (e.g. LlamaIndex); the graph doesn't
   change.
 - **Your policy corpus** — replace the synthetic SOPs in
@@ -423,11 +424,15 @@ API, CLI, and traced demo — read the same variables.**
 | `OLLAMA_EMBEDDING_MODEL` | `nomic-embed-text` | Local embedding model when the backend is Ollama |
 | `RETRIEVER` | `keyword` | Policy retrieval: `keyword` (token overlap, offline) · `semantic` (embedding cosine) · `hybrid` (both, merged + reranked by score fusion) |
 | `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model for semantic/hybrid retrieval on OpenAI(-compatible) backends |
-| `CHROMA_DIR` | `<repo>/.chroma` | Local Chroma store directory (embedded mode; git-ignored) |
-| `CHROMA_HOST` / `CHROMA_PORT` | — / `8000` | Talk to a Chroma server instead of the embedded store (the local Docker stack sets these) |
-| `STATE_DB_PATH` | `<repo>/.data/state.db` | SQLite file for analyses + approval decisions (`:memory:` = in-memory test double) |
+| `DATABASE_URL` | — (unset) | **The system of record**: PostgreSQL holding the approval store, the LangGraph checkpoints, and the pgvector policy embeddings. The compose stack sets it; a managed Postgres works the same (needs the pgvector extension). Unset = in-memory test doubles, nothing persists |
+| `S3_BUCKET` | — (unset) | When set, shipment documents are S3 objects: adapters may submit just an object key (the service fetches the text), and inline documents are archived under `shipments/<id>/documents/` with keys recorded on the stored shipment. Credentials ride the standard AWS chain |
+| `S3_ENDPOINT_URL` / `S3_REGION` | — / `us-east-1` | S3-compatible endpoint (MinIO in the compose stack); omit the endpoint for AWS S3 |
+| `CHROMA_HOST` / `CHROMA_PORT` | — / `8000` | Chroma **server** as the alternative vector store behind the retriever interface (needs the `vectordb` extra). Without `DATABASE_URL` an embedded store under `CHROMA_DIR` (default `<repo>/.chroma`) still serves legacy/tests — local vector files are not the production story |
+| `STATE_DB_PATH` | — (unset) | SQLite **test-double** store for analyses + approval decisions (a file path, or `:memory:`). Only used when `DATABASE_URL` is unset |
 | `CHECKPOINTS` | `on` | Checkpointed approval gate: runs pause in the graph at the gate and approve/reject resume the thread. `off`/`0`/`false`/`no` = the store-only flow |
-| `CHECKPOINT_DB_PATH` | `<repo>/.data/checkpoints.db` | SQLite file for LangGraph checkpoint state (graph state only — the store above remains the record of decisions) |
+| `CHECKPOINT_DB_PATH` | `<repo>/.data/checkpoints.db` | SQLite **test-double** checkpointer location, used when `DATABASE_URL` is unset (graph state only — the store above remains the record of decisions). With `DATABASE_URL`, the official LangGraph Postgres saver holds graph state in the same database |
+| `ACTION_WEBHOOK_SECRET` | — (unset) | When set, approval-webhook deliveries are signed: `X-Trida-Signature: sha256=<HMAC-SHA256 of the body>` so the receiver can verify the packet before acting on it |
+| `LOG_LEVEL` | `INFO` | Verbosity of the API's structured JSON logs (one JSON object per line, with `X-Request-ID` per request) |
 | `API_KEY` | — (unset) | When set, data endpoints require the `X-API-Key` header; when unset the API is open (local dev) |
 | `LLM_JUDGE_MODEL` | backend's model | Judge model for the opt-in LLM eval pack |
 | `LLM_TIMEOUT_SECONDS` | `60` | Request timeout for provider API calls. SDK retries are disabled (`max_retries=0`), so a dead endpoint fails within this timeout instead of stalling on silent retries |
@@ -469,11 +474,12 @@ Notes that matter:
   Anthropic has no embeddings API, so with an Anthropic backend,
   semantic retrieval still needs an OpenAI key (or use Ollama) and
   fails immediately and says so when it has neither.
-- **Local vector store.** Install the `vectordb` extra
-  (`uv sync --extra vectordb`) and semantic/hybrid retrieval runs on a
-  local Chroma store, indexed on first use. Without the extra, the
-  in-memory cosine implementation serves behind the same interface —
-  the run's trace says which store served it.
+- **Vector store.** With `DATABASE_URL` set, semantic/hybrid retrieval
+  runs on pgvector in the application's PostgreSQL (embeddings persist
+  across restarts, keyed by model + content hash). The `vectordb`
+  extra's Chroma store (server or embedded) is the alternative behind
+  the same interface; without either, in-memory cosine serves — the
+  run's trace says which store served it.
 - A missing key or missing SDK fails loudly at startup with the fix in
   the message — nothing silently falls back to the mock.
 - **Provider failures are translated, and degradations are visible.** A
@@ -519,33 +525,44 @@ pip install -e ".[dev]" -c constraints.txt
 uvicorn shipment_agent.api:app --port 8000
 ```
 
-**3 · Docker Compose (agent only, offline fallback)**
+**3 · Docker Compose — the production-shaped stack (one command)**
+
+The real topology: the stateless agent + PostgreSQL/pgvector
+(records, checkpoints, vectors) + MinIO (documents as S3 objects).
+Only the agent's port is published; decisions persist in Postgres
+across restarts and replicas.
 
 ```bash
 docker compose up --build   # serves on port 8000, mock backend by default
 docker compose down         # stop it
 ```
 
-For a real LLM backend under Docker, set `MODEL_BACKEND` and pass the
-API key through the compose file — see the `environment:` / `env_file:`
-comments in `docker-compose.yml`.
+For a real LLM backend under Docker, set `MODEL_BACKEND` and the
+provider key in your shell — the compose file passes them through
+(see the header comments in `docker-compose.yml`).
 
-**4 · Local stack — agent + Ollama + Chroma (one command)**
+**4 · Local model on the same stack — agent + Ollama (one command)**
 
-The whole real thing, fully local: the agent on a local LLM with local
-vectors, approvals persisted in a volume, configured purely by env.
+Layer the dev override on the same stack: the database and MinIO
+ports are published for local tooling (and the gated Postgres
+integration tests), and with the `local-llm` profile the agent is
+re-pointed at a local Ollama server — records, checkpoints and
+vectors still live in Postgres/pgvector, documents in MinIO; only
+the model moves in-house.
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.local.yml --profile local up
+docker compose -f docker-compose.yml -f docker-compose.local.yml --profile local-llm up --build
 # one-time model pull:
 docker compose -f docker-compose.yml -f docker-compose.local.yml exec ollama ollama pull llama3.1
 docker compose -f docker-compose.yml -f docker-compose.local.yml exec ollama ollama pull nomic-embed-text
 ```
 
 Honest status: this stack is reviewed carefully against the Dockerfile
-and both services' documented configuration, but it is **not
+and the services' documented configuration, but it is **not
 build-verified** — the environment this blueprint was developed in has
-no Docker daemon. The default compose (option 3) is unaffected.
+no Docker daemon. Its first `docker compose up --build` on a developer
+machine is its first full exercise; the Python suite, including the
+Postgres/pgvector integration tests, is verified.
 
 ## Architecture
 
@@ -600,9 +617,10 @@ the verified facts (invented ETAs and prohibited promises fail the pack),
 with per-case tokens, latency, and estimated cost. It fails loudly
 without a real provider and is never part of the default gate or CI.
 
-Test suite: **343 tests, all passing** (`pytest -q`) — classifier, tools,
+Test suite: **368 tests** (`pytest -q`: 364 passing, 4 Postgres
+integration tests gated on `DATABASE_URL`) — classifier, tools,
 retriever (keyword, semantic, hybrid + rerank, Chroma path with a faked
-client), the retrieval query built from shipment content, intake
+client, pgvector SQL formatting + a gated live round-trip), the retrieval query built from shipment content, intake
 normalization (doc-type aliases, numeric coercion, the skipped-check
 warning), extraction and its cross-check, the classification cross-check
 and its resolution policy, diagnosis (including the provider-mode
@@ -624,7 +642,8 @@ disqualifier, output
 routing against a local stub server, provider-error translation
 (including client-construction failures) and
 recorded fallbacks, end-to-end graph, API approval/reject flow (including
-the unified `actor` field), SQLite persistence across instances,
+the unified `actor` field), store-contract persistence across instances
+(SQLite double here; Postgres in the gated integration tests),
 API-key auth, the web UI, a negation suite
 covering the inputs humans try first ("no damage reported", "not
 damaged", "undamaged", "damage: none", "no discrepancy found" — none of
@@ -643,41 +662,56 @@ src/shipment_agent/   agent graph (11 traced steps + evidence fan-out
                       resilience policy, classifier + cross-check,
                       extractor, injection screening, diagnosis (agentic
                       tool loop in provider mode), options scorer,
-                      retriever (keyword / semantic / hybrid, Chroma or
-                      memory), guardrails, self-verification, independent
+                      retriever (keyword / semantic / hybrid, pgvector
+                      in Postgres / Chroma / memory), guardrails,
+                      self-verification, independent
                       reviewer, repair loop, token budget, memory +
                       reviewer feedback loop, clarification requests,
                       telemetry, autonomy policy, provider-error
                       translation, model backends (mock / OpenAI /
-                      Anthropic / Ollama), SQLite approval store + SQLite
-                      checkpointer, FastAPI app + web UI (static/), demo
+                      Anthropic / Ollama), Postgres approval store +
+                      official Postgres checkpointer (SQLite doubles
+                      for tests), S3 object store for documents,
+                      JSON logs + request IDs, /metrics + audit export,
+                      FastAPI app + web UI (static/), demo
                       trace, CLI, service layer (incl. concurrent batch),
                       bundled samples (data/)
+migrations/           numbered SQL schema (approvals, pgvector
+                      embeddings), applied at startup by db.py
 docs/architecture.md  full architecture and productionisation notes
 data/sample/          synthetic shipments (14) + policy corpus mirror
 evals/                golden dataset (32 cases) + run_evals.py +
                       run_llm_evals.py (opt-in LLM-judge pack)
-tests/                343 pytest tests: unit, integration, API, UI,
+tests/                368 pytest tests: unit, integration, API, UI,
                       negation, persistence, auth, LLM backends and
-                      eval pack (mocked SDKs), config, retrieval
-docker-compose.yml    agent only (offline fallback) — unchanged default
-docker-compose.local.yml  local stack profile: agent + Ollama + Chroma
+                      eval pack (mocked SDKs), config, retrieval,
+                      object storage, observability, signed webhooks,
+                      metrics/audit (Postgres integration tests are
+                      gated on DATABASE_URL and skip without one)
+docker-compose.yml    production-shaped stack: api + Postgres/pgvector + MinIO
+docker-compose.local.yml  dev layer: published db/MinIO ports + local Ollama profile
 Makefile              make demo · make test · make evals · make llm-evals · make serve
 ```
 
 ## Production hardening — what changes for a real deployment
 
-Shipped in this blueprint already: SQLite-persisted approvals, optional
-API-key auth, a local vector store, a one-command local stack, and the
-opt-in approval webhook as the first output-routing adapter. A
-production build must still add: per-client data isolation and per-user
-identity (the shipped auth is one shared key); TMS/carrier event
-integrations and a real OCR pipeline feeding extraction; an approval
-queue UI with a full audit log; a full post-approval action layer
+Shipped in this blueprint already: PostgreSQL-persisted approvals
+(store + LangGraph checkpointer + pgvector in one database, schema
+owned by numbered migrations), documents in S3-compatible object
+storage, optional API-key auth, a one-command production-shaped
+stack, structured JSON logs with request IDs, `/health` +
+`/readiness` probes, a `/metrics` endpoint and an audit-trail export
+(`GET /audit/export`), and the opt-in approval webhook — now
+HMAC-signed when `ACTION_WEBHOOK_SECRET` is set — as the first
+output-routing adapter. A production build must still add: per-client
+data isolation and per-user identity (the shipped auth is one shared
+key); TMS/carrier event integrations and a real OCR pipeline feeding
+extraction; an approval queue UI; a full post-approval action layer
 (messaging, claim filing) with idempotency and rate limits — the
 webhook's `dispatch_status` is the seed of that bookkeeping;
-tracing/observability; and an eval set grown from real approver
-corrections. Section 9 of the architecture doc covers each in detail.
+distributed tracing beyond request IDs; and an eval set grown from
+real approver corrections. Section 9 of the architecture doc covers
+each in detail.
 
 ## Limitations
 

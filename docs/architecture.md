@@ -43,7 +43,8 @@ Shipment input (events + documents, JSON)
    human_approval -> approval_gate ==> END
    (attaches the     (checkpointed pause: with CHECKPOINTS on (default)
     autonomy note,    the run interrupts here and its graph state
-    the info request, persists in SQLite under thread_id = shipment id;
+    the info request, persists (Postgres checkpointer in production)
+                      under thread_id = shipment id;
     the telemetry)    approve/reject records the decision in the store
                       and RESUMES the thread -- see section 4)
 
@@ -184,13 +185,16 @@ top-k each), deduplicates by policy ID, and **reranks by reciprocal-rank
 score fusion** (RRF, k=60) down to the cited top-3 — the trace shows
 retrieve → merge → rerank explicitly. This is score-fusion reranking,
 named honestly: no cross-encoder ships in this repo. Semantic search
-runs on a **local Chroma store** when the `vectordb` extra is installed
-— embedded persistent directory (`CHROMA_DIR`) or a server
-(`CHROMA_HOST`, as in the compose local stack), corpus indexed on first
-use under a content-fingerprinted collection name, embeddings always
-supplied by our own provider client. Without the extra, in-memory
-cosine serves behind the same interface, and `vector_store` in the
-result says which path served. Embeddings follow the backend: OpenAI
+runs on **pgvector** in the application's PostgreSQL when
+`DATABASE_URL` is set — embeddings persisted in a `policy_embeddings`
+table keyed by (policy, model) with a content hash, so an edited
+corpus re-embeds and an unchanged one costs one SELECT per query. A
+**Chroma store** (the `vectordb` extra — a server via `CHROMA_HOST`,
+or an embedded directory) is the supported alternative; corpus
+indexed on first use under a content-fingerprinted collection name,
+embeddings always supplied by our own provider client. Without
+either, in-memory cosine serves behind the same interface, and
+`vector_store` in the result says which path served. Embeddings follow the backend: OpenAI
 (or any OpenAI-compatible endpoint via `OPENAI_BASE_URL`) — or Ollama
 when the backend is Ollama. Anthropic has no embeddings API, so an
 Anthropic backend still needs an OpenAI key (or Ollama) for semantic
@@ -297,8 +301,7 @@ same contract as verification.
 
 **Memory: prior shipments as diagnosis evidence.** Before diagnosis,
 the service asks the store for prior analysed shipments
-(`prior_shipments`, both stores; SQLite gained a `shipment_json`
-column by additive migration) and summarises matches for the same
+(`prior_shipments`, all store implementations) and summarises matches for the same
 consignee and the same lane (origin → destination): counts of priors
 that themselves had exceptions, plus their most recent types. The
 summary reaches the diagnosis as evidence lines ("memory: 2 prior
@@ -313,11 +316,10 @@ case-retrieval system; the store is the seam where a customer's real
 history source would plug in.
 
 **Reviewer feedback loop: decisions teach the next case.** Approve
-and reject both accept an optional `reason` (stored on the record —
-SQLite gained an `approve_reason` column by the same additive
-migration; the decided result echoes it as `decision_reason`). Before
+and reject both accept an optional `reason` (stored on the record;
+the decided result echoes it as `decision_reason`). Before
 diagnosis, the service also asks the store for *decided* records with
-non-empty reasons (`decision_feedback`, both stores) and matches them
+non-empty reasons (`decision_feedback`, all stores) and matches them
 to the new case by consignee or lane; the last three (reasons
 truncated to 160 characters) become diagnosis evidence lines —
 "reviewer feedback: last decision on this lane was reject — reason:
@@ -380,14 +382,27 @@ the request is never sent by the pipeline — sending it is the
 customer's integration step, exactly like acting on an approval.
 
 **Approvals persist; the API can be gated.** Analyses and decisions are
-stored through a small store interface (`store.py`): SQLite on disk by
-default (`STATE_DB_PATH`, default `.data/state.db`, git-ignored), so
-the approval queue survives restarts; the in-memory implementation
-remains as the test double (`STATE_DB_PATH=:memory:`). Setting
+stored through a small store interface (`store.py`): **PostgreSQL** when
+`DATABASE_URL` is set (`PostgresStore`, payload JSONB in the
+`approvals` table from migration `0002`), so the approval queue
+survives restarts and is shared across replicas. The SQLite and
+in-memory implementations remain as test doubles (`STATE_DB_PATH`
+selects the SQLite double; neither variable → in-memory, nothing
+persists — stated plainly wherever that mode is mentioned). Setting
 `API_KEY` turns on a shared-key check (`X-API-Key` header) for all data
 endpoints; unset, the API is open and documented as a local-dev default.
 Approve and reject take one decision-maker field, `actor` (legacy
 `approver`/`reviewer` accepted), and the result returns `decided_by`.
+Records carry `created_at` / `decided_at` timestamps (stamped by the
+service), which the audit export (`GET /audit/export`, JSON or CSV)
+projects together with the decider and their reason; `GET /metrics`
+renders the store's aggregates (runs, decisions, guardrail failures,
+latency, tokens, estimated cost) as Prometheus text.
+Shipment documents live behind the same kind of seam: the
+`ObjectStore` port (`object_store.py`) — S3-compatible in production
+(`S3_BUCKET`, MinIO in the compose stack) — with key-only intake
+(the service fetches the text) and inline documents archived under
+`shipments/<id>/documents/` after a run.
 
 **Concurrent batches: the intake-queue shape.** Real exception work
 arrives in batches, so the service layer analyses many shipments at
@@ -450,24 +465,34 @@ choice — with a short timeout (`ACTION_WEBHOOK_TIMEOUT_SECONDS`,
 default 5s). The outcome is recorded as `dispatch_status`
 (`sent`/`failed`) on the result; a failed dispatch never undoes the
 approval. Unset (the default), approval performs no external action.
+When `ACTION_WEBHOOK_SECRET` is set, the delivery is signed —
+`X-Trida-Signature: sha256=<HMAC-SHA256 hex of the body>` — so the
+receiver can verify the packet came from the agent before acting on
+it; unset, deliveries are unsigned, as before.
 
 **The gate is also a checkpoint.** With `CHECKPOINTS` on (the default),
 the graph carries a LangGraph checkpointer and the final
 `approval_gate` node pauses the run with `interrupt()`; the graph
-state persists in SQLite (`.data/checkpoints.db`,
-`CHECKPOINT_DB_PATH` to move it) under `thread_id` = the shipment
-record id. `approve`/`reject` then *resume* the thread with the
+state persists under `thread_id` = the shipment record id — in
+PostgreSQL via the **official LangGraph Postgres saver**
+(`langgraph-checkpoint-postgres` over a psycopg 3 pool) when
+`DATABASE_URL` is set, in the same database as the store.
+`approve`/`reject` then *resume* the thread with the
 decision and the graph completes — a process restart between analysis
 and decision loses nothing. The responsibilities are split on purpose:
 the **store is the record of decisions** (the only thing the decision
 flow reads; a missing or finished thread never blocks a decision),
 the **checkpointer holds graph state** (where the run paused and what
 it carried). Each re-analysis starts a fresh thread, matching the
-store's replace-on-reanalyse behaviour. The pinned LangGraph ships
-the checkpoint base plus an in-memory saver only (its SQLite saver is
-a separate package), so `checkpoints.py` implements that base over
-stdlib `sqlite3` — per-call connections, LangGraph's own serde, WAL
-journal mode. `CHECKPOINTS=off` attaches no checkpointer and the flow
+store's replace-on-reanalyse behaviour. Without `DATABASE_URL`, the
+saver is the stdlib-SQLite implementation in `checkpoints.py`
+(`.data/checkpoints.db`, `CHECKPOINT_DB_PATH` to move it) — a test
+double: the pinned LangGraph ships the checkpoint base plus an
+in-memory saver only (its SQLite saver is a separate package), so
+that class implements the base over stdlib `sqlite3` — per-call
+connections, LangGraph's own serde, WAL journal mode — and it
+exercises the checkpoint contract in the hermetic suite.
+`CHECKPOINTS=off` attaches no checkpointer and the flow
 is the pre-checkpoint one, unchanged.
 
 **The evidence phase fans out.** Retrieval, the extraction
@@ -568,7 +593,7 @@ always means "compared and agreed".
 | Provider client cannot even be constructed (e.g. a `NO_PROXY` entry like `[::1]` the HTTP library cannot parse) | translated `ProviderError` from the construction site itself — naming the backend, the endpoint, and the proxy variables to check — surfaced through the same CLI/API error paths, never a raw SDK traceback |
 | LLM classification malformed/unavailable | cross-check records `rules_only` with the failure in its note; the rule result stands and the run continues |
 | LLM extraction / diagnosis / options / verification failure | that node falls back to provided fields / the evidence template / template options / the deterministic checklist; the fallback is recorded in the trace and the run continues |
-| Chroma installed but store broken | semantic retrieval falls back to in-memory cosine; `vector_store` in the result reports `memory` |
+| Vector store broken (pgvector unreachable / Chroma installed but broken) | semantic retrieval falls back to the next store, ultimately in-memory cosine; `vector_store` in the result reports what served |
 | `RETRIEVER=semantic`/`hybrid` with no embeddings route | explicit RuntimeError at construction naming the RETRIEVER value set: embeddings need OpenAI(-compatible) or the Ollama backend |
 | Draft fails guardrails, repair on (default) | one bounded redraft with the failures fed back, re-verified + re-validated; result flags the attempt and preserves the original failure; if the redraft still fails, approval is blocked (SYN-1013 demonstrates the deterministic case) |
 | Draft fails guardrails, `GUARDRAIL_REPAIR=off` | no attempt: approval is blocked with the exact errors surfaced — the pre-repair behaviour, unchanged |
@@ -595,8 +620,11 @@ always means "compared and agreed".
   by design for local development (the console says so). A shared key
   is not per-user identity — production needs real auth and per-client
   tenancy on top.
-- Approval records persist in a local SQLite file (see §4); treat it
-  like any operational data store in a deployment (backups, access).
+- Approval records persist in PostgreSQL when `DATABASE_URL` is set
+  (see §4); treat it like any operational data store in a deployment
+  (backups, access). The signed webhook (`ACTION_WEBHOOK_SECRET`)
+  authenticates outbound packets; inbound authenticity of shipment
+  payloads is the integrating system's concern.
 - Prompt-injection surface: the free-text fields (latest event,
   condition notes, document raw text) are untrusted — anyone who can
   write into a source system can address the agent. The blueprint
@@ -639,8 +667,9 @@ Ordered by value when adapting this blueprint to your own operation:
    `bol` and `invoice` documents; (d) if your source cannot supply a
    BOL/invoice pair, expect the explicit skipped-check warning on every
    result — that is the contract working, not an error.
-4. **Retriever** — set `RETRIEVER=hybrid` (and install the `vectordb`
-   extra for the local Chroma store) for embedding-based ranking of the
+4. **Retriever** — set `RETRIEVER=hybrid` (embeddings served from
+   pgvector when `DATABASE_URL` is set; the `vectordb` extra's Chroma
+   store otherwise) for embedding-based ranking of the
    shipped corpus, or replace the retriever with embeddings over your
    full policy library behind the same `Retriever` protocol.
 5. **Exception types** — add the exceptions your operation actually sees
@@ -655,20 +684,27 @@ Ordered by value when adapting this blueprint to your own operation:
 1. **Integrations:** TMS/carrier event feeds (webhooks or EDI) replace
    manual JSON input; an OCR step feeds the in-graph extraction for
    scanned documents.
-2. **Knowledge:** scale the shipped local Chroma store to the real SOP
-   library (or LlamaIndex + a managed vector store over real SOPs,
-   carrier claim rules, and customer contracts); retrieval evaluated on
+2. **Knowledge:** scale the shipped pgvector store to the real SOP
+   library (the `policy_embeddings` table grows with the corpus; at
+   scale pin the embedding dimension and add an HNSW index), or
+   LlamaIndex + a managed vector store over real SOPs,
+   carrier claim rules, and customer contracts; retrieval evaluated on
    a labelled set.
 3. **Approval UX:** queue UI with side-by-side evidence (classification
-   signals, source documents, policy text), one-click edit/approve/reject,
-   and full audit log of who approved what, when.
+   signals, source documents, policy text), one-click edit/approve/reject.
+   The audit trail itself ships: `GET /audit/export` serves who
+   approved what, when, and why, from the store.
 4. **Action layer:** the shipped approval webhook is the first adapter;
    production grows it into send-via-the-client's-messaging-system and
    claim filing via carrier portals/APIs — behind feature flags, with
    idempotency keys and rate limits, and `dispatch_status` grown into
    full delivery bookkeeping.
-5. **Observability:** LangGraph tracing (e.g. Langfuse / OpenTelemetry),
-   per-node latency and cost, classification drift dashboards.
+5. **Observability:** the shipped baseline is structured JSON logs
+   with request IDs, per-run telemetry on every result, and
+   `GET /metrics` (runs, decisions, guardrail failures, latency,
+   tokens, cost) for Prometheus scraping. Production adds distributed
+   tracing (e.g. Langfuse / OpenTelemetry) across the customer's
+   systems and classification drift dashboards.
 6. **Evals as a regression gate:** the golden dataset grows from real
    (anonymised, consented) corrections made by approvers; every rule or
    prompt change runs against it locally (pytest + evals + demo via the
@@ -688,9 +724,9 @@ Ordered by value when adapting this blueprint to your own operation:
 - The LLM-judge eval pack is a model judging a model — a groundedness
   regression signal, not a human evaluation, and it only runs with a
   real provider configured.
-- API auth is a single optional shared key; approvals persist locally
-  in SQLite — a real deployment needs identity, tenancy, and a managed
-  database.
+- API auth is a single optional shared key — a real deployment needs
+  per-user identity and tenancy on top of the shipped Postgres
+  persistence.
 - Extraction consumes document text; there is no OCR engine and no
   photo/VLM damage assessment.
 - Default-mode self-verification is a deterministic checklist (citations,
@@ -709,13 +745,14 @@ Ordered by value when adapting this blueprint to your own operation:
   decisions per consignee/lane match, no weighting or decay.
 - The autonomy recommendation is policy, not learning: its band
   (none/low) is a starting posture a customer tunes, and it never acts.
-- The checkpointer is a minimal SQLite saver written for this
-  blueprint (the pinned LangGraph's SQLite saver is a separate
-  package): single-host, WAL-mode, serde-compatible with LangGraph's
-  own — a production deployment with concurrent writers across hosts
-  would swap it for the packaged saver or a Postgres checkpointer
-  behind the same `Checkpointer` protocol.
-- The Docker local stack (agent + Ollama + Chroma) is reviewed but not
-  build-verified — no Docker daemon in the development environment.
+- The SQLite checkpointer retained for tests is a minimal saver
+  written for this blueprint (the pinned LangGraph's SQLite saver is
+  a separate package): single-host, WAL-mode, serde-compatible with
+  LangGraph's own. Production uses the official Postgres saver —
+  which is what `DATABASE_URL` selects — behind the same
+  `Checkpointer` protocol.
+- The Docker production stack (api + Postgres/pgvector + MinIO) is
+  reviewed but not build-verified — no Docker daemon in the
+  development environment.
 - No carrier/TMS integration and no claims filing — by design; the only
   outbound call that exists is the opt-in approval webhook.

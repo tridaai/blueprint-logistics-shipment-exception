@@ -80,67 +80,78 @@ def _escape_label(value: str) -> str:
 
 
 def render_prometheus(metrics: dict) -> str:
-    """The metrics payload as Prometheus text exposition."""
+    """The metrics payload as Prometheus text exposition.
+
+    One HELP/TYPE header per metric family, then one sample line per
+    label set — the shape strict parsers expect.
+    """
     lines: list[str] = []
 
-    def gauge(name: str, help_text: str, value, labels: dict[str, str] | None = None):
+    def family(name: str, help_text: str, samples: list[tuple[dict | None, object]]):
         lines.append(f"# HELP {name} {help_text}")
         lines.append(f"# TYPE {name} gauge")
-        label_text = ""
-        if labels:
-            label_text = "{" + ",".join(
-                f'{k}="{_escape_label(str(v))}"' for k, v in labels.items()
-            ) + "}"
-        lines.append(f"{name}{label_text} {value}")
+        for labels, value in samples:
+            label_text = ""
+            if labels:
+                label_text = "{" + ",".join(
+                    f'{k}="{_escape_label(str(v))}"' for k, v in labels.items()
+                ) + "}"
+            lines.append(f"{name}{label_text} {value}")
 
-    gauge("shipment_agent_runs_total", "Analyses recorded in the store.", metrics["runs_total"])
-    for decision, count in metrics["decisions"].items():
-        gauge(
-            "shipment_agent_decisions_total",
-            "Human decisions recorded, by outcome.",
-            count,
-            {"decision": decision},
-        )
-    gauge(
+    family(
+        "shipment_agent_runs_total",
+        "Analyses recorded in the store.",
+        [(None, metrics["runs_total"])],
+    )
+    family(
+        "shipment_agent_decisions_total",
+        "Human decisions recorded, by outcome.",
+        [
+            ({"decision": decision}, count)
+            for decision, count in metrics["decisions"].items()
+        ],
+    )
+    family(
         "shipment_agent_guardrail_failed_runs_total",
         "Runs whose final draft failed guardrail validation.",
-        metrics["guardrail_failed_runs"],
+        [(None, metrics["guardrail_failed_runs"])],
     )
-    for check, count in sorted(metrics["guardrail_check_failures"].items()):
-        gauge(
-            "shipment_agent_guardrail_check_failures_total",
-            "Failed guardrail checks, by check name.",
-            count,
-            {"check": check},
-        )
-    gauge(
+    family(
+        "shipment_agent_guardrail_check_failures_total",
+        "Failed guardrail checks, by check name.",
+        [
+            ({"check": check}, count)
+            for check, count in sorted(metrics["guardrail_check_failures"].items())
+        ],
+    )
+    family(
         "shipment_agent_latency_seconds_total",
         "Summed per-run wall-clock latency (provider runs).",
-        metrics["latency_seconds_total"],
+        [(None, metrics["latency_seconds_total"])],
     )
-    gauge(
+    family(
         "shipment_agent_latency_seconds_avg",
         "Mean per-run wall-clock latency across recorded runs.",
-        metrics["latency_seconds_avg"],
+        [(None, metrics["latency_seconds_avg"])],
     )
-    gauge(
+    family(
         "shipment_agent_model_calls_total",
         "Summed model calls over runs that report telemetry.",
-        metrics["model_calls_total"],
+        [(None, metrics["model_calls_total"])],
     )
-    gauge(
+    family(
         "shipment_agent_input_tokens_total",
         "Summed provider-reported input tokens (runs that report them).",
-        metrics["input_tokens_total"],
+        [(None, metrics["input_tokens_total"])],
     )
-    gauge(
+    family(
         "shipment_agent_output_tokens_total",
         "Summed provider-reported output tokens (runs that report them).",
-        metrics["output_tokens_total"],
+        [(None, metrics["output_tokens_total"])],
     )
-    gauge(
+    family(
         "shipment_agent_estimated_cost_usd_total",
         "Summed estimated provider cost over runs that report it.",
-        metrics["estimated_cost_usd_total"],
+        [(None, metrics["estimated_cost_usd_total"])],
     )
     return "\n".join(lines) + "\n"
