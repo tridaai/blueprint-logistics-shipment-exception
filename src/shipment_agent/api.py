@@ -15,7 +15,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -314,8 +314,21 @@ def list_samples() -> list[dict]:
 
 
 @app.post("/shipments/analyze", response_model=AgentResult, dependencies=_AUTH)
-def analyze(shipment: ShipmentInput) -> AgentResult:
-    return service.analyze(shipment)
+def analyze(
+    shipment: ShipmentInput,
+    response: Response,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> AgentResult:
+    """Analyse one shipment. Send an ``Idempotency-Key`` header to
+    make the call safe to retry: a repeat with the same key (and the
+    same shipment id) returns the stored run — flagged
+    ``idempotent_replay`` in the body and with an
+    ``X-Idempotent-Replay: true`` response header — instead of
+    running the pipeline (and spending model calls) again."""
+    result = service.analyze(shipment, idempotency_key=idempotency_key)
+    if result.idempotent_replay:
+        response.headers["X-Idempotent-Replay"] = "true"
+    return result
 
 
 def _sse(payload: dict) -> str:
@@ -323,7 +336,10 @@ def _sse(payload: dict) -> str:
 
 
 @app.post("/shipments/analyze/stream", dependencies=_AUTH)
-def analyze_stream(shipment: ShipmentInput) -> StreamingResponse:
+def analyze_stream(
+    shipment: ShipmentInput,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> StreamingResponse:
     """The same analysis as ``POST /shipments/analyze``, streamed.
 
     The run executes on a worker thread; its structured events (see
@@ -332,14 +348,36 @@ def analyze_stream(shipment: ShipmentInput) -> StreamingResponse:
     JSON under ``result`` — the same payload the non-stream endpoint
     returns. A failed run ends the stream with a ``run_failed`` event
     carrying the clean, translated error message (no stack dump).
+
+    With an ``Idempotency-Key`` that already has a stored run, there
+    is nothing to stream: the response is the single ``run_completed``
+    event carrying the stored (replay-flagged) result.
     """
+    replay = service.idempotent_result(idempotency_key, shipment.shipment_id)
+    if replay is not None:
+
+        def replay_stream():
+            final = {
+                "type": "run_completed",
+                "shipment_id": replay.shipment_id,
+                "node": None,
+                "duration_ms": None,
+                "detail": {"status": replay.approval_status},
+                "result": replay.model_dump(mode="json"),
+            }
+            yield _sse(final)
+
+        return StreamingResponse(replay_stream(), media_type="text/event-stream")
+
     events_queue: queue.Queue = queue.Queue()
     sink = CallbackSink(events_queue.put)
     outcome: dict = {}
 
     def work() -> None:
         try:
-            outcome["result"] = service.analyze(shipment, event_sink=sink)
+            outcome["result"] = service.analyze(
+                shipment, event_sink=sink, idempotency_key=idempotency_key
+            )
         except Exception as exc:  # surfaced as the run_failed event below
             outcome["error"] = exc
         finally:

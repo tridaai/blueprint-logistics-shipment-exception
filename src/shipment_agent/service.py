@@ -387,22 +387,70 @@ class ShipmentService:
         except Exception:
             pass
 
+    @staticmethod
+    def _normalize_idempotency_key(key: str | None) -> str | None:
+        """An idempotency key is an opaque caller string; whitespace
+        is never significant, and an empty key is no key."""
+        if key is None:
+            return None
+        key = key.strip()
+        return key or None
+
+    def idempotent_result(
+        self, idempotency_key: str | None, shipment_id: str
+    ) -> AgentResult | None:
+        """The stored run for (key, shipment id), flagged as a replay.
+
+        The dedupe lookup behind :meth:`analyze`'s idempotency: a
+        hit means this exact submission was already analysed, so the
+        stored result — with the original run's telemetry — is the
+        answer, and no model is called again. Returns None when there
+        is no key or no stored run under it.
+        """
+        key = self._normalize_idempotency_key(idempotency_key)
+        if key is None:
+            return None
+        record = self._get_store().get_by_idempotency(key, shipment_id)
+        if record is None:
+            return None
+        return record.result.model_copy(update={"idempotent_replay": True})
+
     def analyze(
-        self, shipment: ShipmentInput | dict, event_sink: EventSink | None = None
+        self,
+        shipment: ShipmentInput | dict,
+        event_sink: EventSink | None = None,
+        idempotency_key: str | None = None,
     ) -> AgentResult:
         # Backend and retriever come from the environment (MODEL_BACKEND /
         # RETRIEVER, with the repo-root .env loaded) unless injected.
         # ``event_sink`` (optional) receives the run's structured events
         # (see events.py) — the API's streaming endpoint passes one.
-        backend = self.backend or get_backend()
-        if self.retriever is None:
-            self.retriever = get_retriever()
+        #
+        # ``idempotency_key`` (optional) makes the call safe to retry:
+        # when a run is already stored under (key, shipment id), the
+        # stored result is returned flagged ``idempotent_replay`` and
+        # the pipeline does not run again — no duplicate model spend,
+        # no second record, no reset of a decision already taken.
         model = (
             shipment
             if isinstance(shipment, ShipmentInput)
             else ShipmentInput.model_validate(shipment)
         )
-        return self._analyze_model(model, backend, self.retriever, event_sink=event_sink)
+        key = self._normalize_idempotency_key(idempotency_key)
+        if key is not None:
+            replay = self.idempotent_result(key, model.shipment_id)
+            if replay is not None:
+                return replay
+        backend = self.backend or get_backend()
+        if self.retriever is None:
+            self.retriever = get_retriever()
+        return self._analyze_model(
+            model,
+            backend,
+            self.retriever,
+            event_sink=event_sink,
+            idempotency_key=key,
+        )
 
     def _analyze_model(
         self,
@@ -410,6 +458,7 @@ class ShipmentService:
         backend: ModelBackend,
         retriever: Retriever,
         event_sink: EventSink | None = None,
+        idempotency_key: str | None = None,
     ) -> AgentResult:
         # Key-only documents get their text through the object-store
         # port before anything reads them (single + batch paths share
@@ -455,6 +504,7 @@ class ShipmentService:
                 result=result,
                 shipment=self._archive_documents(model),
                 created_at=_now_iso(),
+                idempotency_key=idempotency_key,
             )
         )
         return result

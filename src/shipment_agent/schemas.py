@@ -483,6 +483,12 @@ class AgentResult(BaseModel):
     decision_reason: str | None = None  # the decider's stated reason, once decided (echo)
     dispatch_status: str | None = None  # sent | failed — only when ACTION_WEBHOOK_URL is set
     external_action_taken: bool = False
+    # True only on the copy returned for an idempotent replay: the
+    # caller repeated an analyze with the same Idempotency-Key, and
+    # this is the stored run — the pipeline did not run again, and
+    # the telemetry on it is the original run's. Never persisted as
+    # True (the stored record keeps the original result).
+    idempotent_replay: bool = False
     disclaimer: str = (
         "Reference prototype running on synthetic data. No external system "
         "was contacted and no customer message was sent. Draft requires "

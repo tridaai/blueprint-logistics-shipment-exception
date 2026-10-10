@@ -46,6 +46,11 @@ class ApprovalRecord:
     # http_status, signature_id, error, next_retry_at}. Empty when no
     # webhook is configured or no approval has dispatched yet.
     dispatch_attempts: list[dict] = field(default_factory=list)
+    # The Idempotency-Key the analysis was submitted with, when the
+    # caller sent one (see service.analyze). A repeat analyze with
+    # the same key for the same shipment returns this record instead
+    # of re-running the pipeline.
+    idempotency_key: str | None = None
     # ISO-8601 UTC timestamps, stamped by the service ("" until set —
     # older rows simply have none). The audit export reads them.
     created_at: str = ""  # when the analysis was recorded
@@ -164,6 +169,7 @@ def _record_to_dict(record: ApprovalRecord) -> dict:
         "reject_reason": record.reject_reason,
         "dispatch_status": record.dispatch_status,
         "dispatch_attempts": record.dispatch_attempts,
+        "idempotency_key": record.idempotency_key,
         "created_at": record.created_at,
         "decided_at": record.decided_at,
     }
@@ -180,6 +186,7 @@ def _record_from_dict(data: dict) -> ApprovalRecord:
         reject_reason=data.get("reject_reason", ""),
         dispatch_status=data.get("dispatch_status"),
         dispatch_attempts=data.get("dispatch_attempts") or [],
+        idempotency_key=data.get("idempotency_key"),
         created_at=data.get("created_at", ""),
         decided_at=data.get("decided_at", ""),
     )
@@ -206,6 +213,15 @@ class InMemoryStore:
     def get(self, shipment_id: str) -> ApprovalRecord | None:
         with self._lock:
             return self._records.get(shipment_id)
+
+    def get_by_idempotency(
+        self, key: str, shipment_id: str
+    ) -> ApprovalRecord | None:
+        with self._lock:
+            record = self._records.get(shipment_id)
+        if record is not None and record.idempotency_key == key:
+            return record
+        return None
 
     def records(self) -> list[ApprovalRecord]:
         """Every stored record, newest first (metrics / audit read)."""
@@ -283,6 +299,10 @@ class SQLiteStore:
                 conn.execute(
                     "ALTER TABLE approvals ADD COLUMN dispatch_attempts_json TEXT NOT NULL DEFAULT '[]'"
                 )
+            if "idempotency_key" not in columns:
+                conn.execute(
+                    "ALTER TABLE approvals ADD COLUMN idempotency_key TEXT"
+                )
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._path)
@@ -298,8 +318,8 @@ class SQLiteStore:
                 INSERT OR REPLACE INTO approvals
                     (shipment_id, result_json, shipment_json, approver, approved,
                      rejected_by, reject_reason, dispatch_status, approve_reason,
-                     created_at, decided_at, dispatch_attempts_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     created_at, decided_at, dispatch_attempts_json, idempotency_key)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.result.shipment_id,
@@ -314,6 +334,7 @@ class SQLiteStore:
                     record.created_at,
                     record.decided_at,
                     json.dumps(record.dispatch_attempts),
+                    record.idempotency_key,
                 ),
             )
 
@@ -341,6 +362,7 @@ class SQLiteStore:
             reject_reason=row["reject_reason"],
             dispatch_status=row["dispatch_status"] if "dispatch_status" in keys else None,
             dispatch_attempts=attempts,
+            idempotency_key=row["idempotency_key"] if "idempotency_key" in keys else None,
             created_at=row["created_at"] if "created_at" in keys else "",
             decided_at=row["decided_at"] if "decided_at" in keys else "",
         )
@@ -349,6 +371,18 @@ class SQLiteStore:
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM approvals WHERE shipment_id = ?", (shipment_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_record(row)
+
+    def get_by_idempotency(
+        self, key: str, shipment_id: str
+    ) -> ApprovalRecord | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM approvals WHERE shipment_id = ? AND idempotency_key = ?",
+                (shipment_id, key),
             ).fetchone()
         if row is None:
             return None
@@ -438,6 +472,17 @@ class PostgresStore:
             row = conn.execute(
                 "SELECT payload FROM approvals WHERE shipment_id = %s",
                 (shipment_id,),
+            ).fetchone()
+        return _record_from_dict(row[0]) if row else None
+
+    def get_by_idempotency(
+        self, key: str, shipment_id: str
+    ) -> ApprovalRecord | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT payload FROM approvals WHERE shipment_id = %s "
+                "AND payload ->> 'idempotency_key' = %s",
+                (shipment_id, key),
             ).fetchone()
         return _record_from_dict(row[0]) if row else None
 
