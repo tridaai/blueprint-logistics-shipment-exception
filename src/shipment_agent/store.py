@@ -274,6 +274,7 @@ class InMemoryStore:
         # shadowing each other.
         self._records: dict[tuple[str, str], ApprovalRecord] = {}
         self._worker_status: dict[str, dict] = {}
+        self._tenant_policies: dict[tuple[str, str], dict] = {}
         self._lock = threading.Lock()
 
     # Worker status rows (see ports.Store): one summary per worker
@@ -289,6 +290,29 @@ class InMemoryStore:
     def all_worker_status(self) -> dict[str, dict]:
         with self._lock:
             return dict(self._worker_status)
+
+    # Tenant policy documents (see ports.Store): keyed by the
+    # (tenant, policy) pair, like the records themselves.
+    def save_tenant_policy(self, tenant_id: str, policy: dict) -> None:
+        with self._lock:
+            self._tenant_policies[(tenant_id, policy["policy_id"])] = dict(policy)
+
+    def tenant_policy(self, tenant_id: str, policy_id: str) -> dict | None:
+        with self._lock:
+            policy = self._tenant_policies.get((tenant_id, policy_id))
+            return dict(policy) if policy is not None else None
+
+    def tenant_policies(self, tenant_id: str) -> list[dict]:
+        with self._lock:
+            return [
+                dict(policy)
+                for (tenant, _), policy in sorted(self._tenant_policies.items())
+                if tenant == tenant_id
+            ]
+
+    def delete_tenant_policy(self, tenant_id: str, policy_id: str) -> bool:
+        with self._lock:
+            return self._tenant_policies.pop((tenant_id, policy_id), None) is not None
 
     def save(self, record: ApprovalRecord) -> None:
         with self._lock:
@@ -557,6 +581,58 @@ class SQLiteStore:
                 "SELECT worker, summary_json FROM worker_status"
             ).fetchall()
         return {row["worker"]: json.loads(row["summary_json"]) for row in rows}
+
+    # Tenant policy documents (see ports.Store): a side table the
+    # store owns its DDL for, like worker_status above.
+    def _ensure_tenant_policies_table(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tenant_policies (
+                tenant_id TEXT NOT NULL,
+                policy_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, policy_id)
+            )
+            """
+        )
+
+    def save_tenant_policy(self, tenant_id: str, policy: dict) -> None:
+        with self._connect() as conn:
+            self._ensure_tenant_policies_table(conn)
+            conn.execute(
+                "INSERT OR REPLACE INTO tenant_policies "
+                "(tenant_id, policy_id, payload_json) VALUES (?, ?, ?)",
+                (tenant_id, policy["policy_id"], json.dumps(policy)),
+            )
+
+    def tenant_policy(self, tenant_id: str, policy_id: str) -> dict | None:
+        with self._connect() as conn:
+            self._ensure_tenant_policies_table(conn)
+            row = conn.execute(
+                "SELECT payload_json FROM tenant_policies "
+                "WHERE tenant_id = ? AND policy_id = ?",
+                (tenant_id, policy_id),
+            ).fetchone()
+        return json.loads(row["payload_json"]) if row else None
+
+    def tenant_policies(self, tenant_id: str) -> list[dict]:
+        with self._connect() as conn:
+            self._ensure_tenant_policies_table(conn)
+            rows = conn.execute(
+                "SELECT payload_json FROM tenant_policies "
+                "WHERE tenant_id = ? ORDER BY policy_id",
+                (tenant_id,),
+            ).fetchall()
+        return [json.loads(row["payload_json"]) for row in rows]
+
+    def delete_tenant_policy(self, tenant_id: str, policy_id: str) -> bool:
+        with self._connect() as conn:
+            self._ensure_tenant_policies_table(conn)
+            cursor = conn.execute(
+                "DELETE FROM tenant_policies WHERE tenant_id = ? AND policy_id = ?",
+                (tenant_id, policy_id),
+            )
+            return cursor.rowcount > 0
 
     def save(self, record: ApprovalRecord) -> None:
 
@@ -852,6 +928,49 @@ class PostgresStore:
                 "SELECT worker, summary FROM worker_status"
             ).fetchall()
         return {row[0]: row[1] for row in rows}
+
+    # Tenant policy documents (see ports.Store): the tenant_policies
+    # table is migration 0007's; this class issues no DDL, as
+    # everywhere.
+    def save_tenant_policy(self, tenant_id: str, policy: dict) -> None:
+        from psycopg.types.json import Jsonb
+
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO tenant_policies (tenant_id, policy_id, payload) "
+                "VALUES (%s, %s, %s) "
+                "ON CONFLICT (tenant_id, policy_id) DO UPDATE SET "
+                "payload = EXCLUDED.payload, updated_at = now()",
+                (tenant_id, policy["policy_id"], Jsonb(policy)),
+            )
+            conn.commit()
+
+    def tenant_policy(self, tenant_id: str, policy_id: str) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT payload FROM tenant_policies "
+                "WHERE tenant_id = %s AND policy_id = %s",
+                (tenant_id, policy_id),
+            ).fetchone()
+        return row[0] if row else None
+
+    def tenant_policies(self, tenant_id: str) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT payload FROM tenant_policies "
+                "WHERE tenant_id = %s ORDER BY policy_id",
+                (tenant_id,),
+            ).fetchall()
+        return [row[0] for row in rows]
+
+    def delete_tenant_policy(self, tenant_id: str, policy_id: str) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM tenant_policies WHERE tenant_id = %s AND policy_id = %s",
+                (tenant_id, policy_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
 
     def _all_records(self, tenant_id: str | None = None) -> list[ApprovalRecord]:
         with self._connect() as conn:

@@ -64,10 +64,13 @@ class Retriever(Protocol):
 
     Implementations may additionally offer ``for_tenant(tenant_id)``
     returning a view scoped to one tenant's policy corpus (shared
-    documents plus that tenant's own — see ``retriever.py``); the
-    service discovers it with ``getattr``, the same optional-
-    capability pattern as the model backend's, and uses an
-    implementation without it exactly as provided.
+    documents plus that tenant's own — see ``retriever.py``), and
+    ``with_extra_policies(extra)`` returning a view whose corpus
+    also carries runtime-supplied documents (a tenant's stored
+    policies, merged over the bundled corpus); the service
+    discovers both with ``getattr``, the same optional-capability
+    pattern as the model backend's, and uses an implementation
+    without them exactly as provided.
     """
 
     def retrieve(self, query: str, top_k: int = 3) -> list["RetrievedPolicy"]: ...
@@ -118,6 +121,23 @@ class Store(Protocol):
 
     def all_worker_status(self) -> dict[str, dict]: ...
 
+    # Tenant policy documents: the runtime-managed slice of a
+    # tenant's retrieval corpus (see service.upsert_tenant_policy).
+    # The bundled corpora in policies_data.py are code; these rows
+    # are the documents a tenant's operators add, replace, and remove
+    # through the API at runtime — persisted here (the system of
+    # record), archived through the ObjectStore port when one is
+    # configured, and merged over the bundled corpus per run, scoped
+    # strictly to their tenant.
+
+    def save_tenant_policy(self, tenant_id: str, policy: dict) -> None: ...
+
+    def tenant_policy(self, tenant_id: str, policy_id: str) -> "dict | None": ...
+
+    def tenant_policies(self, tenant_id: str) -> list[dict]: ...
+
+    def delete_tenant_policy(self, tenant_id: str, policy_id: str) -> bool: ...
+
 
 class ObjectStore(Protocol):
     """The document-storage seam: shipment documents as objects.
@@ -133,6 +153,8 @@ class ObjectStore(Protocol):
     def get(self, key: str) -> bytes: ...
 
     def exists(self, key: str) -> bool: ...
+
+    def delete(self, key: str) -> None: ...
 
 
 class EventSink(Protocol):

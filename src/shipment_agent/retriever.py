@@ -73,6 +73,31 @@ def corpus_for_tenant(
     ]
 
 
+def merge_corpus(
+    base: list[dict[str, str]], extra: list[dict[str, str]]
+) -> list[dict[str, str]]:
+    """Merge runtime-supplied documents over a base corpus.
+
+    An extra document whose ``policy_id`` already exists in the base
+    replaces that entry in place (position kept); a new id appends.
+    This is how a tenant's stored documents (see
+    ``service.upsert_tenant_policy``) join — and can revise — its
+    bundled corpus without a restart: the merged corpus is what the
+    retriever views are then scoped from, so tenant scoping applies
+    to stored documents exactly as to bundled ones.
+    """
+    merged = list(base)
+    positions = {p["policy_id"]: i for i, p in enumerate(merged)}
+    for policy in extra:
+        policy_id = policy["policy_id"]
+        if policy_id in positions:
+            merged[positions[policy_id]] = policy
+        else:
+            positions[policy_id] = len(merged)
+            merged.append(policy)
+    return merged
+
+
 def _tokens(text: str) -> list[str]:
     return [t for t in re.findall(r"[a-z0-9]+", text.lower()) if t not in _STOPWORDS]
 
@@ -134,6 +159,24 @@ class KeywordRetriever:
         if self._explicit or tenant_id == self._tenant_id:
             return self
         return KeywordRetriever(tenant_id=tenant_id, _corpus=self._corpus)
+
+    def with_extra_policies(
+        self, extra: list[dict[str, str]]
+    ) -> "KeywordRetriever":
+        """A view whose corpus also carries runtime-supplied documents.
+
+        The stored tenant documents (see
+        ``service.upsert_tenant_policy``) merged over the deployment
+        corpus with :func:`merge_corpus`, this view's tenant scoping
+        unchanged — the service resolves extras per tenant, and the
+        scoping here still decides what the view may see. An
+        explicitly injected corpus is the injector's own and is
+        returned unchanged, exactly as with :meth:`for_tenant`."""
+        if self._explicit or not extra:
+            return self
+        return KeywordRetriever(
+            tenant_id=self._tenant_id, _corpus=merge_corpus(self._corpus, extra)
+        )
 
     def retrieve(self, query: str, top_k: int = 3) -> list[RetrievedPolicy]:
         query_tokens = set(_tokens(query))
@@ -253,6 +296,31 @@ class SemanticRetriever:
         view = copy.copy(self)
         view._tenant_id = tenant_id
         view._policies = corpus_for_tenant(self._corpus, tenant_id)
+        view._corpus_vectors = None
+        view._chroma_collection = None
+        view._chroma_checked = False
+        return view
+
+    def with_extra_policies(
+        self, extra: list[dict[str, str]]
+    ) -> "SemanticRetriever":
+        """A view whose corpus also carries runtime-supplied documents.
+
+        Same contract as the keyword retriever's: the extras merge
+        over the deployment corpus (:func:`merge_corpus`), this
+        view's tenant scoping is re-applied, and the per-corpus
+        caches reset — so a newly stored document is embedded on
+        first use wherever vectors live (the pgvector path embeds it
+        through the same content-hash upsert as any corpus change;
+        the Chroma path fingerprints the new corpus and re-indexes).
+        An explicitly injected corpus is returned unchanged."""
+        if self._explicit or not extra:
+            return self
+        import copy
+
+        view = copy.copy(self)
+        view._corpus = merge_corpus(self._corpus, extra)
+        view._policies = corpus_for_tenant(view._corpus, view._tenant_id)
         view._corpus_vectors = None
         view._chroma_collection = None
         view._chroma_checked = False
@@ -643,6 +711,23 @@ class HybridRetriever:
         both halves rescoped, the merge unchanged."""
         keyword = self._keyword.for_tenant(tenant_id)
         semantic = self._semantic.for_tenant(tenant_id)
+        if keyword is self._keyword and semantic is self._semantic:
+            return self
+        import copy
+
+        view = copy.copy(self)
+        view._keyword = keyword
+        view._semantic = semantic
+        view.last_stats = {}
+        return view
+
+    def with_extra_policies(
+        self, extra: list[dict[str, str]]
+    ) -> "HybridRetriever":
+        """A view whose corpus also carries runtime-supplied
+        documents: both halves gain the extras, the merge unchanged."""
+        keyword = self._keyword.with_extra_policies(extra)
+        semantic = self._semantic.with_extra_policies(extra)
         if keyword is self._keyword and semantic is self._semantic:
             return self
         import copy

@@ -135,7 +135,11 @@ def checkpoint_thread_id(tenant_id: str, shipment_id: str) -> str:
     return f"{tenant_id}:{shipment_id}"
 
 
-def _scoped_retriever(retriever: Retriever, tenant_id: str) -> Retriever:
+def _scoped_retriever(
+    retriever: Retriever,
+    tenant_id: str,
+    extra_policies: list[dict] | None = None,
+) -> Retriever:
     """The retriever view for one run's tenant.
 
     Retrieval was the last surface still shared across tenants:
@@ -148,11 +152,23 @@ def _scoped_retriever(retriever: Retriever, tenant_id: str) -> Retriever:
     retriever without the capability (an injected double, a custom
     port implementation) is used exactly as provided: the seam's
     contract is the injector's to honour.
+
+    ``extra_policies`` are the run tenant's *stored* documents (the
+    runtime-managed corpus, see :meth:`ShipmentService.tenant_documents`):
+    a retriever offering ``with_extra_policies`` gains them merged
+    over its bundled corpus for this view, so a document an operator
+    added a minute ago is retrievable by the next run — no restart,
+    and still absent from every other tenant's view.
     """
+    scoped = retriever
     for_tenant = getattr(retriever, "for_tenant", None)
     if callable(for_tenant):
-        return for_tenant(tenant_id)
-    return retriever
+        scoped = for_tenant(tenant_id)
+    if extra_policies:
+        with_extra = getattr(scoped, "with_extra_policies", None)
+        if callable(with_extra):
+            scoped = with_extra(extra_policies)
+    return scoped
 
 
 @dataclass
@@ -887,7 +903,9 @@ class ShipmentService:
         result = run_shipment(
             model,
             backend=backend,
-            retriever=_scoped_retriever(retriever, tenant_id),
+            retriever=_scoped_retriever(
+                retriever, tenant_id, self.tenant_documents(tenant_id)
+            ),
             history=history,
             priors=priors,
             event_sink=event_sink,
@@ -1716,3 +1734,166 @@ class ShipmentService:
             shipment_id, tenant_id=resolve_tenant_id(tenant_id)
         )
         return record.result if record else None
+
+    # ------------------------------------------------------------------
+    # Tenant corpus management: documents that change without a deploy
+    # ------------------------------------------------------------------
+
+    def tenant_documents(self, tenant_id: str | None = None) -> list[dict]:
+        """The tenant's stored (runtime-managed) policy documents.
+
+        Read through the store port; a store double without the
+        tenant-policy methods simply has none — the bundled corpus
+        is then the whole corpus, exactly as before this surface
+        existed. A failed read degrades the same way: retrieval
+        falls back to the bundled corpus rather than failing a run
+        over its knowledge base's newest slice.
+        """
+        tenant = resolve_tenant_id(tenant_id)
+        read = getattr(self._get_store(), "tenant_policies", None)
+        if not callable(read):
+            return []
+        try:
+            return read(tenant)
+        except Exception:
+            return []
+
+    def corpus_policies(self, tenant_id: str | None = None) -> list[dict]:
+        """The corpus one tenant retrieves from, with provenance.
+
+        The bundled slice (``policies_data.policies_for_tenant``)
+        merged with the tenant's stored documents: a stored document
+        whose id matches a bundled tenant document replaces it; a
+        new id appends. Every entry is tagged ``source`` —
+        ``shared`` (the corpus every tenant cites), ``bundled``
+        (the tenant's own, shipped in code), or ``tenant`` (supplied
+        at runtime through the management surface). This listing is
+        what ``GET /policies`` serves and what a run's retriever
+        view is built from — one merge, two readers, no drift.
+        """
+        from .policies_data import POLICIES, policies_for_tenant
+
+        tenant = resolve_tenant_id(tenant_id)
+        shared_ids = {policy["policy_id"] for policy in POLICIES}
+        listing: list[dict] = []
+        positions: dict[str, int] = {}
+        for policy in policies_for_tenant(tenant):
+            positions[policy["policy_id"]] = len(listing)
+            listing.append(
+                {
+                    **policy,
+                    "source": (
+                        "shared" if policy["policy_id"] in shared_ids else "bundled"
+                    ),
+                }
+            )
+        for document in self.tenant_documents(tenant):
+            entry = {**document, "source": "tenant"}
+            policy_id = document["policy_id"]
+            if policy_id in positions:
+                listing[positions[policy_id]] = entry
+            else:
+                positions[policy_id] = len(listing)
+                listing.append(entry)
+        return listing
+
+    def upsert_tenant_policy(
+        self,
+        tenant_id: str | None,
+        policy_id: str,
+        title: str,
+        text: str,
+    ) -> dict:
+        """Add or replace one of the tenant's own policy documents.
+
+        The document is stamped with the resolved tenant (a caller
+        can only ever write into its own partition — the tenant is
+        resolved here, never taken from the payload), persisted
+        through the store port, and — when an object store is
+        configured — archived to it under
+        ``tenants/<tenant>/policies/<policy_id>.json`` with the key
+        recorded on the document (the same bookkeeping posture as
+        shipment documents: a failed archive never blocks the write).
+        Retrieval picks the document up on the next run; no restart.
+
+        Refusals (``ValueError``): an empty id, title, or text; and
+        an id that names a *shared* bundled policy — a tenant may
+        revise its own documents, never redefine the corpus every
+        tenant cites.
+        """
+        from .policies_data import POLICIES
+
+        tenant = resolve_tenant_id(tenant_id)
+        policy_id = (policy_id or "").strip()
+        title = (title or "").strip()
+        text = (text or "").strip()
+        if not policy_id or not title or not text:
+            raise ValueError(
+                "A policy document needs a policy_id, a title, and text — "
+                "all three, none empty."
+            )
+        if policy_id in {policy["policy_id"] for policy in POLICIES}:
+            raise ValueError(
+                f"{policy_id} is a shared policy document — a tenant can "
+                "manage its own documents, not redefine the shared corpus."
+            )
+        document = {
+            "policy_id": policy_id,
+            "title": title,
+            "text": text,
+            "tenant_id": tenant,
+            "updated_at": _now_iso(),
+        }
+        object_store = self._get_object_store()
+        if object_store is not None:
+            key = f"tenants/{tenant}/policies/{policy_id}.json"
+            try:
+                object_store.put(
+                    key,
+                    json.dumps(document).encode("utf-8"),
+                    "application/json",
+                )
+                document["object_key"] = key
+            except Exception:
+                pass  # archiving is bookkeeping; the store is the record
+        save = getattr(self._get_store(), "save_tenant_policy", None)
+        if not callable(save):
+            raise ValueError(
+                "This deployment's store does not keep tenant policy "
+                "documents — there is nowhere for the document to live."
+            )
+        save(tenant, document)
+        return {**document, "source": "tenant"}
+
+    def remove_tenant_policy(
+        self, tenant_id: str | None, policy_id: str
+    ) -> bool:
+        """Remove one of the tenant's stored policy documents.
+
+        Returns True when a stored document was removed. Bundled
+        documents are code, not rows: removing an id that exists
+        only in the bundled corpus returns False (nothing was
+        stored under it), and when a stored *override* of a bundled
+        tenant document is removed, the bundled original simply
+        resurfaces in the corpus. The archived object is deleted
+        best-effort, like every archive operation here.
+        """
+        tenant = resolve_tenant_id(tenant_id)
+        store = self._get_store()
+        read = getattr(store, "tenant_policy", None)
+        delete = getattr(store, "delete_tenant_policy", None)
+        if not callable(delete):
+            return False
+        existing = read(tenant, policy_id) if callable(read) else None
+        if existing is None:
+            return False
+        removed = delete(tenant, policy_id)
+        if removed and existing.get("object_key"):
+            object_store = self._get_object_store()
+            drop = getattr(object_store, "delete", None) if object_store else None
+            if callable(drop):
+                try:
+                    drop(existing["object_key"])
+                except Exception:
+                    pass
+        return bool(removed)

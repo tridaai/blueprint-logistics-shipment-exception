@@ -534,14 +534,71 @@ def list_policies(
     x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
 ) -> list[dict[str, str]]:
     """The policy corpus the caller's tenant retrieves from: the
-    shared documents plus that tenant's own tagged SOPs (their
-    ``tenant_id`` field says which). Another tenant's documents are
-    not listed — the listing is the corpus, and the corpus is the
-    partition."""
-    from .policies_data import policies_for_tenant
+    shared documents plus that tenant's own SOPs, each tagged with
+    its provenance (``source``: ``shared`` / ``bundled`` /
+    ``tenant`` — the last are the documents supplied at runtime
+    through this surface, see POST /policies). Another tenant's
+    documents are not listed — the listing is the corpus, and the
+    corpus is the partition."""
+    return service.corpus_policies(tenant_id=x_tenant_id)
+
+
+class PolicyDocumentRequest(BaseModel):
+    policy_id: str
+    title: str
+    text: str
+
+
+@app.post("/policies", status_code=201, dependencies=_AUTH)
+def upsert_policy(
+    document: PolicyDocumentRequest,
+    x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
+) -> dict:
+    """Add or replace one of the caller's tenant's own policy documents.
+
+    The document joins the tenant's retrieval corpus on the next
+    run — persisted through the store, archived through the object
+    store when one is configured, no restart. The tenant is the
+    caller's resolved partition, never a payload field: one tenant
+    cannot write into another's corpus. An id matching one of the
+    tenant's bundled documents replaces it (until removed, when the
+    bundled original resurfaces); an id naming a *shared* document
+    is refused (422) — the shared corpus is not a tenant's to
+    redefine."""
+    try:
+        return service.upsert_tenant_policy(
+            x_tenant_id, document.policy_id, document.title, document.text
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.delete("/policies/{policy_id}", dependencies=_AUTH)
+def delete_policy(
+    policy_id: str,
+    x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
+) -> dict:
+    """Remove one of the caller's tenant's stored policy documents.
+
+    Only runtime-supplied documents can be removed — bundled
+    documents are code. A 404 therefore means one of: the id is
+    unknown, it names a bundled document (managed in code, not
+    here), or it belongs to another tenant (whose documents are
+    invisible in this partition, as everywhere)."""
     from .service import resolve_tenant_id
 
-    return policies_for_tenant(resolve_tenant_id(x_tenant_id))
+    if service.remove_tenant_policy(x_tenant_id, policy_id):
+        return {
+            "deleted": policy_id,
+            "tenant_id": resolve_tenant_id(x_tenant_id),
+        }
+    raise HTTPException(
+        status_code=404,
+        detail=(
+            f"No tenant-supplied policy {policy_id!r} in this tenant's "
+            "corpus — bundled documents are managed in code."
+        ),
+    )
 
 
 @app.get("/samples", dependencies=_AUTH)

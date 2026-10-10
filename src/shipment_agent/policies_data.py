@@ -14,6 +14,16 @@ for tenant A retrieves the shared corpus plus A's documents — B's
 documents are not ranked lower, they are *absent*, so they can never
 surface in A's diagnosis, draft, or citations. ``data/sample/
 tenant_policies.json`` mirrors the tenant entries.
+
+**Runtime-managed documents.** The bundled corpora above are the
+seed, not the ceiling: a tenant's operators can add, replace, and
+remove their own documents at runtime through the API
+(``POST`` / ``DELETE /policies``). Those live in the store (the
+system of record), are archived through the object-store port, and
+are merged over this bundled corpus per run by the service (see
+``service.corpus_policies``) — same tenant tag, same scoping, no
+restart. The listing names each document's provenance: ``shared``,
+``bundled``, or ``tenant``.
 """
 
 from __future__ import annotations

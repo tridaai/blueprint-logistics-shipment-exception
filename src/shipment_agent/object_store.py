@@ -48,6 +48,9 @@ class InMemoryObjectStore:
     def exists(self, key: str) -> bool:
         return key in self.objects
 
+    def delete(self, key: str) -> None:
+        self.objects.pop(key, None)
+
 
 class S3ObjectStore:
     """boto3-backed store over one bucket.
@@ -100,6 +103,9 @@ class S3ObjectStore:
             if exc.response.get("Error", {}).get("Code") in ("404", "NoSuchKey"):
                 return False
             raise
+
+    def delete(self, key: str) -> None:
+        self._s3().delete_object(Bucket=self._bucket, Key=key)
 
 
 def get_object_store() -> S3ObjectStore | None:
