@@ -15,6 +15,7 @@ LLM reply falls back to the template.
 from __future__ import annotations
 
 from .extractor import extraction_discrepancies
+from .insights import format_carrier_scorecard_line
 from .model_backends import DraftContext
 from .schemas import Diagnosis, DocumentExtraction, ShipmentInput
 from .screening import sanitized_event_notes
@@ -64,6 +65,9 @@ def memory_evidence_lines(history: dict | None) -> list[str]:
             f"reviewer feedback: {when} decision {scope} was {verb} — "
             f"reason: '{feedback.get('reason', '')}'"
         )
+    card = history.get("carrier_scorecard")
+    if card:
+        lines.append(format_carrier_scorecard_line(card))
     return lines
 
 

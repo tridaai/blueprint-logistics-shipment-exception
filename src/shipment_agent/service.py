@@ -39,6 +39,13 @@ from dataclasses import dataclass, field
 from .checkpoints import get_checkpointer
 from .config import env_float, env_int, env_str, load_dotenv
 from .graph import resume_approval, run_shipment
+from .insights import (
+    all_carrier_scorecards,
+    approval_queue as _approval_queue,
+)
+from .insights import (
+    carrier_scorecard as _carrier_scorecard,
+)
 from .model_backends import ModelBackend, get_backend
 from .object_store import get_object_store
 from .ports import Checkpointer, EventSink, ObjectStore
@@ -422,6 +429,17 @@ class ShipmentService:
         feedback = self._feedback_for(model)
         if feedback:
             history = {**(history or {}), "feedback": feedback}
+        # Carrier scorecard: the carrier's whole stored track record
+        # (exception mix, damage rate, human approval rate) joins the
+        # evidence too, even when the consignee/lane memory is empty —
+        # a carrier's history is a decision input on its own.
+        card = _carrier_scorecard(
+            self._get_store().records(),
+            model.carrier,
+            exclude_shipment_id=model.shipment_id,
+        )
+        if card is not None:
+            history = {**(history or {}), "carrier_scorecard": card}
         result = run_shipment(
             model,
             backend=backend,
@@ -754,6 +772,20 @@ class ShipmentService:
             if due_at is None or moment >= due_at:
                 due.append(record.result.shipment_id)
         return due
+
+    def approval_queue(self) -> list[dict]:
+        """The approval queue: awaiting shipments, severity first,
+        then oldest, each with the flags an approver scans for
+        (see ``insights.approval_queue``)."""
+        return _approval_queue(self._get_store().records())
+
+    def carrier_scorecards(self) -> list[dict]:
+        """Scorecards for every carrier in the store, busiest first."""
+        return all_carrier_scorecards(self._get_store().records())
+
+    def carrier_scorecard(self, carrier: str) -> dict | None:
+        """One carrier's scorecard, or None when it has no history."""
+        return _carrier_scorecard(self._get_store().records(), carrier)
 
     def get(self, shipment_id: str) -> AgentResult | None:
         record = self._get_store().get(shipment_id)

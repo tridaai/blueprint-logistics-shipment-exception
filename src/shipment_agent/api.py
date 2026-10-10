@@ -269,6 +269,40 @@ def audit_export(format: str = Query(default="json")):
     )
 
 
+@app.get("/queue", dependencies=_AUTH)
+def approval_queue() -> dict:
+    """The approval queue: shipments awaiting a human decision,
+    sorted by severity then age (oldest first), each with the flags
+    an approver scans for — cross-check disagreement, guardrail
+    repair, reviewer block, failing guardrails, information needed,
+    auto-approval eligibility. The approver's worklist, computed
+    from the store (see ``insights.py``)."""
+    queue_items = service.approval_queue()
+    return {"count": len(queue_items), "queue": queue_items}
+
+
+@app.get("/carriers/scorecards", dependencies=_AUTH)
+def carrier_scorecards() -> dict:
+    """Carrier scorecards: per-carrier aggregates over the stored
+    history — shipments, exception mix and rate, damage rate, and
+    the human decision record (approvals / rejections / approval
+    rate), busiest carrier first."""
+    cards = service.carrier_scorecards()
+    return {"count": len(cards), "carriers": cards}
+
+
+@app.get("/carriers/{carrier}/scorecard", dependencies=_AUTH)
+def carrier_scorecard(carrier: str) -> dict:
+    """One carrier's scorecard (404 when the carrier has no stored
+    history)."""
+    card = service.carrier_scorecard(carrier)
+    if card is None:
+        raise HTTPException(
+            status_code=404, detail=f"No stored history for carrier: {carrier}"
+        )
+    return card
+
+
 @app.get("/policies", dependencies=_AUTH)
 def list_policies() -> list[dict[str, str]]:
     return POLICIES
