@@ -92,8 +92,10 @@
     <select id="sample"></select>
     <label for="json">…or paste shipment JSON</label>
     <textarea id="json" spellcheck="false"></textarea>
-    <label for="apikey">API key <span style="font-weight:400; color:var(--muted)">(only when the server runs with API_KEY set — locally the API is open)</span></label>
+    <label for="apikey">API key <span style="font-weight:400; color:var(--muted)">(only when the server runs with keys set — the shared API_KEY, or per-tenant keys which open only their own tenant; locally the API is open)</span></label>
     <input id="apikey" type="password" placeholder="X-API-Key value" style="max-width:320px" autocomplete="off">
+    <label for="tenant">Tenant ID <span style="font-weight:400; color:var(--muted)">(optional — the X-Tenant-ID partition this console works in; blank = the server's default tenant)</span></label>
+    <input id="tenant" type="text" placeholder="e.g. acme" style="max-width:320px" autocomplete="off">
     <div class="row" style="margin-top:12px">
       <button class="primary" id="analyze">Analyze shipment</button>
       <span id="error"></span>
@@ -223,8 +225,12 @@ let currentId = null;
 let currentMeta = null;
 
 function apiHeaders() {
+  const headers = {};
   const key = $('apikey').value.trim();
-  return key ? {'X-API-Key': key} : {};
+  if (key) headers['X-API-Key'] = key;
+  const tenant = $('tenant').value.trim();
+  if (tenant) headers['X-Tenant-ID'] = tenant;
+  return headers;
 }
 
 async function loadSamples() {

@@ -97,6 +97,88 @@ def silence_langchain_deprecation_warnings() -> None:
 DEFAULT_TENANT_ID = "default"
 
 
+def tenant_api_keys() -> dict[str, str]:
+    """The per-tenant API keys from ``TENANT_API_KEYS``: tenant → key.
+
+    Format: comma-separated ``tenant:key`` pairs —
+    ``TENANT_API_KEYS=acme:key-one,globex:key-two``. Tenant ids
+    therefore cannot contain ``:`` or ``,`` (they are partition
+    names, not prose); whitespace around pairs is ignored, and a
+    malformed pair (no colon, an empty side) is skipped rather than
+    half-trusted. An empty dict means the variable is not configured.
+    """
+    load_dotenv()
+    keys: dict[str, str] = {}
+    raw = env_str("TENANT_API_KEYS")
+    if not raw:
+        return keys
+    for pair in raw.split(","):
+        tenant, sep, key = pair.partition(":")
+        tenant, key = tenant.strip(), key.strip()
+        if sep and tenant and key:
+            keys[tenant] = key
+    return keys
+
+
+def _tenant_env_var(tenant_id: str) -> str:
+    """The per-tenant key variable for one tenant:
+    ``API_KEY_<TENANT>``, the tenant id uppercased with every
+    non-alphanumeric character folded to ``_`` (``acme-retail`` →
+    ``API_KEY_ACME_RETAIL``). Computed from the tenant id, never
+    parsed back from a variable name, so the mapping is exact."""
+    import re
+
+    return "API_KEY_" + re.sub(r"[^A-Za-z0-9]", "_", tenant_id).upper()
+
+
+def tenant_api_key(tenant_id: str) -> str | None:
+    """The API key issued for one tenant, or None when it has none.
+
+    ``TENANT_API_KEYS`` wins over the per-tenant ``API_KEY_<TENANT>``
+    variable when both name the tenant.
+    """
+    load_dotenv()
+    key = tenant_api_keys().get(tenant_id)
+    if key:
+        return key
+    return env_str(_tenant_env_var(tenant_id))
+
+
+def per_tenant_keys_configured() -> bool:
+    """Whether any per-tenant key configuration exists at all.
+
+    True when ``TENANT_API_KEYS`` names a tenant or any
+    ``API_KEY_<TENANT>`` variable is set. This is the switch between
+    the API's two auth models (see ``api.require_api_key``): with no
+    per-tenant configuration, the tenant header stays a trusted
+    partition claim under the single shared key; with any, a key
+    must belong to the tenant it is presented for.
+    """
+    load_dotenv()
+    if tenant_api_keys():
+        return True
+    return any(
+        name.startswith("API_KEY_") and value
+        for name, value in os.environ.items()
+    )
+
+
+def known_api_keys() -> set[str]:
+    """Every key value the deployment recognises: the shared
+    ``API_KEY``, every ``TENANT_API_KEYS`` value, every
+    ``API_KEY_<TENANT>`` value. Used to tell "a real key aimed at
+    the wrong tenant" (403) apart from "no such key" (401)."""
+    load_dotenv()
+    keys = set(tenant_api_keys().values())
+    shared = env_str("API_KEY")
+    if shared:
+        keys.add(shared)
+    for name, value in os.environ.items():
+        if name.startswith("API_KEY_") and value:
+            keys.add(value)
+    return keys
+
+
 def env_str(name: str, default: str | None = None) -> str | None:
     """Read a string variable, treating an empty value as unset."""
     value = os.environ.get(name)

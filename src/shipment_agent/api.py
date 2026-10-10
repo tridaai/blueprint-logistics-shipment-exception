@@ -48,23 +48,79 @@ from .wiring import build_service_from_env
 load_dotenv()
 
 
-def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
-    """Optional API-key gate, enabled by setting ``API_KEY``.
+def require_api_key(
+    x_api_key: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
+) -> None:
+    """The API-key gate: two models, chosen by configuration.
 
-    When ``API_KEY`` is set, every data endpoint (read + mutating)
-    requires the matching ``X-API-Key`` header. When it is unset the
-    API is open — the local-dev default, stated here and in the docs
-    rather than implied. The console page and /health stay open either
-    way; the console carries an API-key field for the gated calls.
+    **Shared-key model** (no per-tenant keys configured): when
+    ``API_KEY`` is set, every data endpoint requires the matching
+    ``X-API-Key`` header; when it is unset the API is open — the
+    local-dev default, stated here and in the docs rather than
+    implied. Under this model the ``X-Tenant-ID`` header is a
+    *trusted claim*: the key authenticates the caller, not the
+    tenant, so any key holder can name any partition. That is the
+    single-client deployment shape, and it is only as strong as the
+    network segment the API sits on.
+
+    **Per-tenant model** (``TENANT_API_KEYS`` names a tenant, or any
+    ``API_KEY_<TENANT>`` variable is set — see ``config.py``): a key
+    opens only its own tenant's partition. The claimed tenant is
+    resolved exactly like everywhere else (header, then ``TENANT_ID``,
+    then the default tenant) and the presented key must be *that
+    tenant's* key. The shared ``API_KEY`` keeps working for the
+    **default tenant only**. A real key presented for the wrong
+    tenant is a 403 (authenticated, wrong partition); a missing or
+    unrecognised key is a 401.
+
+    The console page and /health stay open either way; the console
+    carries API-key and tenant fields for the gated calls.
     """
-    expected = env_str("API_KEY")
-    if not expected:
+    from .config import (
+        DEFAULT_TENANT_ID,
+        known_api_keys,
+        per_tenant_keys_configured,
+        tenant_api_key,
+    )
+    from .service import resolve_tenant_id
+
+    shared = env_str("API_KEY")
+    if not per_tenant_keys_configured():
+        if not shared:
+            return
+        if x_api_key != shared:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or missing API key (send the X-API-Key header).",
+            )
         return
-    if x_api_key != expected:
+    tenant = resolve_tenant_id(x_tenant_id)
+    expected = tenant_api_key(tenant)
+    if expected is not None and x_api_key == expected:
+        return
+    if (
+        expected is None
+        and tenant == DEFAULT_TENANT_ID
+        and shared
+        and x_api_key == shared
+    ):
+        return  # the shared key's one remaining home: the default tenant
+    if x_api_key and x_api_key in known_api_keys():
         raise HTTPException(
-            status_code=401,
-            detail="Invalid or missing API key (send the X-API-Key header).",
+            status_code=403,
+            detail=(
+                f"That API key is not valid for tenant {tenant!r} — a key "
+                "opens only its own tenant partition."
+            ),
         )
+    raise HTTPException(
+        status_code=401,
+        detail=(
+            "Invalid or missing API key — send the X-API-Key issued for "
+            "the tenant named by X-Tenant-ID."
+        ),
+    )
 
 
 _AUTH = [Depends(require_api_key)]
@@ -248,6 +304,10 @@ def readiness() -> JSONResponse:
 # see service.resolve_tenant_id). A read for a shipment that lives
 # in another tenant's partition is a 404, exactly as if it did not
 # exist: partitions are invisible to each other, not just filtered.
+# Whether the header is a trusted claim or an authenticated one is
+# the auth model's business — per-tenant keys (TENANT_API_KEYS /
+# API_KEY_<TENANT>) bind the partition to the caller's credential;
+# see require_api_key above.
 
 
 @app.get("/metrics")
