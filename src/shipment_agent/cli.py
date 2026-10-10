@@ -6,6 +6,7 @@ Usage:
     shipment-agent --all                 # every bundled sample shipment
     shipment-agent --index 2             # a specific bundled sample
     shipment-agent --file data/sample/sample_shipments.json --all
+    shipment-agent --all --concurrency 4 # the batch, four at a time
 
 The default data source is the sample set bundled inside the package, so
 this works identically from a source checkout and a pip install.
@@ -16,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 from .config import silence_langchain_deprecation_warnings
@@ -27,7 +29,9 @@ from .graph import run_shipment
 from .model_backends import ModelBackend, get_backend
 from .retriever import Retriever, get_retriever
 from .samples import load_sample_shipments
-from .schemas import ShipmentInput
+from .schemas import AgentResult, ShipmentInput
+from .service import BatchItem, ShipmentService
+from .store import InMemoryStore
 
 
 def _load_shipments(path: Path | None) -> list[ShipmentInput]:
@@ -43,6 +47,10 @@ def _print_result(
     retriever: Retriever | None = None,
 ) -> None:
     result = run_shipment(shipment, backend=backend, retriever=retriever)
+    _render_result(shipment, result)
+
+
+def _render_result(shipment: ShipmentInput, result: AgentResult) -> None:
     c = result.classification
     print("=" * 72)
     print(f"Shipment {result.shipment_id}: {shipment.origin} -> {shipment.destination}")
@@ -70,6 +78,10 @@ def _print_result(
         verdict = "grounded" if result.verification.grounded else "NOT GROUNDED"
         issues = f" issues={result.verification.issues}" if result.verification.issues else ""
         print(f"Self-check: {verdict} ({result.verification.source}){issues}")
+    if result.review is not None:
+        findings = f" findings={result.review.findings}" if result.review.findings else ""
+        blocked = " — REVIEWER BLOCKED (flagged for the approver)" if result.reviewer_blocked else ""
+        print(f"Review    : {result.review.verdict.upper()} ({result.review.source}){findings}{blocked}")
     print(f"Guardrails: passed={result.validation.passed} errors={result.validation.errors}")
     if result.repair_attempted:
         print(f"Repair    : attempted ({result.repair_attempts}) — {'repaired' if result.repaired else 'still failing'}; original errors={result.original_validation.errors if result.original_validation else []}")
@@ -97,11 +109,51 @@ def _print_result(
     print()
 
 
+def _run_batch(shipments: list[ShipmentInput], concurrency: int) -> list[BatchItem]:
+    """The concurrent batch path: the service layer with an in-memory
+    store (the CLI persists nothing), each item rendered as it lands.
+    Configuration was already resolved by main() before this runs, so a
+    misconfigured backend fails loudly there, not per item here."""
+    service = ShipmentService(store=InMemoryStore())
+    items = service.analyze_batch(shipments, concurrency=concurrency)
+    for shipment, item in zip(shipments, items):
+        if item.error:
+            print("=" * 72)
+            print(f"Shipment {item.shipment_id}: ERROR — {item.error}")
+            print()
+        elif item.result is not None:
+            _render_result(shipment, item.result)
+    return items
+
+
+def _print_batch_summary(items: list[BatchItem], concurrency: int, wall_clock: float) -> None:
+    print("=" * 72)
+    print(
+        f"Batch summary: {len(items)} shipment(s) · concurrency {concurrency} "
+        f"· wall-clock {wall_clock:.2f}s"
+    )
+    for item in items:
+        if item.error:
+            print(f"  {item.shipment_id}: ERROR — {item.error}")
+        elif item.result is not None:
+            result = item.result
+            print(
+                f"  {item.shipment_id}: {result.classification.exception_type.value} "
+                f"— {result.approval_status}"
+            )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Shipment Exception Agent CLI (offline, synthetic data)")
     parser.add_argument("--file", type=Path, default=None, help="Path to a shipments JSON file (default: bundled samples)")
     parser.add_argument("--index", type=int, default=0, help="Which sample shipment to run")
     parser.add_argument("--all", action="store_true", help="Run every sample shipment")
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="With --all: analyse N shipments concurrently (default 1 = sequential, unchanged)",
+    )
     args = parser.parse_args()
 
     # Backend + retriever come from the environment (.env loaded by the
@@ -114,8 +166,19 @@ def main() -> None:
         retriever = get_retriever()
         shipments = _load_shipments(args.file)
         selected = shipments if args.all else [shipments[args.index]]
-        for shipment in selected:
-            _print_result(shipment, backend=backend, retriever=retriever)
+        started = time.perf_counter()
+        if args.all and args.concurrency > 1:
+            items = _run_batch(selected, args.concurrency)
+        else:
+            items = []
+            for shipment in selected:
+                result = run_shipment(shipment, backend=backend, retriever=retriever)
+                _render_result(shipment, result)
+                items.append(
+                    BatchItem(shipment_id=shipment.shipment_id, result=result)
+                )
+        if args.all:
+            _print_batch_summary(items, args.concurrency, time.perf_counter() - started)
     except (RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc

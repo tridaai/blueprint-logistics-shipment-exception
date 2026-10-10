@@ -15,7 +15,9 @@ in-memory store remains available as a test double.
 from __future__ import annotations
 
 import json
+import threading
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from .config import env_float, env_str, load_dotenv
@@ -25,7 +27,17 @@ from .retriever import Retriever, get_retriever
 from .schemas import AgentResult, ShipmentInput
 from .store import ApprovalRecord, ApprovalStore, carrier_summary, default_store
 
-__all__ = ["ApprovalRecord", "ShipmentService"]
+__all__ = ["ApprovalRecord", "BatchItem", "ShipmentService"]
+
+
+@dataclass
+class BatchItem:
+    """One outcome of a batch analysis: a result, or the error that
+    stopped that one shipment — never the whole batch."""
+
+    shipment_id: str
+    result: AgentResult | None = None
+    error: str | None = None
 
 
 def dispatch_approval_webhook(record: ApprovalRecord) -> str | None:
@@ -90,6 +102,11 @@ class ShipmentService:
             if isinstance(shipment, ShipmentInput)
             else ShipmentInput.model_validate(shipment)
         )
+        return self._analyze_model(model, backend, self.retriever)
+
+    def _analyze_model(
+        self, model: ShipmentInput, backend: ModelBackend, retriever: Retriever
+    ) -> AgentResult:
         # Memory: what the store already knows about this consignee and
         # this lane becomes diagnosis evidence for the new analysis.
         # The raw entries ride along too — the diagnosis tool loop
@@ -107,7 +124,7 @@ class ShipmentService:
         result = run_shipment(
             model,
             backend=backend,
-            retriever=self.retriever,
+            retriever=retriever,
             history=history,
             priors=priors,
         )
@@ -115,6 +132,60 @@ class ShipmentService:
             ApprovalRecord(result=result, shipment=model.model_dump(mode="json"))
         )
         return result
+
+    def analyze_batch(
+        self,
+        shipments: list[ShipmentInput | dict],
+        concurrency: int = 1,
+    ) -> list[BatchItem]:
+        """Analyse many shipments, in input order, optionally concurrently.
+
+        Each item runs the same pipeline as :meth:`analyze` and gets
+        its own result object. Injected backend/retriever are shared
+        (test doubles are stateless); otherwise every item resolves
+        fresh ones from the environment, so a provider backend's usage
+        counters and a retriever's per-run stats never race across
+        threads. The store is shared deliberately — batch items see
+        each other as memory, like a real intake queue — and its
+        writes are serialised by the store itself (SQLite: one
+        connection per call; in-memory: a lock). A shipment that fails
+        (bad payload, provider down) lands in its item's ``error``;
+        it never fails the batch.
+        """
+
+        def run_one(raw: ShipmentInput | dict) -> BatchItem:
+            shipment_id = (
+                raw.get("shipment_id", "unknown")
+                if isinstance(raw, dict)
+                else getattr(raw, "shipment_id", "unknown")
+            )
+            try:
+                model = (
+                    raw
+                    if isinstance(raw, ShipmentInput)
+                    else ShipmentInput.model_validate(raw)
+                )
+                backend = self.backend or get_backend()
+                retriever = self.retriever or get_retriever()
+                result = self._analyze_model(model, backend, retriever)
+                return BatchItem(shipment_id=model.shipment_id, result=result)
+            except Exception as exc:  # one bad shipment never fails the batch
+                return BatchItem(
+                    shipment_id=str(shipment_id),
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+
+        workers = max(1, int(concurrency))
+        if workers == 1 or len(shipments) <= 1:
+            return [run_one(item) for item in shipments]
+        semaphore = threading.Semaphore(workers)
+
+        def guarded(item: ShipmentInput | dict) -> BatchItem:
+            with semaphore:
+                return run_one(item)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            return list(pool.map(guarded, shipments))
 
     @staticmethod
     def _consignee_of(shipment: ShipmentInput) -> str:

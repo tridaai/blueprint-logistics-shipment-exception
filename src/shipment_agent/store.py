@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -141,20 +142,32 @@ class ApprovalStore(Protocol):
 
 
 class InMemoryStore:
-    """Test double: records in a dict, gone when the process ends."""
+    """Test double: records in a dict, gone when the process ends.
+
+    A lock serialises access: the batch path (``analyze_batch``) runs
+    analyses concurrently against one shared store, and each operation
+    here is a read-modify or multi-step read that must not interleave.
+    ``SQLiteStore`` gets the same guarantee by construction — it opens
+    a fresh connection per call.
+    """
 
     def __init__(self) -> None:
         self._records: dict[str, ApprovalRecord] = {}
+        self._lock = threading.Lock()
 
     def save(self, record: ApprovalRecord) -> None:
-        self._records[record.result.shipment_id] = record
+        with self._lock:
+            self._records[record.result.shipment_id] = record
 
     def get(self, shipment_id: str) -> ApprovalRecord | None:
-        return self._records.get(shipment_id)
+        with self._lock:
+            return self._records.get(shipment_id)
 
     def prior_shipments(self, exclude_shipment_id: str | None = None) -> list[dict]:
+        with self._lock:
+            records = list(self._records.values())
         entries = []
-        for record in reversed(list(self._records.values())):
+        for record in reversed(records):
             if record.result.shipment_id == exclude_shipment_id:
                 continue
             entry = history_entry(record)
@@ -163,8 +176,10 @@ class InMemoryStore:
         return entries
 
     def decision_feedback(self, exclude_shipment_id: str | None = None) -> list[dict]:
+        with self._lock:
+            records = list(self._records.values())
         entries = []
-        for record in reversed(list(self._records.values())):
+        for record in reversed(records):
             if record.result.shipment_id == exclude_shipment_id:
                 continue
             entry = feedback_entry(record)
