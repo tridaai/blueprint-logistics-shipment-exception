@@ -37,7 +37,7 @@ the offline smoke-test backend. The primary workflow is
 ```bash
 uv sync --extra dev              # 1 · install the locked set (uv.lock)
 uv run shipment-agent-demo       # 2 · one shipment, end to end, with a trace
-uv run pytest -q                 # 3 · the full test suite (205 tests)
+uv run pytest -q                 # 3 · the full test suite (257 tests)
 ```
 
 No uv? Create a virtual environment and use pip. The direct dependencies
@@ -84,6 +84,7 @@ Real excerpt from the demo's output:
     approval_status = awaiting_approval · external_action_taken = False
     Autonomy recommendation: human decision required (recommendation only — never acted on)
       - exception 'delay' at severity 'high' is above the auto-approval band (none or low) — a human should decide
+    Telemetry : mock (offline fallback — no model ran) · 1 call(s) · tokens n/a · 0.023s
 ```
 
 Prefer a browser? Run `make serve` and
@@ -531,16 +532,21 @@ the verified facts (invented ETAs and prohibited promises fail the pack),
 with per-case tokens, latency, and estimated cost. It fails loudly
 without a real provider and is never part of the default gate or CI.
 
-Test suite: **205 tests, all passing** (`pytest -q`) — classifier, tools,
+Test suite: **257 tests, all passing** (`pytest -q`) — classifier, tools,
 retriever (keyword, semantic, hybrid + rerank, Chroma path with a faked
 client), the retrieval query built from shipment content, intake
 normalization (doc-type aliases, numeric coercion, the skipped-check
 warning), extraction and its cross-check, the classification cross-check
-and its resolution policy, diagnosis, recovery-option scoring,
-guardrails, self-verification (checklist + LLM critique), the bounded
+and its resolution policy, diagnosis (including the provider-mode
+agentic tool loop with scripted tool-calling SDKs), recovery-option
+scoring, guardrails (including the PII check and time-commitment
+promises), self-verification (checklist + LLM critique), the bounded
 repair loop (provider-mode repair, SYN-1013 on and off), memory across
-both stores, the autonomy recommendation and each disqualifier, output
-routing against a local stub server, provider-error translation and
+both stores (consignee, lane, and carrier history), the clarification
+request flow, run telemetry, the autonomy recommendation and each
+disqualifier, output
+routing against a local stub server, provider-error translation
+(including client-construction failures) and
 recorded fallbacks, end-to-end graph, API approval/reject flow (including
 the unified `actor` field), SQLite persistence across instances,
 API-key auth, the web UI, a negation suite
@@ -556,10 +562,12 @@ external network or a real API key.
 
 ```
 src/shipment_agent/   agent graph (10 nodes), classifier + cross-check,
-                      extractor, diagnosis, options scorer, retriever
+                      extractor, diagnosis (agentic tool loop in
+                      provider mode), options scorer, retriever
                       (keyword / semantic / hybrid, Chroma or memory),
                       guardrails, self-verification, repair loop, memory,
-                      autonomy policy, provider-error translation,
+                      clarification requests, telemetry, autonomy policy,
+                      provider-error translation,
                       model backends (mock / OpenAI /
                       Anthropic / Ollama), SQLite approval store,
                       FastAPI app + web UI (static/), demo trace, CLI,
@@ -568,7 +576,7 @@ docs/architecture.md  full architecture and productionisation notes
 data/sample/          synthetic shipments (13) + policy corpus mirror
 evals/                golden dataset (32 cases) + run_evals.py +
                       run_llm_evals.py (opt-in LLM-judge pack)
-tests/                205 pytest tests: unit, integration, API, UI,
+tests/                257 pytest tests: unit, integration, API, UI,
                       negation, persistence, auth, LLM backends and
                       eval pack (mocked SDKs), config, retrieval
 docker-compose.yml    agent only (offline fallback) — unchanged default
