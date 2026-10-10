@@ -13,6 +13,7 @@ this prototype still performs no external action.
 
 from __future__ import annotations
 
+import time
 from typing import TypedDict
 
 from langgraph.graph import END, StateGraph
@@ -27,7 +28,7 @@ from .extractor import (
     extraction_discrepancies,
 )
 from .guardrails import validate_draft
-from .model_backends import DraftContext, ModelBackend, MockModelBackend
+from .model_backends import DraftContext, ModelBackend, MockModelBackend, estimate_cost_usd
 from .options import build_recovery_options
 from .retriever import KeywordRetriever, Retriever
 from .config import env_int, env_str, load_dotenv
@@ -36,6 +37,7 @@ from .schemas import (
     DocumentExtraction,
     DraftOutput,
     ExceptionType,
+    RunTelemetry,
     ShipmentInput,
     TraceStep,
     ValidationResult,
@@ -785,7 +787,14 @@ def run_shipment(
     shipment_model = (
         shipment if isinstance(shipment, ShipmentInput) else ShipmentInput.model_validate(shipment)
     )
-    app = build_graph(backend=backend, retriever=retriever)
+    effective_backend = backend or MockModelBackend()
+    app = build_graph(backend=effective_backend, retriever=retriever)
+    # Telemetry: snapshot the backend's cumulative usage around the run
+    # (a service reuses one backend across runs, so the run's share is
+    # the delta), and time the whole invoke on the wall clock.
+    usage_totals = getattr(effective_backend, "usage_totals", None)
+    before = usage_totals() if callable(usage_totals) else None
+    started = time.perf_counter()
     final = app.invoke(
         {
             "shipment": shipment_model.model_dump(mode="json"),
@@ -793,7 +802,9 @@ def run_shipment(
             "priors": priors or [],
         }
     )
-    return AgentResult(
+    latency = round(time.perf_counter() - started, 3)
+    telemetry = _run_telemetry(effective_backend, before, latency)
+    result = AgentResult(
         shipment_id=shipment_model.shipment_id,
         classification=final["classification"],
         llm_suggestion=final.get("classification_suggestion"),
@@ -814,7 +825,53 @@ def run_shipment(
         repair_attempts=int(final.get("repair_attempts") or 0),
         original_validation=final.get("original_validation"),
         autonomy=final.get("autonomy"),
+        telemetry=telemetry,
         trace=_build_trace(shipment_model, final),
         approval_status=final.get("approval_status", "awaiting_approval"),
         external_action_taken=False,
+    )
+    # The telemetry rides inside the claim packet too — whoever receives
+    # the packet (the approver, a downstream system) sees what the run
+    # that produced it cost.
+    result.draft.claim_packet = {
+        **result.draft.claim_packet,
+        "telemetry": telemetry.model_dump(),
+    }
+    return result
+
+
+def _run_telemetry(backend, before: dict | None, latency: float) -> RunTelemetry:
+    """Aggregate one run's telemetry from the backend's usage counters.
+
+    Provider mode: real token usage (the delta over the run), the model
+    that served it, and the estimated cost from the price table (None
+    for an unlisted model). Mock mode: tokens and cost are None — no
+    model ran, and the telemetry says so instead of inventing numbers —
+    while the call count and latency remain real.
+    """
+    usage_totals = getattr(backend, "usage_totals", None)
+    after = usage_totals() if callable(usage_totals) else None
+    backend_name = getattr(backend, "name", "mock")
+    if before is None or after is None:
+        return RunTelemetry(backend=backend_name, latency_seconds=latency)
+    calls = max(int(after.get("calls", 0)) - int(before.get("calls", 0)), 0)
+    if backend_name == "mock":
+        return RunTelemetry(
+            backend=backend_name, model_calls=calls, latency_seconds=latency
+        )
+    input_tokens = max(
+        int(after.get("input_tokens", 0)) - int(before.get("input_tokens", 0)), 0
+    )
+    output_tokens = max(
+        int(after.get("output_tokens", 0)) - int(before.get("output_tokens", 0)), 0
+    )
+    model = getattr(backend, "_model", None)
+    return RunTelemetry(
+        backend=backend_name,
+        model=model,
+        model_calls=calls,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        estimated_cost_usd=estimate_cost_usd(model, input_tokens, output_tokens),
+        latency_seconds=latency,
     )

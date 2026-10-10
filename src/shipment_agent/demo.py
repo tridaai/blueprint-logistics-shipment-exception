@@ -150,6 +150,23 @@ def print_trace(
         print(f"    Autonomy recommendation: {label} (recommendation only — never acted on)")
         for reason in result.autonomy.reasons:
             print(f"      - {reason}")
+    if result.telemetry is not None:
+        t = result.telemetry
+        if t.input_tokens is not None:
+            cost = (
+                f" · est. ${t.estimated_cost_usd:.4f}"
+                if t.estimated_cost_usd is not None
+                else " · cost n/a (model not in the price table)"
+            )
+            print(
+                f"    Telemetry : {t.backend} · {t.model} · {t.model_calls} model call(s) · "
+                f"{t.input_tokens} in / {t.output_tokens} out tokens{cost} · {t.latency_seconds}s"
+            )
+        else:
+            print(
+                f"    Telemetry : {t.backend} (offline fallback — no model ran) · "
+                f"{t.model_calls} call(s) · tokens n/a · {t.latency_seconds}s"
+            )
     print("    Nothing was sent or filed. A human approves via the API/UI before any action.")
     print(_LINE)
 

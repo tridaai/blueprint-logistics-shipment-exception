@@ -317,6 +317,28 @@ class ValidationResult(BaseModel):
     checks: list[GuardrailCheck] = Field(default_factory=list)
 
 
+class RunTelemetry(BaseModel):
+    """Per-run observability: what the run used and how long it took.
+
+    In provider mode the token counts are the provider's own reported
+    usage, aggregated across every model call in the run (extraction,
+    cross-check, diagnosis loop, options, draft, verification, repair),
+    and ``estimated_cost_usd`` applies the small price table in
+    ``model_backends.py`` — an estimate, labelled as such; an unlisted
+    model reports None. In the default (mock) mode no model ran, so
+    tokens and cost are None — never fabricated — while the call count
+    (template renders) and the wall-clock latency stay real.
+    """
+
+    backend: str
+    model: str | None = None
+    model_calls: int = 0
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    estimated_cost_usd: float | None = None
+    latency_seconds: float = 0.0
+
+
 class AutonomyRecommendation(BaseModel):
     """Deterministic routing recommendation (see ``autonomy.py``).
 
@@ -365,6 +387,7 @@ class AgentResult(BaseModel):
     repair_attempts: int = 0
     original_validation: ValidationResult | None = None
     autonomy: AutonomyRecommendation | None = None
+    telemetry: RunTelemetry | None = None
     trace: list[TraceStep] = Field(default_factory=list)
     approval_status: str = "awaiting_approval"
     decided_by: str | None = None  # who approved/rejected, once decided

@@ -56,6 +56,32 @@ from .prompts import (
 # with the LLM_TIMEOUT_SECONDS environment variable.
 DEFAULT_TIMEOUT_SECONDS = 60.0
 
+# Indicative USD list prices per 1M tokens (input, output) for the
+# telemetry cost ESTIMATE. Verify against your provider — prices move.
+# A model missing from the table reports cost as None (unknown), never
+# a guessed number; local models price at 0.
+PRICE_TABLE: dict[str, tuple[float, float]] = {
+    "gpt-4o-mini": (0.15, 0.60),
+    "gpt-4o": (2.50, 10.00),
+    "claude-sonnet-4-5": (3.00, 15.00),
+    "claude-haiku-4-5": (1.00, 5.00),
+    "llama3.1": (0.0, 0.0),
+    "nomic-embed-text": (0.0, 0.0),
+}
+
+
+def estimate_cost_usd(
+    model: str | None, input_tokens: int | None, output_tokens: int | None
+) -> float | None:
+    """Estimated USD cost of a run's token usage, or None when the
+    model is not in the price table (or usage is unknown)."""
+    if not model or model not in PRICE_TABLE or input_tokens is None or output_tokens is None:
+        return None
+    input_rate, output_rate = PRICE_TABLE[model]
+    return round(
+        (input_tokens * input_rate + output_tokens * output_rate) / 1_000_000, 6
+    )
+
 _EXCEPTION_TYPES = {"delay", "damage", "document_mismatch", "missed_appointment", "none"}
 _SEVERITIES = {"low", "medium", "high", "critical"}
 
@@ -102,7 +128,21 @@ class MockModelBackend:
 
     name = "mock"
 
+    def __init__(self) -> None:
+        self._calls = 0
+
+    def usage_totals(self) -> dict:
+        """Call accounting for telemetry. Token counts are honestly
+        zero-shaped here — no model ran, and ``run_shipment`` reports
+        mock tokens as None rather than dressing up a template render
+        as model usage. Only the call count is real."""
+        return {"input_tokens": 0, "output_tokens": 0, "calls": getattr(self, "_calls", 0)}
+
+    def reset_usage(self) -> None:
+        self._calls = 0
+
     def draft_customer_update(self, context: DraftContext) -> tuple[str, str]:
+        self._calls = getattr(self, "_calls", 0) + 1
         exception = str(context["exception_type"])
         subject = (
             f"Update on shipment {context['shipment_id']}: {exception.replace('_', ' ')}"

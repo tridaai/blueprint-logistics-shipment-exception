@@ -78,6 +78,7 @@ serialisable shape:
 | `repair_attempted` / `repaired` / `repair_attempts` | validate | bounded-repair bookkeeping |
 | `original_validation` | validate | the first (failed) validation, preserved when repair ran |
 | `autonomy` | human_approval | deterministic routing recommendation + reasons (never acted on) |
+| `telemetry` | run wrapper | backend, model, model-call count, token totals, estimated cost, wall-clock latency |
 | `approval_status` | human_approval | always `awaiting_approval` at graph exit |
 
 Why a graph instead of a chain? Each node is independently testable, the
@@ -277,6 +278,16 @@ the console, the demo, and the claim packet, and nothing reads it to
 skip the gate. Its job is to make the autonomy conversation concrete
 for a customer: which of *their* case classes could move, and why the
 rest stay human.
+
+**Run telemetry: every run reports what it used.** Each result (and
+its claim packet) carries `telemetry`: backend, model, model-call
+count, the provider-reported input/output token totals aggregated
+over the whole run, wall-clock latency, and an estimated cost from a
+small in-code price table (`model_backends.PRICE_TABLE` — indicative
+list prices, labelled an estimate; an unlisted model reports cost as
+null rather than a guess). In the default mode no model ran, so
+tokens and cost are null — the call count and latency stay real. An
+agent a customer cannot meter is an agent they cannot budget.
 
 **Approvals persist; the API can be gated.** Analyses and decisions are
 stored through a small store interface (`store.py`): SQLite on disk by

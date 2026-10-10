@@ -77,6 +77,13 @@ def _print_result(
     if result.autonomy is not None:
         label = "eligible for auto-approval" if result.autonomy.eligible_for_auto_approval else "human decision required"
         print(f"Autonomy  : {label} (recommendation only) — {'; '.join(result.autonomy.reasons)}")
+    if result.telemetry is not None:
+        t = result.telemetry
+        if t.input_tokens is not None:
+            cost = f" · est. ${t.estimated_cost_usd:.4f}" if t.estimated_cost_usd is not None else " · cost n/a"
+            print(f"Telemetry : {t.backend} · {t.model} · {t.model_calls} model call(s) · {t.input_tokens} in / {t.output_tokens} out tokens{cost} · {t.latency_seconds}s")
+        else:
+            print(f"Telemetry : {t.backend} (offline fallback — no model ran) · {t.model_calls} call(s) · tokens n/a · {t.latency_seconds}s")
     print("-" * 72)
     print(f"Subject: {result.draft.subject}")
     print(result.draft.body)
