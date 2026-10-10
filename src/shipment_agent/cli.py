@@ -283,6 +283,20 @@ def _run_sla_sweep(argv: list[str]) -> int:
         )
     fired = sum(1 for e in entries if e["outcome"] in ("sent", "failed"))
     print(f"sla-sweep: {len(entries)} new breach(es) observed, {fired} event(s) fired")
+    # The sweep also checked the workers themselves (it fires one
+    # worker_stale event per open episode); report what it saw.
+    for worker, info in service.worker_staleness().items():
+        if not info["stale"]:
+            continue
+        age = (
+            f"{info['age_seconds']:g}s old"
+            if info["age_seconds"] is not None
+            else "never swept"
+        )
+        print(
+            f"sla-sweep: worker {worker} is STALE (last sweep {age}, "
+            f"threshold {info['threshold_seconds']:g}s)"
+        )
     return 0
 
 

@@ -335,20 +335,42 @@ def readiness() -> JSONResponse:
     ready and says so (503), so a load balancer drains it. Without a
     database the process serves on in-memory test doubles and is
     ready by definition; the payload names that mode honestly.
+
+    The payload also carries the **worker staleness** view: each
+    watched worker (a ``WORKER_STALE_SECONDS`` threshold configured
+    for it) with its last sweep's age and a stale flag, plus the
+    ``stale_workers`` list. A stale background worker *degrades* the
+    deployment — nobody is retrying deliveries, nobody is paging on
+    breaches — but it does not make this process unable to serve, so
+    it flags in the payload rather than flipping the status code:
+    draining the API would fix nothing. Alerting on it is the SLA
+    sweep's ``worker_stale`` event, and scraping it is /metrics'
+    ``shipment_agent_worker_stale`` family.
     """
+    staleness = service.worker_staleness()
+    workers = {
+        "stale_workers": [
+            name for name, info in staleness.items() if info["stale"]
+        ],
+        "watched": staleness,
+    }
     if database_url():
         if db_ping():
             return JSONResponse(
                 status_code=200,
-                content={"status": "ready", "database": "postgres"},
+                content={"status": "ready", "database": "postgres", **workers},
             )
         return JSONResponse(
             status_code=503,
-            content={"status": "not_ready", "database": "unreachable"},
+            content={"status": "not_ready", "database": "unreachable", **workers},
         )
     return JSONResponse(
         status_code=200,
-        content={"status": "ready", "database": "in-memory test doubles"},
+        content={
+            "status": "ready",
+            "database": "in-memory test doubles",
+            **workers,
+        },
     )
 
 
@@ -379,7 +401,11 @@ def metrics(
     last sweep time, sweeps, outcomes per tenant) are the exception
     — the workers serve every tenant from one process, so their
     rows are deployment-wide by nature and labelled per tenant
-    inside."""
+    inside. Watched workers (a ``WORKER_STALE_SECONDS`` threshold
+    configured) also render their staleness: a
+    ``shipment_agent_worker_stale`` flag and the last sweep's age,
+    so a dead worker pages from the scrape, not just from
+    /readiness."""
     from .config import (
         tenant_api_keys,
         tenant_previous_api_keys,
@@ -414,6 +440,7 @@ def metrics(
         compute_metrics(records),
         worker_status=service.worker_status(),
         key_usage=key_usage,
+        staleness=service.worker_staleness(),
     )
     return PlainTextResponse(payload, media_type="text/plain; version=0.0.4")
 

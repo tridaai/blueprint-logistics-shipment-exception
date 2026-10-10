@@ -552,6 +552,44 @@ def escalation_pending(record: ApprovalRecord, queue_item: dict) -> bool:
     return record.sla_breach_age_seconds < threshold_hours * 3600.0
 
 
+def build_worker_stale_payload(worker: str, info: dict, detected_at: str) -> dict:
+    """The ``worker_stale`` event body for one stale worker.
+
+    The observer observing the observers: a background worker whose
+    last recorded sweep is older than its configured threshold (or
+    which has never recorded one — ``last_sweep_at`` /
+    ``age_seconds`` are then null, which is itself the loudest
+    signal in the payload). Everything a receiver needs to act
+    without calling back: which worker, when it last reported, how
+    old that report is, and the threshold it blew.
+    """
+    return {
+        "event": "worker_stale",
+        "worker": worker,
+        "last_sweep_at": info.get("last_sweep_at"),
+        "age_seconds": info.get("age_seconds"),
+        "threshold_seconds": info.get("threshold_seconds"),
+        "detected_at": detected_at,
+    }
+
+
+def attempt_worker_stale_dispatch(
+    worker: str, info: dict, detected_at: str
+) -> DispatchOutcome | None:
+    """Make ONE ``worker_stale`` delivery attempt.
+
+    Same channel, same signing, same None-when-unconfigured contract
+    as the SLA ladder's events (see
+    :func:`attempt_sla_breach_dispatch`): worker staleness is an
+    operations alarm, so it rides the SLA event channel
+    (``SLA_BREACH_WEBHOOK_URL`` or the approval webhook URL)."""
+    url = sla_breach_webhook_url()
+    if not url:
+        return None
+    payload = build_worker_stale_payload(worker, info, detected_at)
+    return _deliver_webhook_payload(payload, url)
+
+
 def record_dispatch_attempt(record: ApprovalRecord, outcome: DispatchOutcome) -> dict:
     """Append one attempt to the record's delivery ledger.
 
@@ -1416,6 +1454,11 @@ class ShipmentService:
             summary["last_sweep"] = {"at": at, **sweep, "by_tenant": by_tenant}
             summary["last_sweep_at"] = at
             summary["updated_at"] = at
+            # A fresh sweep ends any staleness episode: the marker
+            # the alert dedupes on clears, so if the worker goes
+            # quiet again the next episode alerts afresh. The
+            # episode's ledger (stale_alerts) stays — it is history.
+            summary.pop("stale_episode", None)
             save(worker, summary)
         except Exception:  # observability observes; it never gates the work
             pass
@@ -1433,6 +1476,92 @@ class ShipmentService:
             return all_status()
         except Exception:
             return {}
+
+    def worker_staleness(self, now=None) -> dict:
+        """The staleness view over the workers' status rows: which
+        *watched* workers (a ``WORKER_STALE_SECONDS`` threshold is
+        configured for them) have gone quiet past it — see
+        ``metrics.worker_staleness``. Read by /readiness and
+        /metrics; acted on by :meth:`check_worker_staleness`."""
+        from datetime import datetime, timezone
+
+        from .metrics import worker_staleness
+
+        moment = now or datetime.now(timezone.utc)
+        return worker_staleness(self.worker_status(), now=moment)
+
+    def check_worker_staleness(self, now=None) -> list[dict]:
+        """Fire one signed ``worker_stale`` event per staleness episode.
+
+        The SLA sweep calls this after recording its own heartbeat
+        (so a just-swept worker is judged on its fresh row, not its
+        previous one). For every watched worker the view calls
+        stale whose row carries no open episode, one event is
+        delivered on the SLA channel (opt-in:
+        ``SLA_BREACH_WEBHOOK=on``) and ledgered on the worker's own
+        status row — ``stale_alerts`` is the ledger, ``stale_episode``
+        the dedupe marker. The episode closes when the worker records
+        a fresh sweep (see :meth:`_record_worker_status`), so a
+        worker that recovers and later dies again alerts again.
+
+        With the channel off or unconfigured the staleness is still
+        *reported* (outcome ``disabled`` / ``not_configured``) and
+        nothing is marked — enabling the channel later fires for
+        episodes still open, the same posture as the ladder's
+        breaches. Returns one entry per stale worker observed this
+        check: ``{"worker", "outcome", ...}``.
+        """
+        from datetime import datetime, timezone
+
+        moment = now or datetime.now(timezone.utc)
+        detected_at = moment.isoformat()
+        store = self._get_store()
+        read = getattr(store, "worker_status", None)
+        save = getattr(store, "save_worker_status", None)
+        enabled = sla_breach_webhook_enabled()
+        entries: list[dict] = []
+        for worker, info in self.worker_staleness(now=moment).items():
+            if not info["stale"]:
+                continue
+            row = read(worker) if callable(read) else None
+            if row and row.get("stale_episode"):
+                continue  # already alerted for this episode
+            base = {
+                "worker": worker,
+                "last_sweep_at": info["last_sweep_at"],
+                "age_seconds": info["age_seconds"],
+                "threshold_seconds": info["threshold_seconds"],
+                "detected_at": detected_at,
+            }
+            if not enabled:
+                entries.append({**base, "outcome": "disabled"})
+                continue
+            outcome = attempt_worker_stale_dispatch(worker, info, detected_at)
+            if outcome is None:
+                entries.append({**base, "outcome": "not_configured"})
+                continue
+            entry = {
+                **base,
+                "outcome": outcome.status,
+                "http_status": outcome.http_status,
+                "signature_id": outcome.signature_id,
+                "error": outcome.error,
+            }
+            entries.append(entry)
+            if callable(save):
+                try:
+                    row = dict(row) if row else {"worker": worker}
+                    row["stale_episode"] = {
+                        "detected_at": detected_at,
+                        "outcome": outcome.status,
+                    }
+                    alerts = list(row.get("stale_alerts") or [])
+                    alerts.append(entry)
+                    row["stale_alerts"] = alerts
+                    save(worker, row)
+                except Exception:  # bookkeeping never breaks the check
+                    pass
+        return entries
 
     def dispatch_retry_worker(
         self,
@@ -1709,6 +1838,13 @@ class ShipmentService:
             tenant_counts = sweep_by_tenant.setdefault(entry["tenant_id"], {})
             tenant_counts[outcome] = tenant_counts.get(outcome, 0) + 1
         self._record_worker_status("sla_sweep", sweep_counts, sweep_by_tenant)
+        # The observer observes the observers: with this sweep's own
+        # heartbeat now recorded, check every watched worker's
+        # staleness and fire one worker_stale event per open episode
+        # (see check_worker_staleness). The alerts ride the stale
+        # workers' own rows, not this sweep's entries — the sweep's
+        # result stays the queue's story.
+        self.check_worker_staleness(now=moment)
         return entries
 
     def carrier_scorecards(self, tenant_id: str | None = None) -> list[dict]:

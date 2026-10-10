@@ -357,6 +357,55 @@ def known_api_keys() -> set[str]:
     return keys
 
 
+# ---------------------------------------------------------------------------
+# Worker staleness: how old a worker's last sweep may get before the
+# deployment calls it stale (see metrics.worker_staleness)
+# ---------------------------------------------------------------------------
+
+
+def worker_stale_seconds(worker: str) -> float | None:
+    """The staleness threshold for one background worker, in seconds.
+
+    ``WORKER_STALE_SECONDS_<WORKER>`` (the worker name uppercased,
+    non-alphanumerics folded to ``_`` — ``dispatch_retries`` →
+    ``WORKER_STALE_SECONDS_DISPATCH_RETRIES``) over the global
+    ``WORKER_STALE_SECONDS``. None when neither is set: the worker
+    is not watched, and no staleness is claimed for it — watching is
+    configured, never assumed, like every alarm in this codebase.
+    A negative value clamps to zero (any age at all is stale).
+    """
+    import re
+
+    load_dotenv()
+    var = "WORKER_STALE_SECONDS_" + re.sub(r"[^A-Za-z0-9]", "_", worker).upper()
+    raw = env_str(var) or env_str("WORKER_STALE_SECONDS")
+    if raw is None:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return None
+
+
+def stale_watched_workers() -> list[str]:
+    """The worker names a per-worker staleness threshold names.
+
+    Derived from the ``WORKER_STALE_SECONDS_<WORKER>`` variables
+    present in the environment (suffix lowercased back to the
+    worker name — worker names here are snake_case, so the fold is
+    reversible). A watched worker with no status row at all has
+    never swept: the stalest state there is, and only visible
+    because it was named here.
+    """
+    load_dotenv()
+    prefix = "WORKER_STALE_SECONDS_"
+    return sorted(
+        name[len(prefix):].lower()
+        for name, value in os.environ.items()
+        if name.startswith(prefix) and value
+    )
+
+
 def env_str(name: str, default: str | None = None) -> str | None:
     """Read a string variable, treating an empty value as unset."""
     value = os.environ.get(name)

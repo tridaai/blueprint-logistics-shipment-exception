@@ -25,8 +25,9 @@ aggregates instead of failing silently in another process.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
+from .config import stale_watched_workers, worker_stale_seconds
 from .store import ApprovalRecord
 
 
@@ -59,6 +60,53 @@ def worker_metrics(status_by_worker: dict[str, dict]) -> dict:
             "by_tenant": summary.get("by_tenant") or {},
         }
     return workers
+
+
+def worker_staleness(
+    status_by_worker: dict[str, dict], now: datetime | None = None
+) -> dict:
+    """Which watched workers are stale, and by how much.
+
+    A worker is *watched* when a staleness threshold is configured
+    for it (``WORKER_STALE_SECONDS_<WORKER>`` or the global
+    ``WORKER_STALE_SECONDS`` — see ``config.worker_stale_seconds``);
+    unwatched workers are absent from the result, not pronounced
+    healthy. A watched worker is stale when its last recorded sweep
+    is older than its threshold — or when it has *never* recorded
+    one (a named worker that has never swept is the stalest state:
+    ``age_seconds`` is None, ``last_sweep_at`` None, ``stale``
+    True). Pure projection over the status rows: the API's
+    /readiness and /metrics read it, and the SLA sweep acts on it
+    (one signed ``worker_stale`` event per episode — see
+    ``service.check_worker_staleness``).
+    """
+    moment = now or datetime.now(timezone.utc)
+    watched = set(stale_watched_workers()) | set(status_by_worker)
+    view: dict[str, dict] = {}
+    for worker in sorted(watched):
+        threshold = worker_stale_seconds(worker)
+        if threshold is None:
+            continue
+        summary = status_by_worker.get(worker) or {}
+        last = summary.get("last_sweep_at")
+        last_dt = None
+        if last:
+            try:
+                last_dt = datetime.fromisoformat(str(last).replace("Z", "+00:00"))
+            except ValueError:
+                last_dt = None
+        age = (
+            round((moment - last_dt).total_seconds(), 1)
+            if last_dt is not None
+            else None
+        )
+        view[worker] = {
+            "stale": age is None or age > threshold,
+            "last_sweep_at": last if last_dt is not None else None,
+            "age_seconds": age,
+            "threshold_seconds": threshold,
+        }
+    return view
 
 
 def compute_metrics(records: list[ApprovalRecord]) -> dict:
@@ -124,6 +172,7 @@ def render_prometheus(
     metrics: dict,
     worker_status: dict | None = None,
     key_usage: dict | None = None,
+    staleness: dict | None = None,
 ) -> str:
     """The metrics payload as Prometheus text exposition.
 
@@ -241,6 +290,26 @@ def render_prometheus(
             "shipment_agent_worker_outcomes_total",
             "Cumulative outcomes recorded by each background worker, per tenant.",
             outcome_samples,
+        )
+    if staleness:
+        family(
+            "shipment_agent_worker_stale",
+            "Whether a watched background worker is stale (1): its last "
+            "recorded sweep is older than its WORKER_STALE_SECONDS "
+            "threshold, or it has never recorded one.",
+            [
+                ({"worker": name}, 1 if info["stale"] else 0)
+                for name, info in sorted(staleness.items())
+            ],
+        )
+        family(
+            "shipment_agent_worker_last_sweep_age_seconds",
+            "Age of each watched worker's last recorded sweep, in seconds.",
+            [
+                ({"worker": name}, info["age_seconds"])
+                for name, info in sorted(staleness.items())
+                if info["age_seconds"] is not None
+            ],
         )
     if key_usage:
         family(
