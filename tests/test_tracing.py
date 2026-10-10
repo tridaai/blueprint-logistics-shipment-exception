@@ -160,8 +160,8 @@ class _ToolCallingBackend(MockModelBackend):
             "root_cause": "Weather hold at the hub.",
             "summary": "Carrier weather hold.",
             "tool_calls": [
-                {"tool": "search_policies", "summary": "2 policies"},
-                {"tool": "shipment_facts", "summary": "delay, 36.0h"},
+                {"name": "search_policies", "summary": "2 policies"},
+                {"name": "shipment_facts", "summary": "delay, 36.0h"},
             ],
         }
 
