@@ -435,7 +435,7 @@ holds each tenant's runtime-managed policy documents (migration
 scoping reads them through the same tenant tag).
 Shipment documents live behind the same kind of seam: the
 `ObjectStore` port (`object_store.py`) — S3-compatible in production
-(`S3_BUCKET`, MinIO in the compose stack) — with key-only intake
+(`S3_BUCKET`, SeaweedFS gateway in the compose stack) — with key-only intake
 (the service fetches the text) and inline documents archived under
 `shipments/<id>/documents/` after a run.
 
@@ -951,8 +951,9 @@ Ordered by value when adapting this blueprint to your own operation:
   LangGraph's own. Production uses the official Postgres saver —
   which is what `DATABASE_URL` selects — behind the same
   `Checkpointer` protocol.
-- The Docker production stack (api + Postgres/pgvector + MinIO) is
-  reviewed but not build-verified — no Docker daemon in the
-  development environment.
+- The Docker production stack (api + Postgres/pgvector + SeaweedFS
+  S3 gateway) is build-verified — built and run end to end on a
+  developer machine (2026-10-10); the authoring sandbox has no
+  Docker daemon.
 - No carrier/TMS integration and no claims filing — by design; the only
   outbound call that exists is the opt-in approval webhook.

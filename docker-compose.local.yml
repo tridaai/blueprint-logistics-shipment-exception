@@ -4,7 +4,8 @@
 #   docker compose -f docker-compose.yml -f docker-compose.local.yml up
 #
 # Two jobs:
-#  1. Publish the database and the MinIO S3 API on the host, so local
+#  1. Publish the database and the S3 API (SeaweedFS gateway) on the
+#     host, so local
 #     tooling (psql, an S3 browser, the gated integration tests) can
 #     reach them. The base file publishes neither — in the production
 #     shape only the api is exposed. With db published, the Postgres
@@ -14,7 +15,8 @@
 #  2. A fully local model: with the `local-llm` profile the api is
 #     re-pointed at a local Ollama server (same service, env only) —
 #     records, checkpoints and vectors still live in Postgres/pgvector
-#     and documents in MinIO; only the model moves in-house.
+#     and documents in the SeaweedFS S3 gateway; only the model
+#     moves in-house.
 #       docker compose -f docker-compose.yml -f docker-compose.local.yml \
 #         --profile local-llm up --build
 #     One-time model pulls (after the stack is up):

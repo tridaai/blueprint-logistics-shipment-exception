@@ -37,7 +37,7 @@ the offline smoke-test backend. The primary workflow is
 ```bash
 uv sync --extra dev              # 1 · install the locked set (uv.lock)
 uv run shipment-agent-demo       # 2 · one shipment, end to end, with a trace
-uv run pytest -q                 # 3 · the full test suite (614 tests)
+uv run pytest -q                 # 3 · the full test suite (639 tests)
 ```
 
 No uv? Create a virtual environment and use pip. The direct dependencies
@@ -599,7 +599,7 @@ API, CLI, and traced demo — read the same variables.**
 | `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model for semantic/hybrid retrieval on OpenAI(-compatible) backends |
 | `DATABASE_URL` | — (unset) | **The system of record**: PostgreSQL holding the approval store, the LangGraph checkpoints, and the pgvector policy embeddings. The compose stack sets it; a managed Postgres works the same (needs the pgvector extension). Unset = in-memory test doubles, nothing persists |
 | `S3_BUCKET` | — (unset) | When set, shipment documents are S3 objects: adapters may submit just an object key (the service fetches the text), and inline documents are archived under `shipments/<id>/documents/` with keys recorded on the stored shipment. Credentials ride the standard AWS chain |
-| `S3_ENDPOINT_URL` / `S3_REGION` | — / `us-east-1` | S3-compatible endpoint (MinIO in the compose stack); omit the endpoint for AWS S3 |
+| `S3_ENDPOINT_URL` / `S3_REGION` | — / `us-east-1` | S3-compatible endpoint (SeaweedFS gateway in the compose stack); omit the endpoint for AWS S3 |
 | `CHROMA_HOST` / `CHROMA_PORT` | — / `8000` | Chroma **server** as the alternative vector store behind the retriever interface (needs the `vectordb` extra). Without `DATABASE_URL` an embedded store under `CHROMA_DIR` (default `<repo>/.chroma`) still serves legacy/tests — local vector files are not the production story |
 | `STATE_DB_PATH` | — (unset) | SQLite **test-double** store for analyses + approval decisions (a file path, or `:memory:`). Only used when `DATABASE_URL` is unset |
 | `CHECKPOINTS` | `on` | Checkpointed approval gate: runs pause in the graph at the gate and approve/reject resume the thread. `off`/`0`/`false`/`no` = the store-only flow |
@@ -745,7 +745,7 @@ uvicorn shipment_agent.api:app --port 8000
 **3 · Docker Compose — the production-shaped stack (one command)**
 
 The real topology: the stateless agent + PostgreSQL/pgvector
-(records, checkpoints, vectors) + MinIO (documents as S3 objects).
+(records, checkpoints, vectors) + SeaweedFS (documents as S3 objects).
 Only the agent's port is published; decisions persist in Postgres
 across restarts and replicas.
 
@@ -760,12 +760,12 @@ provider key in your shell — the compose file passes them through
 
 **4 · Local model on the same stack — agent + Ollama (one command)**
 
-Layer the dev override on the same stack: the database and MinIO
+Layer the dev override on the same stack: the database and S3
 ports are published for local tooling (and the gated Postgres
 integration tests), and with the `local-llm` profile the agent is
 re-pointed at a local Ollama server — records, checkpoints and
-vectors still live in Postgres/pgvector, documents in MinIO; only
-the model moves in-house.
+vectors still live in Postgres/pgvector, documents in the SeaweedFS
+gateway; only the model moves in-house.
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.local.yml --profile local-llm up --build
@@ -774,17 +774,16 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml exec ollama oll
 docker compose -f docker-compose.yml -f docker-compose.local.yml exec ollama ollama pull nomic-embed-text
 ```
 
-Honest status: `docker compose build` is now verified — the `api`
-image builds cleanly against the Dockerfile and locked dependency
-set. A full `docker compose up` (the whole stack: api + Postgres +
-MinIO) has not been exercised end to end in CI or on a developer
-machine, most recently because the `minio/minio` image pull was
-rejected by the registry (an external policy change, not a stack
-misconfiguration) — if that recurs, point `MINIO_ROOT_*`/the `minio`
-service image at a registry you can pull, or skip Docker and run the
-plain `uv run uvicorn` server against the same `.env`. The Python
-suite, including the Postgres/pgvector integration tests, is
-verified.
+Honest status: the full stack is verified end to end — `docker
+compose build` builds the `api` image cleanly against the Dockerfile
+and locked dependency set, and a full `docker compose up` (api +
+Postgres + SeaweedFS S3 gateway) runs healthy on a developer machine
+(2026-10-10). The object store is SeaweedFS's S3 gateway because
+MinIO's public images went behind a registry login in 2025; the
+service is still named `minio` in compose, so endpoints and env vars
+did not change. There is no CI build (the gates are the local `make`
+commands). The Python suite, including the Postgres/pgvector
+integration tests, is verified.
 
 ## Architecture
 
@@ -857,7 +856,7 @@ the verified facts (invented ETAs and prohibited promises fail the pack),
 with per-case tokens, latency, and estimated cost. It fails loudly
 without a real provider and is never part of the default gate or CI.
 
-Test suite: **614 tests** (`pytest -q`: 609 passing, 5 Postgres
+Test suite: **639 tests** (`pytest -q`: 634 passing, 5 Postgres
 integration tests gated on `DATABASE_URL`) — classifier, tools,
 retriever (keyword, semantic, hybrid + rerank, Chroma path with a faked
 client, pgvector SQL formatting + a gated live round-trip), the retrieval query built from shipment content, intake
@@ -997,7 +996,7 @@ evals/                golden dataset (32 cases) + run_evals.py +
                       run_llm_evals.py (opt-in LLM-judge pack) +
                       retrieval relevance set (42 labelled cases) +
                       run_retrieval_evals.py
-tests/                614 pytest tests: unit, integration, API, UI,
+tests/                639 pytest tests: unit, integration, API, UI,
                       negation, persistence, auth, LLM backends and
                       eval pack (mocked SDKs), config, retrieval,
                       object storage, observability, signed webhooks,
@@ -1008,8 +1007,8 @@ tests/                614 pytest tests: unit, integration, API, UI,
                       idempotency, lane reliability, metrics/audit
                       (Postgres integration tests are gated on
                       DATABASE_URL and skip without one)
-docker-compose.yml    production-shaped stack: api + Postgres/pgvector + MinIO
-docker-compose.local.yml  dev layer: published db/MinIO ports + local Ollama profile
+docker-compose.yml    production-shaped stack: api + Postgres/pgvector + SeaweedFS (S3 gateway)
+docker-compose.local.yml  dev layer: published db/S3 ports + local Ollama profile
 Makefile              make demo · make test · make evals · make retrieval-evals · make llm-evals · make serve
 ```
 
@@ -1072,8 +1071,9 @@ each in detail.
   segment for a single client, stated here rather than implied.
 - The LLM-judge eval pack is a model judging a model: a useful
   regression signal for groundedness, not a human evaluation.
-- The Docker local stack is reviewed but not build-verified (no Docker
-  daemon in the development environment).
+- The Docker local stack is build-verified — built and run end to
+  end on a developer machine (2026-10-10); the authoring sandbox
+  itself has no Docker daemon.
 
 ## License
 
