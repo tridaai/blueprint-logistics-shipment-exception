@@ -37,7 +37,7 @@ the offline smoke-test backend. The primary workflow is
 ```bash
 uv sync --extra dev              # 1 · install the locked set (uv.lock)
 uv run shipment-agent-demo       # 2 · one shipment, end to end, with a trace
-uv run pytest -q                 # 3 · the full test suite (343 tests)
+uv run pytest -q                 # 3 · the full test suite (477 tests)
 ```
 
 No uv? Create a virtual environment and use pip. The direct dependencies
@@ -171,7 +171,12 @@ does language work and code does every number:
    partial reship, expedite) gain up to 6 points, and waiting with
    the same carrier lose them; damage excess counts double, and a
    carrier needs at least 3 prior shipments before the term applies.
-   The adjustment is printed on every option it touches
+   The term also has a lane axis: when the carrier has at least 3
+   priors on *this shipment's lane*, the lane scorecard against the
+   lane's own baseline is what the term reads — a carrier can be
+   fine everywhere except one corridor, and the corridor is what
+   the freight is about to travel — with the note naming the scope
+   (`lane-conditioned`) whenever the lane spoke. The adjustment is printed on every option it touches
    (`carrier_reliability_adjustment`), its workings land in the run's
    option notes, and the console shows it in the score cell — memory
    feeding the decision, never hiding inside it.
@@ -236,13 +241,37 @@ age budget per severity (critical 4h, high 24h, medium 48h, low 96h;
 with the overrun when the wait has blown the budget, because a case
 that waits too long is itself an exception. The response adds a
 queue `summary` (depth, breaches, age/severity mix), and the console
-flags breaches in the queue headline and the SLA column.
+flags breaches in the queue headline and the SLA column. A breach
+also *acts*: the **SLA sweep** (`shipment-agent sla-sweep`, or
+`POST /queue/sla-sweep`) fires one signed `sla_breach` webhook
+event the first time it observes a breach — opt-in
+(`SLA_BREACH_WEBHOOK=on`), delivered to `SLA_BREACH_WEBHOOK_URL` or
+the approval webhook URL and signed with the same secret, ledgered
+on the record's own SLA ledger, and deduped by a marker on the
+record so a stranded critical case pages someone once, not on
+every sweep.
 **Idempotency** closes the integration loop: send an
 `Idempotency-Key` header with `POST /shipments/analyze` (or the
 streaming variant) and a retry of the same submission returns the
 stored run — flagged `idempotent_replay`, carrying the original
 run's telemetry — instead of running the pipeline and spending
-model calls a second time.
+model calls a second time. Decisions are idempotent the same way:
+an `Idempotency-Key` on approve/reject makes a retried decision
+return the recorded one (no second webhook dispatch, no duplicated
+feedback), the opposite decision under a spent key is a `409`, and
+a second decision under a different key keeps the `422` refusal.
+
+**Multi-tenancy** partitions everything above by client: every
+record carries a `tenant_id` (callers send `X-Tenant-ID`;
+`TENANT_ID` sets a deployment's default; migration `0004` adds the
+Postgres column and composite key), the store's identity is the
+pair `(tenant_id, shipment_id)`, and every read — record, queue,
+scorecards, memory, feedback, idempotency — is scoped to the
+caller's partition, so one tenant's `SYN-1001` is a 404 in
+another's. The gate's checkpoint threads are tenant-namespaced for
+the same reason; the dispatch-retry and SLA sweeps are the
+operators' cross-tenant views, resolving each record's own tenant
+as they work.
 
 **The classification resolution policy** (implemented in
 `crosscheck.py`, shown in the result and the trace): rules are
@@ -484,6 +513,9 @@ API, CLI, and traced demo — read the same variables.**
 | `ACTION_WEBHOOK_MAX_ATTEMPTS` | `3` | Total webhook delivery attempts per approval (first try + retries); every attempt is recorded on the record's delivery ledger |
 | `ACTION_WEBHOOK_RETRY_BASE_SECONDS` | `30` | Backoff base between delivery retries; the delay doubles per failed attempt and the next due time is recorded on the ledger |
 | `QUEUE_SLA_HOURS_CRITICAL` / `_HIGH` / `_MEDIUM` / `_LOW` | `4` / `24` / `48` / `96` | Approval-queue SLA budgets: hours a case of that severity may await a decision before `GET /queue` flags it `sla_breach` |
+| `SLA_BREACH_WEBHOOK` | — (unset, off) | SLA breach events: `on` makes the sweep (`shipment-agent sla-sweep` / `POST /queue/sla-sweep`) fire one signed `sla_breach` webhook event per newly-breaching shipment, deduped per record |
+| `SLA_BREACH_WEBHOOK_URL` | `ACTION_WEBHOOK_URL` | Where SLA breach events are delivered when set; falls back to the approval webhook URL |
+| `TENANT_ID` | `default` | The tenant partition this process serves when a request carries no `X-Tenant-ID` header; every record and read is tenant-scoped (migration `0004`) |
 
 To run the demo against a real model (Anthropic shown; OpenAI is the
 same shape, and Ollama needs no key at all):
@@ -685,7 +717,7 @@ the verified facts (invented ETAs and prohibited promises fail the pack),
 with per-case tokens, latency, and estimated cost. It fails loudly
 without a real provider and is never part of the default gate or CI.
 
-Test suite: **396 tests** (`pytest -q`: 392 passing, 4 Postgres
+Test suite: **477 tests** (`pytest -q`: 472 passing, 5 Postgres
 integration tests gated on `DATABASE_URL`) — classifier, tools,
 retriever (keyword, semantic, hybrid + rerank, Chroma path with a faked
 client, pgvector SQL formatting + a gated live round-trip), the retrieval query built from shipment content, intake
@@ -719,7 +751,17 @@ scorecards (mix, damage and approval rates, the scorecard line in the
 next same-carrier diagnosis), scorecard-aware option scoring (the
 reliability term's arithmetic and gates, the one case close enough
 for it to flip the recommendation), the queue's SLA views (bucket
-boundaries, per-severity budgets, env overrides, the summary), the retrieval relevance harness
+boundaries, per-severity budgets, env overrides, the summary),
+multi-tenant partitioning (same shipment id in two tenants across
+both hermetic stores, cross-tenant reads finding nothing, the
+pre-tenancy SQLite rebuild, queue/scorecard/memory/idempotency
+scoping, the `X-Tenant-ID` API contract), SLA breach events (one
+signed event per breach, its own ledger, dedupe, the opt-in
+discipline, per-tenant and cross-tenant sweeps), decision
+idempotency (replay without re-dispatch or duplicated feedback,
+the spent-key conflict, the surviving 422s), and lane-conditioned
+reliability (lane dominance, the thin-lane fallback to the
+carrier-wide figures, the corridor scenario end to end), the retrieval relevance harness
 (labelled set, both rankings over the gate), provider-error translation
 (including client-construction failures) and
 recorded fallbacks, end-to-end graph, API approval/reject flow (including
@@ -754,7 +796,8 @@ src/shipment_agent/   agent graph (11 traced steps + evidence fan-out
                       official Postgres checkpointer (SQLite doubles
                       for tests), S3 object store for documents,
                       JSON logs + request IDs, /metrics + audit export,
-                      insights (approval queue + carrier scorecards),
+                      insights (approval queue + carrier scorecards
+                      + lane projections), tenant-partitioned store,
                       webhook delivery ledger with bounded retries,
                       FastAPI app + web UI (static/, incl. the queue
                       panel), demo
@@ -768,13 +811,15 @@ evals/                golden dataset (32 cases) + run_evals.py +
                       run_llm_evals.py (opt-in LLM-judge pack) +
                       retrieval relevance set (15 labelled cases) +
                       run_retrieval_evals.py
-tests/                396 pytest tests: unit, integration, API, UI,
+tests/                477 pytest tests: unit, integration, API, UI,
                       negation, persistence, auth, LLM backends and
                       eval pack (mocked SDKs), config, retrieval,
                       object storage, observability, signed webhooks,
                       delivery ledger/retries, queue, scorecards,
-                      metrics/audit (Postgres integration tests are
-                      gated on DATABASE_URL and skip without one)
+                      tenancy, SLA breach events, decision
+                      idempotency, lane reliability, metrics/audit
+                      (Postgres integration tests are gated on
+                      DATABASE_URL and skip without one)
 docker-compose.yml    production-shaped stack: api + Postgres/pgvector + MinIO
 docker-compose.local.yml  dev layer: published db/MinIO ports + local Ollama profile
 Makefile              make demo · make test · make evals · make retrieval-evals · make llm-evals · make serve
@@ -788,11 +833,13 @@ owned by numbered migrations), documents in S3-compatible object
 storage, optional API-key auth, a one-command production-shaped
 stack, structured JSON logs with request IDs, `/health` +
 `/readiness` probes, a `/metrics` endpoint and an audit-trail export
-(`GET /audit/export`), and the opt-in approval webhook — now
+(`GET /audit/export`), multi-tenant data partitioning (records,
+reads, queue, and scorecards scoped by `tenant_id`, migration
+`0004`), and the opt-in approval webhook — now
 HMAC-signed when `ACTION_WEBHOOK_SECRET` is set — as the first
-output-routing adapter. A production build must still add: per-client
-data isolation and per-user identity (the shipped auth is one shared
-key); TMS/carrier event integrations and a real OCR pipeline feeding
+output-routing adapter. A production build must still add: per-user
+identity (the shipped auth is one shared key; tenancy scopes data,
+it does not authenticate people); TMS/carrier event integrations and a real OCR pipeline feeding
 extraction; a full post-approval action layer
 (messaging, claim filing) with idempotency and rate limits — the
 webhook's delivery ledger and bounded retries ship, and are the
@@ -824,7 +871,11 @@ each in detail.
   a team's real history lives in their TMS; the store is the seam, not
   a warehouse.
 - API auth is a single optional shared key — enough to gate a small
-  deployment, not a substitute for per-user identity and tenancy.
+  deployment, not a substitute for per-user identity. Tenancy scopes
+  which partition a request reads, but the `X-Tenant-ID` header is
+  trusted, not authenticated: a real deployment binds the tenant to
+  the caller's credentials (per-tenant keys or claims), which is an
+  identity-layer job this prototype deliberately leaves open.
 - The LLM-judge eval pack is a model judging a model: a useful
   regression signal for groundedness, not a human evaluation.
 - The Docker local stack is reviewed but not build-verified (no Docker

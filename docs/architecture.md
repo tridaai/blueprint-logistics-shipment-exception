@@ -573,6 +573,25 @@ them against the provided ones. What this prototype does *not* do is OCR:
 scanned documents need an OCR step in front of it in production, and
 photo damage assessment (a VLM step) is out of scope entirely.
 
+Stored records are **tenant-partitioned**: every `ApprovalRecord`
+carries a `tenant_id`, the store's identity is the pair
+`(tenant_id, shipment_id)` (Postgres: migration `0004` adds the
+column and composite primary key; the SQLite double rebuilds
+pre-tenancy files onto the same key with rows preserved), and every
+store read takes a tenant scope — a scoped `get` for another
+tenant's shipment finds nothing, which the API surfaces as a 404.
+Callers resolve their tenant once per call (`X-Tenant-ID` header →
+`TENANT_ID` → the `default` tenant), and the service scopes
+everything it reads through that resolution: the record itself,
+diagnosis memory and reviewer feedback, the carrier scorecards and
+fleet/lane baselines behind option scoring, the approval queue,
+and both idempotency lookups (analyze and decision). The gate's
+checkpoint threads are namespaced `<tenant>:<shipment_id>` so a
+decision can never resume another tenant's run. The only unscoped
+reads are the operator sweeps (dispatch retries, SLA breaches),
+which iterate records across tenants but act on each within its
+own partition.
+
 ### Intake contract and normalisation
 
 `ShipmentInput` fields (the README carries the same table):
@@ -724,7 +743,12 @@ Ordered by value when adapting this blueprint to your own operation:
    buckets, and a per-severity SLA view that flags waits past their
    budget) and a console queue panel — as does the audit trail
    (`GET /audit/export` serves who approved what, when, and why,
-   from the store). Production grows the panel into a full review
+   from the store). A flagged breach also acts: the SLA sweep
+   (`shipment-agent sla-sweep` / `POST /queue/sla-sweep`) fires one
+   signed `sla_breach` webhook event per newly-breaching shipment —
+   opt-in, ledgered on the record's own SLA ledger, deduped by its
+   `sla_breach_event_at` marker — so a stranded case pages someone
+   instead of waiting to be noticed. Production grows the panel into a full review
    UX: side-by-side evidence (classification signals, source
    documents, policy text), one-click edit/approve/reject.
 4. **Action layer:** the shipped approval webhook is the first adapter,
@@ -732,7 +756,10 @@ Ordered by value when adapting this blueprint to your own operation:
    of every attempt with bounded, backoff-scheduled retries (§4),
    plus the retry worker (`dispatch-retries`) that acts on the
    schedule. Intake is retry-safe the same way: `Idempotency-Key`
-   on analyze dedupes at the store. Production grows the adapter
+   on analyze dedupes at the store — and decisions are too: the
+   same header on approve/reject returns the recorded decision on a
+   replay (no second dispatch, no duplicated feedback), conflicts
+   (409) on the opposite decision under a spent key. Production grows the adapter
    set into send-via-the-client's-messaging-system and claim filing
    via carrier portals/APIs — behind feature flags, with rate limits.
 5. **Observability:** the shipped baseline is structured JSON logs
@@ -745,9 +772,14 @@ Ordered by value when adapting this blueprint to your own operation:
    (anonymised, consented) corrections made by approvers; every rule or
    prompt change runs against it locally (pytest + evals + demo via the
    Makefile) before merge.
-7. **Access control & tenancy:** per-user identity on top of the shipped
-   optional API key, per-client policy corpora and data isolation, PII
-   handling per the client's policy.
+7. **Access control & tenancy:** data isolation ships — the store is
+   partitioned by `tenant_id` and every read (records, queue,
+   scorecards, memory, audit, metrics) is scoped to the caller's
+   partition (§5). What production still adds: per-user identity on
+   top of the shipped optional API key, binding the tenant to the
+   caller's credentials (the `X-Tenant-ID` header is trusted, not
+   authenticated), per-client policy corpora, and PII handling per
+   the client's policy.
 
 ## 10. Limitations of this prototype
 
