@@ -15,8 +15,14 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -28,8 +34,10 @@ from .observability import configure_json_logging, new_request_id, request_id_ct
 # Must precede the service import (which loads the graph/langgraph).
 silence_langchain_deprecation_warnings()
 
+from .audit import audit_rows, render_audit_csv
 from .errors import ProviderError
 from .events import CallbackSink, RunEvent
+from .metrics import compute_metrics, render_prometheus
 from .policies_data import POLICIES
 from .samples import load_sample_shipments
 from .schemas import AgentResult, ShipmentInput
@@ -231,6 +239,33 @@ def readiness() -> JSONResponse:
     return JSONResponse(
         status_code=200,
         content={"status": "ready", "database": "in-memory test doubles"},
+    )
+
+
+@app.get("/metrics")
+def metrics() -> PlainTextResponse:
+    """Prometheus text exposition, computed live from the store:
+    runs, decisions, guardrail failures, latency, tokens, estimated
+    cost (see ``metrics.py``). Open like /health — aggregates only,
+    no shipment content; scrapers live on a trusted network segment
+    in any real deployment."""
+    payload = render_prometheus(compute_metrics(service._get_store().records()))
+    return PlainTextResponse(payload, media_type="text/plain; version=0.0.4")
+
+
+@app.get("/audit/export", dependencies=_AUTH)
+def audit_export(format: str = Query(default="json")):
+    """The audit trail: one row per analysed shipment — conclusion,
+    decider, reason, timestamps — as JSON (default) or CSV
+    (``?format=csv``). A projection of the store, the system of
+    record; see ``audit.py``."""
+    rows = audit_rows(service._get_store().records())
+    if format == "json":
+        return {"count": len(rows), "decisions": rows}
+    if format == "csv":
+        return PlainTextResponse(render_audit_csv(rows), media_type="text/csv")
+    raise HTTPException(
+        status_code=422, detail="format must be 'json' or 'csv'."
     )
 
 

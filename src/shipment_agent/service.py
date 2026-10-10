@@ -23,6 +23,8 @@ blocks a decision.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import threading
 import urllib.request
@@ -59,6 +61,19 @@ class BatchItem:
     error: str | None = None
 
 
+def sign_webhook_body(body: bytes, secret: str) -> str:
+    """The ``X-Trida-Signature`` value for a webhook body:
+    ``sha256=<HMAC-SHA256 hex>`` keyed by ``ACTION_WEBHOOK_SECRET``.
+
+    The receiver recomputes the same HMAC over the raw request body
+    with the shared secret and compares (in constant time) — that
+    proves the packet came from this agent and was not altered in
+    transit, which matters because the receiver may act on it.
+    """
+    digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    return f"sha256={digest}"
+
+
 def dispatch_approval_webhook(record: ApprovalRecord) -> str | None:
     """POST the approved packet to ``ACTION_WEBHOOK_URL`` (off by default).
 
@@ -70,6 +85,10 @@ def dispatch_approval_webhook(record: ApprovalRecord) -> str | None:
     dispatch never undoes the approval; it is recorded on the result
     for follow-up. Short timeout on purpose: an approval must not hang
     on a downstream system.
+
+    When ``ACTION_WEBHOOK_SECRET`` is set, the delivery is signed
+    (``X-Trida-Signature``, see :func:`sign_webhook_body`); unset,
+    deliveries are unsigned, exactly as before.
     """
     load_dotenv()
     url = env_str("ACTION_WEBHOOK_URL")
@@ -84,10 +103,15 @@ def dispatch_approval_webhook(record: ApprovalRecord) -> str | None:
         "draft": {"subject": result.draft.subject, "body": result.draft.body},
         "claim_packet": result.draft.claim_packet,
     }
+    body = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    secret = env_str("ACTION_WEBHOOK_SECRET")
+    if secret:
+        headers["X-Trida-Signature"] = sign_webhook_body(body, secret)
     request = urllib.request.Request(
         url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        data=body,
+        headers=headers,
         method="POST",
     )
     timeout = env_float("ACTION_WEBHOOK_TIMEOUT_SECONDS", 5.0)
