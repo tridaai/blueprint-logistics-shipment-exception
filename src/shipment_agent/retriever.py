@@ -10,16 +10,20 @@ environment variable (see :func:`get_retriever`):
   (or an OpenAI-compatible endpoint via ``OPENAI_BASE_URL``): Anthropic
   has no embeddings API, so ``MODEL_BACKEND=anthropic`` still needs
   ``OPENAI_API_KEY`` for this retriever — the failure message says
-  exactly that when the key is missing.
+  exactly that when the key is missing. Where the vectors live:
+  **pgvector** in the application's PostgreSQL when ``DATABASE_URL``
+  is set (the production path), else a Chroma store when the
+  ``vectordb`` extra / a Chroma server is configured (the documented
+  alternative), else in-memory cosine.
 - ``hybrid`` — runs both, merges the candidate pools, and applies an
   explicit rerank step: reciprocal-rank score fusion in code (see
   :func:`rerank_fused`). This is score-fusion reranking, not a
   cross-encoder — the repo ships no cross-encoder and claims none.
 
-Production deployments would swap any of these for LlamaIndex over a
-vector store (pgvector, Qdrant, …) fed by the client's document
-systems. The agent only depends on the ``Retriever`` protocol, so that
-swap touches one file, not the graph.
+A production corpus fed by the client's own document systems would
+swap the corpus source (and could put LlamaIndex in front of the
+same pgvector tables); the agent only depends on the ``Retriever``
+protocol, so that swap touches one file, not the graph.
 """
 
 from __future__ import annotations
@@ -92,6 +96,16 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / norm if norm else 0.0
 
 
+def _vector_literal(vector: list[float]) -> str:
+    """A pgvector text literal (``[0.1,0.2,...]``) for a Python vector.
+
+    Embeddings cross the SQL boundary as literals cast with
+    ``::vector`` — deliberately no driver-level type registration, so
+    any psycopg connection serves the pgvector path unchanged.
+    """
+    return "[" + ",".join(repr(float(v)) for v in vector) + "]"
+
+
 class SemanticRetriever:
     """Cosine-similarity retriever over the policy corpus, via embeddings.
 
@@ -120,12 +134,16 @@ class SemanticRetriever:
             self._embeddings_base_url,
         ) = self._build_embeddings_client()
         self._corpus_vectors: list[list[float]] | None = None
-        # Which store actually serves queries: "chroma" when the optional
-        # vectordb extra is installed (local persistent store), else
-        # "memory" (in-repo cosine over freshly embedded vectors).
+        # Which store actually serves queries: "pgvector" when the
+        # application's PostgreSQL is configured (DATABASE_URL — the
+        # production path), else "chroma" when a Chroma server is
+        # configured / the vectordb extra is installed, else "memory"
+        # (in-repo cosine over freshly embedded vectors).
         self.vector_store = "memory"
         self._chroma_collection = None
         self._chroma_checked = False
+        self._pgvector_checked = False
+        self._pgvector_ready = False
 
     def _build_embeddings_client(self):
         """Resolve the embeddings client, failing loudly when unusable.
@@ -214,6 +232,108 @@ class SemanticRetriever:
             ) from exc
         ordered = sorted(response.data, key=lambda d: getattr(d, "index", 0))
         return [list(d.embedding) for d in ordered]
+
+    # -- pgvector (the production store: the application's Postgres) --
+
+    def _pgvector_available(self) -> bool:
+        """True when DATABASE_URL points at a migrated Postgres.
+
+        Checked once; on any failure the retriever falls through to
+        the Chroma / in-memory paths rather than breaking retrieval —
+        the same posture as the Chroma path below.
+        """
+        if self._pgvector_checked:
+            return self._pgvector_ready
+        self._pgvector_checked = True
+        try:
+            from .db import connect, database_url, ensure_migrated
+
+            if not database_url():
+                return False
+            ensure_migrated()
+            with connect() as conn:
+                conn.execute("SELECT 1 FROM policy_embeddings LIMIT 1")
+            self._pgvector_ready = True
+            self.vector_store = "pgvector"
+        except Exception:
+            self._pgvector_ready = False
+        return self._pgvector_ready
+
+    def _pg_ensure_corpus(self, conn) -> None:
+        """Embed any missing/stale policies into the pgvector table.
+
+        Rows are keyed by (policy_id, model) and carry a content
+        hash: an edited policy is re-embedded, an unchanged corpus
+        costs one SELECT per retrieval.
+        """
+        import hashlib
+
+        def content_hash(policy: dict) -> str:
+            return hashlib.sha256(
+                f"{policy['policy_id']}|{policy['title']}|{policy['text']}".encode(
+                    "utf-8"
+                )
+            ).hexdigest()
+
+        existing = {
+            row[0]: row[1]
+            for row in conn.execute(
+                "SELECT policy_id, content_hash FROM policy_embeddings "
+                "WHERE model = %s",
+                (self._model,),
+            )
+        }
+        stale = [
+            p for p in self._policies if existing.get(p["policy_id"]) != content_hash(p)
+        ]
+        if not stale:
+            return
+        vectors = self._embed([f"{p['title']} {p['text']}" for p in stale])
+        for policy, vector in zip(stale, vectors):
+            conn.execute(
+                "INSERT INTO policy_embeddings "
+                "(policy_id, model, content_hash, embedding) "
+                "VALUES (%s, %s, %s, %s::vector) "
+                "ON CONFLICT (policy_id, model) DO UPDATE SET "
+                "content_hash = EXCLUDED.content_hash, "
+                "embedding = EXCLUDED.embedding",
+                (
+                    policy["policy_id"],
+                    self._model,
+                    content_hash(policy),
+                    _vector_literal(vector),
+                ),
+            )
+        conn.commit()
+
+    def _retrieve_pgvector(self, query: str, top_k: int) -> list[RetrievedPolicy]:
+        from .db import connect
+
+        query_vector = _vector_literal(self._embed([query])[0])
+        with connect() as conn:
+            self._pg_ensure_corpus(conn)
+            rows = conn.execute(
+                "SELECT policy_id, 1 - (embedding <=> %s::vector) AS score "
+                "FROM policy_embeddings WHERE model = %s "
+                "ORDER BY embedding <=> %s::vector LIMIT %s",
+                (query_vector, self._model, query_vector, top_k),
+            ).fetchall()
+        by_id = {p["policy_id"]: p for p in self._policies}
+        retrieved: list[RetrievedPolicy] = []
+        for policy_id, score in rows:
+            policy = by_id.get(policy_id)
+            if policy is None:  # row from a different corpus — skip it
+                continue
+            retrieved.append(
+                RetrievedPolicy(
+                    policy_id=policy_id,
+                    title=policy["title"],
+                    snippet=policy["text"],
+                    score=round(float(score), 4),
+                    retrieval="semantic",
+                )
+            )
+        return retrieved
 
     def _get_chroma_collection(self):
         """Lazily open the local Chroma store, indexing the corpus once.
@@ -305,6 +425,8 @@ class SemanticRetriever:
         return retrieved
 
     def retrieve(self, query: str, top_k: int = 3) -> list[RetrievedPolicy]:
+        if self._pgvector_available():
+            return self._retrieve_pgvector(query, top_k)
         collection = self._get_chroma_collection()
         if collection is not None:
             return self._retrieve_chroma(collection, query, top_k)

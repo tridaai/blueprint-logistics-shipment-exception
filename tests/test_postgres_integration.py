@@ -104,6 +104,75 @@ def test_postgres_store_survives_reopen(clean_approvals):
     assert [r.result.shipment_id for r in reopened.records()] == ["PG-1"]
 
 
+class _FakeEmbeddingsClient:
+    """Deterministic stand-in for the provider embeddings client:
+    bag-of-words hashing into 16 dimensions, so texts that share
+    words land close together — enough to prove the pgvector path
+    ranks by meaning-of-sorts, not by insertion order."""
+
+    def __init__(self) -> None:
+        self.corpus_embed_calls = 0
+
+    def _embed_one(self, text: str) -> list[float]:
+        import hashlib
+
+        vector = [0.0] * 16
+        for token in text.lower().split():
+            digest = hashlib.sha256(token.encode()).digest()
+            vector[digest[0] % 16] += 1.0
+        return vector
+
+    @property
+    def embeddings(self):
+        return self
+
+    def create(self, model=None, input=None):
+        from types import SimpleNamespace
+
+        texts = list(input or [])
+        if len(texts) > 1:
+            self.corpus_embed_calls += 1
+        return SimpleNamespace(
+            data=[
+                SimpleNamespace(embedding=self._embed_one(t), index=i)
+                for i, t in enumerate(texts)
+            ]
+        )
+
+
+def test_pgvector_retrieval_round_trip(pg_env, monkeypatch):
+    from shipment_agent.db import connect, run_migrations
+    from shipment_agent.retriever import SemanticRetriever
+
+    run_migrations(pg_env)
+    policies = [
+        {"policy_id": "POL-DELAY", "title": "Delay handling", "text": "delay weather hold carrier notification"},
+        {"policy_id": "POL-DAMAGE", "title": "Damage claims", "text": "damage photographs inspection claim evidence"},
+        {"policy_id": "POL-DOCS", "title": "Document mismatch", "text": "invoice bill of lading quantity mismatch"},
+    ]
+    fake = _FakeEmbeddingsClient()
+    monkeypatch.setattr(
+        SemanticRetriever,
+        "_build_embeddings_client",
+        lambda self: (fake, "fake-embed-16", "fake", "http://fake"),
+    )
+    with connect(pg_env) as conn:
+        conn.execute("DELETE FROM policy_embeddings WHERE model = 'fake-embed-16'")
+        conn.commit()
+
+    retriever = SemanticRetriever(policies)
+    results = retriever.retrieve("weather hold delay notification", top_k=2)
+    assert retriever.vector_store == "pgvector"
+    assert results and results[0].policy_id == "POL-DELAY"
+
+    # Second retrieval: corpus vectors come from the table, not a
+    # re-embed — the fake's corpus batch counter must not move.
+    calls_after_first = fake.corpus_embed_calls
+    again = retriever.retrieve("damage photographs claim", top_k=1)
+    assert again and again[0].policy_id == "POL-DAMAGE"
+    assert fake.corpus_embed_calls == calls_after_first
+
+
 def test_postgres_checkpointer_pauses_and_resumes_across_instances(
     pg_env, clean_approvals
 ):
