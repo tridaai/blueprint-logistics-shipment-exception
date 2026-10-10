@@ -20,6 +20,9 @@ import pytest
 from shipment_agent import tracing
 from shipment_agent.graph import run_shipment
 from shipment_agent.model_backends import MockModelBackend, OpenAIBackend
+from shipment_agent.retriever import KeywordRetriever
+from shipment_agent.schemas import ShipmentInput
+from shipment_agent.tools_agent import DiagnosisToolBox
 
 DELAY_SHIPMENT = {
     "shipment_id": "TRACE-1",
@@ -141,6 +144,78 @@ def test_provider_span_parents_to_the_calling_node(exporter):
     assert provider.attributes["output_tokens"] == 7
 
 
+class _ToolCallingBackend(MockModelBackend):
+    """Mock drafting plus a scripted agentic diagnosis: two
+    lookups through the toolbox, then the composed answer."""
+
+    name = "stub-tools"
+
+    def diagnose(self, context):
+        return None
+
+    def diagnose_with_tools(self, context, tool_specs, dispatch, max_tool_calls):
+        dispatch("search_policies", {"query": "delay customer update"})
+        dispatch("shipment_facts", {})
+        return {
+            "root_cause": "Weather hold at the hub.",
+            "summary": "Carrier weather hold.",
+            "tool_calls": [
+                {"tool": "search_policies", "summary": "2 policies"},
+                {"tool": "shipment_facts", "summary": "delay, 36.0h"},
+            ],
+        }
+
+
+def test_tool_spans_parent_to_the_diagnose_node(exporter):
+    exporter.clear()
+    result = run_shipment(
+        DELAY_SHIPMENT, backend=_ToolCallingBackend(), evidence_mode="sequential"
+    )
+    assert result.diagnosis.source == "llm"
+    spans = exporter.get_finished_spans()
+    diagnose = next(s for s in spans if s.name == "node.diagnose")
+    tools = [s for s in spans if s.name.startswith("tool.")]
+    assert [s.name for s in tools] == ["tool.search_policies", "tool.shipment_facts"]
+    for tool in tools:
+        # The lookups hang off the diagnose node — between its
+        # provider calls in execution order — and carry the tool
+        # name, its measured duration, and its outcome. Nothing
+        # else: no arguments, no results (the privacy test above
+        # sweeps every attribute against the allowlist).
+        assert tool.parent.span_id == diagnose.context.span_id
+        assert tool.context.trace_id == diagnose.context.trace_id
+        assert tool.attributes["tool"] == tool.name.removeprefix("tool.")
+        assert tool.attributes["operation"] == "tool_call"
+        assert tool.attributes["status"] == "ok"
+        assert isinstance(tool.attributes["duration_ms"], float)
+        assert tool.attributes["duration_ms"] >= 0
+
+
+def test_tool_span_records_a_failed_call(exporter):
+    exporter.clear()
+    toolbox = DiagnosisToolBox(
+        shipment=ShipmentInput.model_validate(DELAY_SHIPMENT),
+        classification={
+            "exception_type": "delay",
+            "severity": "high",
+            "confidence": 0.9,
+        },
+        delay_hours=36.0,
+        mismatches=[],
+        retriever=KeywordRetriever(),
+        priors=[],
+    )
+    with tracing.node_span("diagnose", "TRACE-1"):
+        with pytest.raises(ValueError):
+            toolbox.dispatch("search_policies", {"query": "  "})
+    spans = exporter.get_finished_spans()
+    node = next(s for s in spans if s.name == "node.diagnose")
+    tool = next(s for s in spans if s.name == "tool.search_policies")
+    assert tool.parent.span_id == node.context.span_id
+    assert tool.attributes["status"] == "error"
+    assert tool.attributes["duration_ms"] >= 0
+
+
 def test_tracing_is_off_by_default(monkeypatch):
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
     monkeypatch.setattr(tracing, "_configured", False)
@@ -212,6 +287,9 @@ with tracing.run_span("TRACE-NOOP"):
         node.set_counts(input_tokens=3)
     with tracing.provider_span("openai", "m", "chat_completion") as call:
         call.set_counts(input_tokens=1, output_tokens=2)
+    with tracing.tool_span("search_policies") as tool:
+        tool.set_attribute("status", "ok")
+        tool.set_attribute("duration_ms", 1.5)
 print("ok")
 """
     completed = subprocess.run(

@@ -21,9 +21,12 @@ the model is told to compose with what it has.
 
 from __future__ import annotations
 
+import time
+
 from .config import env_int, load_dotenv
 from .schemas import ShipmentInput
 from .store import carrier_summary, format_type_counts
+from .tracing import tool_span
 
 DEFAULT_MAX_TOOL_CALLS = 4
 HARD_MAX_TOOL_CALLS = 6
@@ -136,7 +139,30 @@ class DiagnosisToolBox:
         }.get(name)
         if handler is None:
             raise ValueError(f"unknown tool: {name}")
-        return handler(args or {})
+        # One tool span per invocation (tracing.tool_span): the
+        # trace tree gains the diagnosis' lookups between its
+        # provider calls, each carrying its measured duration —
+        # so a slow diagnosis answers "waiting on the model, or
+        # looking things up?" at a glance. The span carries the
+        # tool's name, duration, and outcome only; arguments and
+        # results stay out of the trace, per the tracing module's
+        # no-content contract. With tracing off this is a no-op
+        # hop, exactly like every other span in the run.
+        started = time.perf_counter()
+        with tool_span(name) as handle:
+            try:
+                result = handler(args or {})
+            except Exception:
+                handle.set_attribute("status", "error")
+                handle.set_attribute(
+                    "duration_ms", round((time.perf_counter() - started) * 1000, 3)
+                )
+                raise
+            handle.set_attribute("status", "ok")
+            handle.set_attribute(
+                "duration_ms", round((time.perf_counter() - started) * 1000, 3)
+            )
+            return result
 
     # -- the tools ------------------------------------------------------
 

@@ -3,8 +3,9 @@
 Request IDs correlate the JSON logs; they do not show where a
 provider-mode run *spent its time*. When a customer runs their own
 tracing stack (Jaeger, Tempo, an APM), this module is the seam
-that feeds it: one span per graph node and one per provider call,
-exported over OTLP/HTTP — **off by default**, enabled by setting
+that feeds it: one span per graph node, one per provider call, and
+one per diagnosis tool call, exported over OTLP/HTTP — **off by
+default**, enabled by setting
 ``OTEL_EXPORTER_OTLP_ENDPOINT`` (the standard OpenTelemetry
 environment variable) and installing the ``otel`` extra.
 
@@ -58,6 +59,7 @@ _ALLOWED_ATTRIBUTES = frozenset(
         "output_tokens",
         "max_tokens",
         "tool_calls",
+        "tool",
         "input_count",
         "duration_ms",
         "status",
@@ -216,3 +218,17 @@ def provider_span(backend: str, model: str | None, operation: str):
         f"provider.{backend}",
         {"backend": backend, "model": model or "", "operation": operation},
     )
+
+
+def tool_span(tool: str):
+    """One diagnosis tool call's span, parented to the active span
+    (the diagnose node's, across its provider calls).
+
+    The provider spans show the diagnosis *waiting on the model*;
+    these show what the agent did between calls — which lookups it
+    ran (``search_policies``, ``lane_history``, …) and how long
+    each took. The dispatch site sets ``duration_ms`` (measured
+    around the handler) and ``status`` when the call returns. The
+    privacy contract holds: the tool's NAME and timing only —
+    never its arguments or its results."""
+    return span(f"tool.{tool}", {"tool": tool, "operation": "tool_call"})
