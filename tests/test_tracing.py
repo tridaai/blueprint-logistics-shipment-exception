@@ -191,6 +191,40 @@ def test_tool_spans_parent_to_the_diagnose_node(exporter):
         assert tool.attributes["duration_ms"] >= 0
 
 
+def test_timed_provider_calls_keep_their_span_parent(exporter):
+    """The resilience wrapper runs provider calls on a worker
+    thread to hold the timeout; the thread inherits the caller's
+    context, so spans opened inside the call still parent to the
+    node span that was current when the call was made. Without
+    the propagation every span inside a timed call — provider
+    spans included — landed as a disconnected root and the tree
+    lost exactly the calls it exists to explain."""
+    from shipment_agent.resilience import ResilientBackend
+
+    exporter.clear()
+    toolbox = DiagnosisToolBox(
+        shipment=ShipmentInput.model_validate(DELAY_SHIPMENT),
+        classification={
+            "exception_type": "delay",
+            "severity": "high",
+            "confidence": 0.9,
+        },
+        delay_hours=36.0,
+        mismatches=[],
+        retriever=KeywordRetriever(),
+        priors=[],
+    )
+    backend = ResilientBackend(_ToolCallingBackend())
+    with tracing.node_span("diagnose", "TRACE-1"):
+        backend.diagnose_with_tools({}, [], toolbox.dispatch, 4)
+    spans = exporter.get_finished_spans()
+    node = next(s for s in spans if s.name == "node.diagnose")
+    tools = [s for s in spans if s.name.startswith("tool.")]
+    assert [s.name for s in tools] == ["tool.search_policies", "tool.shipment_facts"]
+    for tool in tools:
+        assert tool.parent.span_id == node.context.span_id
+
+
 def test_tool_span_records_a_failed_call(exporter):
     exporter.clear()
     toolbox = DiagnosisToolBox(

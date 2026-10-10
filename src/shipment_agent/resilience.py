@@ -24,10 +24,21 @@ it, so every retry attempt re-checks the budget):
 
 A timed-out call's worker thread cannot be killed (Python threads);
 it is abandoned and finishes on its own, bounded by the SDK timeout.
+
+- **Context.** The worker thread runs under a copy of the caller's
+  ``contextvars`` context. The timeout changes *where* the call
+  runs, never *whose* call it is: tracing spans opened inside a
+  provider call (the provider spans, the diagnosis' tool spans)
+  parent to the node span that was current when the call was
+  made. A bare ``submit()`` starts from an empty context — every
+  span inside a timed call landed as a disconnected root, and
+  the trace tree silently lost exactly the calls it exists to
+  explain.
 """
 
 from __future__ import annotations
 
+import contextvars
 import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
@@ -133,7 +144,10 @@ class ResilientBackend:
     def _call_timed(self, method, policy: NodePolicy, fn, args, kwargs):
         executor = ThreadPoolExecutor(max_workers=1)
         try:
-            future = executor.submit(fn, *args, **kwargs)
+            # copy_context: the worker thread inherits the caller's
+            # contextvars (see the module docstring's Context note).
+            context = contextvars.copy_context()
+            future = executor.submit(context.run, fn, *args, **kwargs)
             return future.result(timeout=policy.timeout_seconds)
         except FuturesTimeoutError:
             backend_name = getattr(
