@@ -194,6 +194,26 @@ def sign_webhook_body(body: bytes, secret: str) -> str:
     return f"sha256={digest}"
 
 
+def verify_webhook_body(body: bytes, signature: str | None, secret: str) -> bool:
+    """The receiver's half of :func:`sign_webhook_body`: does this
+    ``X-Trida-Signature`` value authenticate this raw body under the
+    shared secret?
+
+    Recomputes the HMAC over the *raw* bytes (never a re-serialised
+    parse — key order and whitespace are part of the signed content)
+    and compares in constant time. A missing signature, a missing
+    secret, or a malformed value is simply False: verification is a
+    gate, not a negotiation. Receivers outside this codebase should
+    implement exactly this (``docs/webhook-receiver.py`` is a
+    runnable reference); ``shipment-agent verify-webhook`` runs it
+    over a captured payload from the command line.
+    """
+    if not signature or not secret:
+        return False
+    expected = sign_webhook_body(body, secret)
+    return hmac.compare_digest(expected, signature.strip())
+
+
 class DecisionConflictError(ValueError):
     """An Idempotency-Key was spent on the *opposite* decision.
 

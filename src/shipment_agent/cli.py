@@ -12,6 +12,9 @@ Usage:
     shipment-agent sla-sweep         # one SLA breach sweep: fire a
                                      # signed sla_breach event for each
                                      # newly-breaching queue item
+    shipment-agent verify-webhook payload.json --signature sha256=...
+                                     # check a captured webhook payload
+                                     # against ACTION_WEBHOOK_SECRET
 
 The default data source is the sample set bundled inside the package, so
 this works identically from a source checkout and a pip install.
@@ -300,12 +303,101 @@ def _run_sla_sweep(argv: list[str]) -> int:
     return 0
 
 
+def _run_verify_webhook(argv: list[str]) -> int:
+    """Check one captured webhook delivery: ``verify-webhook``.
+
+    Runs the receiver's path (see ``webhooks.py``) over a payload
+    captured to a file — a failed delivery's body from the ledger, a
+    receiver's request dump — and reports whether its
+    ``X-Trida-Signature`` authenticates under the shared secret,
+    which family it belongs to, and the event id a receiver would
+    dedupe on. The secret comes from ``--secret`` or
+    ``ACTION_WEBHOOK_SECRET``; the signature from ``--signature`` or
+    from a captured-headers file (``--headers``, ``Name: value``
+    lines, as a proxy or ``curl -v`` would print them).
+
+    Exit codes: 0 verified; 1 verification failed (bad signature,
+    unparseable, or an unrecognised family — the verdict says
+    which); 2 when there is nothing to check with (no secret, no
+    signature, an unreadable file).
+    """
+    parser = argparse.ArgumentParser(
+        prog="shipment-agent verify-webhook",
+        description="Verify a captured webhook payload against the shared secret",
+    )
+    parser.add_argument("payload", type=Path, help="File holding the raw payload body")
+    parser.add_argument(
+        "--signature",
+        default=None,
+        help="The X-Trida-Signature value the delivery carried",
+    )
+    parser.add_argument(
+        "--headers",
+        type=Path,
+        default=None,
+        help="File of captured headers to read X-Trida-Signature from",
+    )
+    parser.add_argument(
+        "--secret",
+        default=None,
+        help="Shared secret (default: $ACTION_WEBHOOK_SECRET)",
+    )
+    args = parser.parse_args(argv)
+
+    load_dotenv()
+    secret = args.secret or env_str("ACTION_WEBHOOK_SECRET")
+    if not secret:
+        print(
+            "verify-webhook: no secret — pass --secret or set "
+            "ACTION_WEBHOOK_SECRET to the value the agent signs with.",
+            file=sys.stderr,
+        )
+        return 2
+    signature = args.signature
+    if signature is None and args.headers is not None:
+        try:
+            for line in args.headers.read_text(encoding="utf-8").splitlines():
+                name, _, value = line.partition(":")
+                if name.strip().lower() == "x-trida-signature":
+                    signature = value.strip()
+                    break
+        except OSError as exc:
+            print(f"verify-webhook: cannot read headers file: {exc}", file=sys.stderr)
+            return 2
+    if not signature:
+        print(
+            "verify-webhook: no signature — pass --signature or --headers.",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        body = args.payload.read_bytes()
+    except OSError as exc:
+        print(f"verify-webhook: cannot read payload file: {exc}", file=sys.stderr)
+        return 2
+
+    from .webhooks import inspect_webhook
+
+    verdict = inspect_webhook(body, signature, secret)
+    if not verdict["verified"]:
+        print(f"verify-webhook: FAILED — {verdict['error']}")
+        return 1
+    print(f"verify-webhook: signature OK (family: {verdict['family']})")
+    print(f"event id: {verdict['event_id']}")
+    if verdict["error"]:
+        print(f"verify-webhook: FAILED — {verdict['error']}")
+        return 1
+    return 0
+
+
 def main() -> None:
     argv = sys.argv[1:]
     if argv and argv[0] == "dispatch-retries":
         raise SystemExit(_run_dispatch_retries(argv[1:]))
     if argv and argv[0] == "sla-sweep":
         raise SystemExit(_run_sla_sweep(argv[1:]))
+    if argv and argv[0] == "verify-webhook":
+        raise SystemExit(_run_verify_webhook(argv[1:]))
     parser = argparse.ArgumentParser(description="Shipment Exception Agent CLI (offline, synthetic data)")
     parser.add_argument("--file", type=Path, default=None, help="Path to a shipments JSON file (default: bundled samples)")
     parser.add_argument("--index", type=int, default=0, help="Which sample shipment to run")
