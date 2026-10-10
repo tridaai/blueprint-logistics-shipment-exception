@@ -477,6 +477,7 @@ def metrics(
         worker_status=service.worker_status(),
         key_usage=key_usage,
         staleness=service.worker_staleness(),
+        worker_tenants=service.worker_tenant_staleness(),
     )
     return PlainTextResponse(payload, media_type="text/plain; version=0.0.4")
 
@@ -557,6 +558,23 @@ def queue_digest() -> dict:
     artefact whose per-tenant sections are named inside it, like
     /metrics."""
     return service.queue_digest()
+
+
+@app.get("/workers", dependencies=_AUTH)
+def workers() -> dict:
+    """The background workers, as one JSON view.
+
+    The whole worker picture (see ``service.workers_view``): each
+    worker's status row — last sweep, sweep count, cumulative
+    outcomes overall and per tenant — its global staleness verdict
+    and any open staleness episode, and the per-tenant split: each
+    tenant's last recorded outcome under that worker, its age, and
+    its own stale flag under the worker's threshold. Until this
+    view existed, the same facts meant scraping the Prometheus
+    text of /metrics. Deployment-wide by design, like the digest:
+    the workers serve every tenant and their per-tenant sections
+    are named inside."""
+    return service.workers_view()
 
 
 @app.post("/queue/sla-sweep", dependencies=_AUTH)

@@ -1496,6 +1496,14 @@ class ShipmentService:
         a worker that has gone silent shows a stale last-sweep time
         instead of looking identical to a healthy one.
 
+        The row also stamps ``by_tenant_last_at``: for each tenant
+        the sweep recorded an outcome for, when that last was. A
+        worker can be globally alive while one tenant's work rots
+        (the retry worker's pain is per-tenant), and the per-tenant
+        staleness view (``metrics.worker_tenant_staleness``) reads
+        these stamps — a tenant the worker never served has no
+        stamp and no verdict, like an unwatched worker.
+
         Bookkeeping must never break the work it observes: a store
         double without the status methods, or a failed write, is
         skipped silently (the same posture as thread resumption).
@@ -1516,12 +1524,15 @@ class ShipmentService:
                 totals[outcome] = int(totals.get(outcome, 0)) + count
             summary["totals"] = totals
             merged_by_tenant = dict(summary.get("by_tenant") or {})
+            last_at_by_tenant = dict(summary.get("by_tenant_last_at") or {})
             for tenant, outcomes in by_tenant.items():
                 tenant_totals = dict(merged_by_tenant.get(tenant) or {})
                 for outcome, count in outcomes.items():
                     tenant_totals[outcome] = int(tenant_totals.get(outcome, 0)) + count
                 merged_by_tenant[tenant] = tenant_totals
+                last_at_by_tenant[tenant] = at
             summary["by_tenant"] = merged_by_tenant
+            summary["by_tenant_last_at"] = last_at_by_tenant
             summary["last_sweep"] = {"at": at, **sweep, "by_tenant": by_tenant}
             summary["last_sweep_at"] = at
             summary["updated_at"] = at
@@ -1560,6 +1571,59 @@ class ShipmentService:
 
         moment = now or datetime.now(timezone.utc)
         return worker_staleness(self.worker_status(), now=moment)
+
+    def worker_tenant_staleness(self, now=None) -> dict:
+        """The per-tenant split of the staleness view: for each
+        watched worker, which tenants' work it has gone quiet on —
+        see ``metrics.worker_tenant_staleness``. Read by /metrics
+        and composed into :meth:`workers_view` and the digest."""
+        from datetime import datetime, timezone
+
+        from .metrics import worker_tenant_staleness
+
+        moment = now or datetime.now(timezone.utc)
+        return worker_tenant_staleness(self.worker_status(), now=moment)
+
+    def workers_view(self, now=None) -> dict:
+        """The whole worker picture, as one JSON view.
+
+        ``GET /workers`` serves this so operators stop scraping
+        Prometheus text for a JSON answer: per worker — its status
+        row's facts (last sweep, sweep count, cumulative outcomes
+        overall and per tenant), its global staleness verdict
+        (``None`` when the worker is unwatched — no verdict is
+        claimed), any open staleness episode with its alert count,
+        and the per-tenant activity split (each tenant's last
+        recorded outcome time, its age, and its own stale flag
+        under the worker's threshold). Deployment-wide by design,
+        like the rows themselves: the workers serve every tenant,
+        and the per-tenant sections are named inside.
+        """
+        from datetime import datetime, timezone
+
+        from .metrics import worker_staleness, worker_tenant_staleness
+
+        moment = now or datetime.now(timezone.utc)
+        status = self.worker_status()
+        staleness = worker_staleness(status, now=moment)
+        tenant_staleness = worker_tenant_staleness(status, now=moment)
+        workers = []
+        for name in sorted(set(status) | set(staleness)):
+            row = status.get(name) or {}
+            workers.append(
+                {
+                    "worker": name,
+                    "last_sweep_at": row.get("last_sweep_at"),
+                    "sweeps": int(row.get("sweeps", 0)),
+                    "totals": row.get("totals") or {},
+                    "by_tenant": row.get("by_tenant") or {},
+                    "staleness": staleness.get(name),
+                    "open_stale_episode": row.get("stale_episode"),
+                    "stale_alerts": len(row.get("stale_alerts") or []),
+                    "tenants": tenant_staleness.get(name, {}),
+                }
+            )
+        return {"generated_at": moment.isoformat(), "workers": workers}
 
     def check_worker_staleness(self, now=None) -> list[dict]:
         """Fire one signed ``worker_stale`` event per staleness episode.
@@ -1800,6 +1864,7 @@ class ShipmentService:
             staleness=self.worker_staleness(now=moment),
             rotations=rotations,
             escalation_factors=factors,
+            tenant_staleness=self.worker_tenant_staleness(now=moment),
         )
 
     def _store_queue_digest(self, digest: dict) -> None:

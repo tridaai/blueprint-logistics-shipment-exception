@@ -144,6 +144,22 @@
     </div>
   </section>
 
+  <section class="card">
+    <h2>Operations — background workers &amp; key rotation</h2>
+    <p class="note">The worker picture from <code>GET /workers</code>: each background worker's last sweep and
+    cumulative outcomes, its staleness verdict, and the per-tenant split — a worker can be globally alive and
+    still stale for one tenant's retries. Below it, this tenant's key-rotation window from
+    <code>GET /auth/rotation</code>: whether the outgoing key is still in use, and whether its window is
+    <strong>ready to close</strong> (no recorded use for the configured quiet stretch — readiness only;
+    retiring the key stays a human's config change).</p>
+    <div class="row" style="margin:10px 0">
+      <button class="primary" id="ops-refresh">Refresh operations</button>
+      <span class="note" id="ops-note"></span>
+    </div>
+    <div id="workers-body"><p class="note">Loading…</p></div>
+    <div id="rotation-body" style="margin-top:12px"><p class="note">Loading…</p></div>
+  </section>
+
   <section class="card hidden" id="result">
     <h2>2 · Agent result</h2>
     <p>
@@ -699,14 +715,60 @@ $('policy-save').addEventListener('click', async () => {
   }
 });
 
-$('apikey').addEventListener('change', () => { loadSamples(); loadEvals(); loadQueue(); loadCorpus(); });
-$('tenant').addEventListener('change', () => { loadQueue(); loadCorpus(); });
+async function loadOps() {
+  const wbody = $('workers-body');
+  const rbody = $('rotation-body');
+  try {
+    const res = await fetch('/workers', {headers: apiHeaders()});
+    if (!res.ok) throw new Error('workers failed (' + res.status + ')');
+    const view = await res.json();
+    if (!view.workers.length) {
+      wbody.innerHTML = '<p class="note">No worker has recorded a sweep yet.</p>';
+    } else {
+      const rows = view.workers.map(w => {
+        const staleTenants = Object.entries(w.tenants || {})
+          .filter(([, t]) => t.stale).map(([t]) => t).join(', ');
+        const verdict = w.staleness == null ? 'unwatched'
+          : (w.staleness.stale ? 'STALE' : 'alive');
+        return `<tr><td>${w.worker}</td><td>${w.last_sweep_at || '—'}</td><td>${w.sweeps}</td>` +
+          `<td>${verdict}${w.open_stale_episode ? ' (episode open)' : ''}</td>` +
+          `<td>${staleTenants || '—'}</td></tr>`;
+      }).join('');
+      wbody.innerHTML = `<table><thead><tr><th>Worker</th><th>Last sweep</th><th>Sweeps</th><th>Staleness</th><th>Stale for tenants</th></tr></thead><tbody>${rows}</tbody></table>`;
+    }
+  } catch (e) {
+    wbody.innerHTML = '<p class="note">Workers unavailable — ' + e.message + '</p>';
+  }
+  try {
+    const res = await fetch('/auth/rotation', {headers: apiHeaders()});
+    if (!res.ok) throw new Error('rotation failed (' + res.status + ')');
+    const r = await res.json();
+    if (!r.previous_key_configured) {
+      rbody.innerHTML = '<p class="note">No key rotation in progress for this tenant.</p>';
+    } else {
+      rbody.innerHTML = `<p style="font-size:14px">Key rotation for <strong>${r.tenant_id}</strong>: ` +
+        `grace window ${r.grace_open ? 'open' : 'closed'} until ${r.grace_deadline || '—'} · ` +
+        `previous key used ${r.previous_key_requests.count}× (last ${r.previous_key_requests.last_at || 'never'}) · ` +
+        (r.ready_to_close
+          ? '<strong>ready to close</strong> — quiet since ' + (r.quiet_since || '—')
+          : 'not ready to close — quiet since ' + (r.quiet_since || '—') + ' (budget ' + r.quiet_hours + 'h)') +
+        '</p>';
+    }
+  } catch (e) {
+    rbody.innerHTML = '<p class="note">Rotation unavailable — ' + e.message + '</p>';
+  }
+}
+$('ops-refresh').addEventListener('click', loadOps);
+
+$('apikey').addEventListener('change', () => { loadSamples(); loadEvals(); loadQueue(); loadCorpus(); loadOps(); });
+$('tenant').addEventListener('change', () => { loadQueue(); loadCorpus(); loadOps(); });
 
 loadSamples();
 loadEvals();
 loadQueue();
 loadRetrieval();
 loadCorpus();
+loadOps();
 </script>
 </body>
 </html>

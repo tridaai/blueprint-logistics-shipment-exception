@@ -298,6 +298,7 @@ def escalation_digest(
     staleness: dict | None = None,
     rotations: list[dict] | None = None,
     escalation_factors: dict | None = None,
+    tenant_staleness: dict | None = None,
     window_hours: float = DIGEST_WINDOW_HOURS,
 ) -> dict:
     """The shift lead's morning picture, composed in code.
@@ -319,7 +320,12 @@ def escalation_digest(
       oldest awaiting item of each severity: who has been waiting
       longest, where.
     - ``stale_workers`` — the watched workers the staleness view
-      calls stale (the observer's own health).
+      calls stale (the observer's own health). Each entry also
+      names its ``stale_tenants`` when the per-tenant split is
+      supplied: the tenants whose work that worker has gone quiet
+      on, read from the same view ``GET /workers`` serves — a
+      worker can be globally alive and still stale for one
+      tenant's retries.
     - ``open_key_rotation_windows`` — tenants whose previous key is
       still inside its grace window: rotations somebody still has
       to finish. Each names its readiness when the status carries
@@ -397,6 +403,17 @@ def escalation_digest(
             "last_sweep_at": info.get("last_sweep_at"),
             "age_seconds": info.get("age_seconds"),
             "threshold_seconds": info.get("threshold_seconds"),
+            "stale_tenants": [
+                {
+                    "tenant_id": tenant,
+                    "last_active_at": tenant_info.get("last_active_at"),
+                    "age_seconds": tenant_info.get("age_seconds"),
+                }
+                for tenant, tenant_info in sorted(
+                    ((tenant_staleness or {}).get(worker) or {}).items()
+                )
+                if tenant_info.get("stale")
+            ],
         }
         for worker, info in sorted((staleness or {}).items())
         if info.get("stale")

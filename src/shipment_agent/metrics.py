@@ -109,6 +109,58 @@ def worker_staleness(
     return view
 
 
+def worker_tenant_staleness(
+    status_by_worker: dict[str, dict], now: datetime | None = None
+) -> dict:
+    """Per-tenant staleness, split from the workers' outcome rows.
+
+    The global view (:func:`worker_staleness`) answers "is the
+    worker alive"; this answers "is the worker alive *for this
+    tenant*". A tenant's activity is the last sweep that recorded
+    an outcome for it (the status row's ``by_tenant_last_at``
+    stamps, see ``service._record_worker_status``), judged against
+    the worker's own threshold — staleness thresholds stay
+    deployment-wide per worker; what splits is the evidence. A
+    tenant the worker has never served is absent (no activity to
+    judge), and so is an unwatched worker, exactly as in the global
+    view. Returns ``{worker: {tenant: {last_active_at,
+    age_seconds, stale, threshold_seconds}}}``.
+    """
+    moment = now or datetime.now(timezone.utc)
+    view: dict[str, dict] = {}
+    for worker in sorted(status_by_worker):
+        threshold = worker_stale_seconds(worker)
+        if threshold is None:
+            continue
+        summary = status_by_worker[worker] or {}
+        last_by_tenant = summary.get("by_tenant_last_at") or {}
+        tenants: dict[str, dict] = {}
+        for tenant in sorted(last_by_tenant):
+            last = last_by_tenant[tenant]
+            last_dt = None
+            if last:
+                try:
+                    last_dt = datetime.fromisoformat(
+                        str(last).replace("Z", "+00:00")
+                    )
+                except ValueError:
+                    last_dt = None
+            age = (
+                round((moment - last_dt).total_seconds(), 1)
+                if last_dt is not None
+                else None
+            )
+            tenants[tenant] = {
+                "last_active_at": last if last_dt is not None else None,
+                "age_seconds": age,
+                "stale": age is None or age > threshold,
+                "threshold_seconds": threshold,
+            }
+        if tenants:
+            view[worker] = tenants
+    return view
+
+
 def compute_metrics(records: list[ApprovalRecord]) -> dict:
     """Aggregate the store's records into the metrics payload."""
     by_status: dict[str, int] = {}
@@ -173,6 +225,7 @@ def render_prometheus(
     worker_status: dict | None = None,
     key_usage: dict | None = None,
     staleness: dict | None = None,
+    worker_tenants: dict | None = None,
 ) -> str:
     """The metrics payload as Prometheus text exposition.
 
@@ -185,6 +238,9 @@ def render_prometheus(
     from the records' key ids and the rotation configuration) adds
     the key-rotation families — the "old key still in use" signal an
     operator watches before closing a rotation grace window.
+    ``worker_tenants`` (see :func:`worker_tenant_staleness`) adds
+    the per-tenant worker families: a worker globally alive can
+    still be stale for one tenant's work.
     """
     lines: list[str] = []
 
@@ -308,6 +364,29 @@ def render_prometheus(
             [
                 ({"worker": name}, info["age_seconds"])
                 for name, info in sorted(staleness.items())
+                if info["age_seconds"] is not None
+            ],
+        )
+    if worker_tenants:
+        family(
+            "shipment_agent_worker_tenant_stale",
+            "Whether a watched worker is stale for one tenant's work "
+            "(1): its last sweep recording an outcome for that tenant "
+            "is older than its WORKER_STALE_SECONDS threshold.",
+            [
+                ({"worker": worker, "tenant": tenant}, 1 if info["stale"] else 0)
+                for worker, tenants in sorted(worker_tenants.items())
+                for tenant, info in sorted(tenants.items())
+            ],
+        )
+        family(
+            "shipment_agent_worker_tenant_last_active_age_seconds",
+            "Age of each watched worker's last recorded outcome for "
+            "each tenant, in seconds.",
+            [
+                ({"worker": worker, "tenant": tenant}, info["age_seconds"])
+                for worker, tenants in sorted(worker_tenants.items())
+                for tenant, info in sorted(tenants.items())
                 if info["age_seconds"] is not None
             ],
         )
