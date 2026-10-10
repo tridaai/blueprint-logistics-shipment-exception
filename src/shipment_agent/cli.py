@@ -81,11 +81,16 @@ def _print_result(
         print(f"Info needed: clarification request composed (not sent) — missing: {'; '.join(result.information_request.missing_items)}")
     if result.telemetry is not None:
         t = result.telemetry
+        budget_text = ""
+        if t.budget is not None:
+            budget_text = f" · token budget {t.budget.used}/{t.budget.limit}" + (
+                " EXCEEDED (later steps degraded)" if t.budget.exceeded else ""
+            )
         if t.input_tokens is not None:
             cost = f" · est. ${t.estimated_cost_usd:.4f}" if t.estimated_cost_usd is not None else " · cost n/a"
-            print(f"Telemetry : {t.backend} · {t.model} · {t.model_calls} model call(s) · {t.input_tokens} in / {t.output_tokens} out tokens{cost} · {t.latency_seconds}s")
+            print(f"Telemetry : {t.backend} · {t.model} · {t.model_calls} model call(s) · {t.input_tokens} in / {t.output_tokens} out tokens{cost} · {t.latency_seconds}s{budget_text}")
         else:
-            print(f"Telemetry : {t.backend} (offline fallback — no model ran) · {t.model_calls} call(s) · tokens n/a · {t.latency_seconds}s")
+            print(f"Telemetry : {t.backend} (offline fallback — no model ran) · {t.model_calls} call(s) · tokens n/a · {t.latency_seconds}s{budget_text}")
     print("-" * 72)
     print(f"Subject: {result.draft.subject}")
     print(result.draft.body)

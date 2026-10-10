@@ -354,11 +354,12 @@ function render(result) {
   }
   if (result.telemetry) {
     const t = result.telemetry;
+    const budgetText = t.budget ? ` · token budget ${t.budget.used}/${t.budget.limit}` + (t.budget.exceeded ? ' — <strong>EXCEEDED</strong> (later provider steps degraded to template paths)' : '') : '';
     if (t.input_tokens !== null && t.input_tokens !== undefined) {
       facts.push(`Run telemetry: <strong>${t.backend}</strong> · ${t.model} · ${t.model_calls} model call(s) · ${t.input_tokens} in / ${t.output_tokens} out tokens`
-        + (t.estimated_cost_usd !== null && t.estimated_cost_usd !== undefined ? ` · est. $${t.estimated_cost_usd}` : ' · cost n/a (unlisted model)') + ` · ${t.latency_seconds}s`);
+        + (t.estimated_cost_usd !== null && t.estimated_cost_usd !== undefined ? ` · est. $${t.estimated_cost_usd}` : ' · cost n/a (unlisted model)') + ` · ${t.latency_seconds}s` + budgetText);
     } else {
-      facts.push(`Run telemetry: <strong>${t.backend}</strong> (offline fallback — no model ran) · ${t.model_calls} call(s) · ${t.latency_seconds}s`);
+      facts.push(`Run telemetry: <strong>${t.backend}</strong> (offline fallback — no model ran) · ${t.model_calls} call(s) · ${t.latency_seconds}s` + budgetText);
     }
   }
   $('facts').innerHTML = facts.join('<br>');

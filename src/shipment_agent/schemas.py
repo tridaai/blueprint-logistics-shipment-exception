@@ -371,6 +371,20 @@ class InformationRequest(BaseModel):
     source: str  # llm | template
 
 
+class TokenBudget(BaseModel):
+    """``RUN_TOKEN_BUDGET`` accounting for one run (a cost guardrail).
+
+    Set via the environment; unset means off and this object is absent.
+    When the run's cumulative provider tokens pass the limit, the
+    remaining provider steps degrade to their deterministic/template
+    paths (with trace notes) — a run is never hard-failed for budget.
+    """
+
+    limit: int
+    used: int
+    exceeded: bool
+
+
 class RunTelemetry(BaseModel):
     """Per-run observability: what the run used and how long it took.
 
@@ -381,7 +395,8 @@ class RunTelemetry(BaseModel):
     ``model_backends.py`` — an estimate, labelled as such; an unlisted
     model reports None. In the default (mock) mode no model ran, so
     tokens and cost are None — never fabricated — while the call count
-    (template renders) and the wall-clock latency stay real.
+    (template renders) and the wall-clock latency stay real. ``budget``
+    is present only when ``RUN_TOKEN_BUDGET`` is set.
     """
 
     backend: str
@@ -391,6 +406,7 @@ class RunTelemetry(BaseModel):
     output_tokens: int | None = None
     estimated_cost_usd: float | None = None
     latency_seconds: float = 0.0
+    budget: TokenBudget | None = None
 
 
 class AutonomyRecommendation(BaseModel):

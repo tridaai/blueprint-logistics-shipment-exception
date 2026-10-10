@@ -44,6 +44,7 @@ from .schemas import (
     ReviewerResult,
     RunTelemetry,
     ShipmentInput,
+    TokenBudget,
     TraceStep,
     ValidationResult,
     VerificationResult,
@@ -109,6 +110,103 @@ def _repair_settings() -> tuple[bool, int]:
     enabled = raw not in {"off", "0", "false", "no"}
     attempts = min(max(env_int("GUARDRAIL_REPAIR_MAX_ATTEMPTS", 1), 0), 3)
     return enabled, attempts
+
+
+def _token_budget() -> int | None:
+    """``RUN_TOKEN_BUDGET`` (env, read at run time): the per-run token
+    ceiling for provider calls. Unset, zero, or invalid = off."""
+    load_dotenv()
+    limit = env_int("RUN_TOKEN_BUDGET", 0)
+    return limit if limit > 0 else None
+
+
+# Provider capability method -> the pipeline node it serves. When the
+# budget is spent, calls to these methods return None, so each node's
+# existing deterministic fallback engages exactly as it does when a
+# provider reply is unusable.
+_PROVIDER_STEP_NODES = {
+    "extract_document_fields": "extract",
+    "classify_with_llm": "classify",
+    "diagnose": "diagnose",
+    "diagnose_with_tools": "diagnose",
+    "propose_options": "options",
+    "draft_customer_update": "draft",
+    "verify_draft": "verify",
+    "review_draft": "review",
+    "compose_information_request": "human_approval",
+}
+
+
+class _BudgetGuard:
+    """Backend wrapper enforcing the per-run token budget (cost guardrail).
+
+    Wraps the run's backend for one graph invocation. Every provider
+    capability call re-checks the run's cumulative provider tokens
+    (the backend's own usage counters) at call time; once the budget
+    is exceeded, the call returns None — the node's deterministic /
+    template path serves the step, the degradation is recorded in
+    ``degraded_nodes`` for the trace, and the run continues. Drafting,
+    which has no in-node fallback, renders through the deterministic
+    template backend instead. The budget never hard-fails a run.
+    """
+
+    def __init__(self, backend, limit: int) -> None:
+        object.__setattr__(self, "_backend", backend)
+        object.__setattr__(self, "_limit", limit)
+        object.__setattr__(self, "_start_tokens", self._tokens_of(backend))
+        object.__setattr__(self, "degraded_nodes", [])
+
+    @staticmethod
+    def _tokens_of(backend) -> int:
+        totals_fn = getattr(backend, "usage_totals", None)
+        if not callable(totals_fn):
+            return 0
+        totals = totals_fn()
+        return int(totals.get("input_tokens", 0)) + int(totals.get("output_tokens", 0))
+
+    def used_tokens(self) -> int:
+        return self._tokens_of(self._backend) - self._start_tokens
+
+    def exceeded(self) -> bool:
+        return self.used_tokens() > self._limit
+
+    def status(self) -> dict:
+        return {
+            "limit": self._limit,
+            "used": self.used_tokens(),
+            "exceeded": self.exceeded(),
+            "degraded_nodes": list(self.degraded_nodes),
+        }
+
+    def _note(self, method: str) -> None:
+        node = _PROVIDER_STEP_NODES[method]
+        if node not in self.degraded_nodes:
+            self.degraded_nodes.append(node)
+
+    def __getattr__(self, name: str):
+        backend = object.__getattribute__(self, "_backend")
+        attr = getattr(backend, name)  # AttributeError propagates — getattr defaults work
+        if name not in _PROVIDER_STEP_NODES or not callable(attr):
+            return attr
+
+        def guarded(*args, **kwargs):
+            # Checked at call time, not access time: some nodes fetch a
+            # method once and call it repeatedly (extraction, per
+            # document) — the budget must bite mid-list too.
+            if self.exceeded():
+                self._note(name)
+                return None
+            return attr(*args, **kwargs)
+
+        return guarded
+
+    def draft_customer_update(self, context):
+        """Drafting cannot degrade to "no method" — over budget it
+        renders through the deterministic template backend instead."""
+        if self.exceeded():
+            self._note("draft_customer_update")
+            return MockModelBackend().draft_customer_update(context)
+        return self._backend.draft_customer_update(context)
 
 
 def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
@@ -218,7 +316,7 @@ def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
     if not mismatches and not pair_warning:
         ingest_details.append("no document mismatches found")
 
-    return [
+    steps = [
         TraceStep(
             name="extract",
             title="Extract document fields",
@@ -414,6 +512,26 @@ def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
             ),
         ),
     ]
+    budget = final.get("token_budget")
+    if budget:
+        degraded = budget.get("degraded_nodes", [])
+        for step in steps:
+            if step.name in degraded:
+                step.details.append(
+                    "budget exceeded — template path (RUN_TOKEN_BUDGET spent; "
+                    "this step was served by its deterministic path)"
+                )
+            if step.name == "human_approval":
+                step.details.append(
+                    f"token budget: {budget['used']} of {budget['limit']} tokens used"
+                    + (
+                        " — budget exceeded; provider steps degraded to their "
+                        "template paths: " + ", ".join(degraded)
+                        if budget.get("exceeded")
+                        else " — within budget"
+                    )
+                )
+    return steps
 
 
 class AgentState(TypedDict, total=False):
@@ -449,6 +567,7 @@ class AgentState(TypedDict, total=False):
     autonomy: dict
     needs_information: bool
     information_request: dict | None
+    token_budget: dict | None
     approval_status: str
 
 
@@ -459,6 +578,14 @@ def build_graph(
     """Compile the LangGraph pipeline with injectable backend + retriever."""
     backend = backend or MockModelBackend()
     retriever = retriever or KeywordRetriever()
+    # Cost guardrail: with RUN_TOKEN_BUDGET set, the backend is wrapped
+    # for this run — once the run's provider tokens pass the budget, the
+    # remaining provider steps degrade to their deterministic paths
+    # (see _BudgetGuard). Unset, the backend runs unwrapped, unchanged.
+    budget_limit = _token_budget()
+    budget_guard = _BudgetGuard(backend, budget_limit) if budget_limit else None
+    if budget_guard is not None:
+        backend = budget_guard
 
     def extract(state: AgentState) -> AgentState:
         shipment = ShipmentInput.model_validate(state["shipment"])
@@ -896,6 +1023,7 @@ def build_graph(
             "autonomy": autonomy.model_dump(),
             "needs_information": info_request is not None,
             "information_request": info_request.model_dump() if info_request else None,
+            "token_budget": budget_guard.status() if budget_guard is not None else None,
             "draft": draft.model_dump(),
         }
 
@@ -963,7 +1091,9 @@ def run_shipment(
         }
     )
     latency = round(time.perf_counter() - started, 3)
-    telemetry = _run_telemetry(effective_backend, before, latency)
+    telemetry = _run_telemetry(
+        effective_backend, before, latency, budget_limit=_token_budget()
+    )
     result = AgentResult(
         shipment_id=shipment_model.shipment_id,
         classification=final["classification"],
@@ -1005,14 +1135,18 @@ def run_shipment(
     return result
 
 
-def _run_telemetry(backend, before: dict | None, latency: float) -> RunTelemetry:
+def _run_telemetry(
+    backend, before: dict | None, latency: float, budget_limit: int | None = None
+) -> RunTelemetry:
     """Aggregate one run's telemetry from the backend's usage counters.
 
     Provider mode: real token usage (the delta over the run), the model
     that served it, and the estimated cost from the price table (None
     for an unlisted model). Mock mode: tokens and cost are None — no
     model ran, and the telemetry says so instead of inventing numbers —
-    while the call count and latency remain real.
+    while the call count and latency remain real. When
+    ``RUN_TOKEN_BUDGET`` is set, the budget accounting (limit, tokens
+    used, whether it was exceeded) rides along.
     """
     usage_totals = getattr(backend, "usage_totals", None)
     after = usage_totals() if callable(usage_totals) else None
@@ -1020,16 +1154,25 @@ def _run_telemetry(backend, before: dict | None, latency: float) -> RunTelemetry
     if before is None or after is None:
         return RunTelemetry(backend=backend_name, latency_seconds=latency)
     calls = max(int(after.get("calls", 0)) - int(before.get("calls", 0)), 0)
-    if backend_name == "mock":
-        return RunTelemetry(
-            backend=backend_name, model_calls=calls, latency_seconds=latency
-        )
     input_tokens = max(
         int(after.get("input_tokens", 0)) - int(before.get("input_tokens", 0)), 0
     )
     output_tokens = max(
         int(after.get("output_tokens", 0)) - int(before.get("output_tokens", 0)), 0
     )
+    budget = None
+    if budget_limit:
+        used = input_tokens + output_tokens
+        budget = TokenBudget(
+            limit=budget_limit, used=used, exceeded=used > budget_limit
+        )
+    if backend_name == "mock":
+        return RunTelemetry(
+            backend=backend_name,
+            model_calls=calls,
+            latency_seconds=latency,
+            budget=budget,
+        )
     model = getattr(backend, "_model", None)
     return RunTelemetry(
         backend=backend_name,
@@ -1039,4 +1182,5 @@ def _run_telemetry(backend, before: dict | None, latency: float) -> RunTelemetry
         output_tokens=output_tokens,
         estimated_cost_usd=estimate_cost_usd(model, input_tokens, output_tokens),
         latency_seconds=latency,
+        budget=budget,
     )
