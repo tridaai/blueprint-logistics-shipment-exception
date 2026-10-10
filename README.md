@@ -37,7 +37,7 @@ the offline smoke-test backend. The primary workflow is
 ```bash
 uv sync --extra dev              # 1 · install the locked set (uv.lock)
 uv run shipment-agent-demo       # 2 · one shipment, end to end, with a trace
-uv run pytest -q                 # 3 · the full test suite (553 tests)
+uv run pytest -q                 # 3 · the full test suite (557 tests)
 ```
 
 No uv? Create a virtual environment and use pip. The direct dependencies
