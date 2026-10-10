@@ -10,6 +10,8 @@ It turns one shipment record into a classified exception, a policy-cited
 customer-update draft, and a claim-packet draft — then waits for a human
 decision.
 
+**Deep-dive:** [Shipment Exception Agent Blueprint](https://trida.ai/blog/shipment-exception-agent-blueprint) — how the agent works, where it stops, and what the evals actually prove.
+
 <p>
   <img alt="Python 3.10–3.12" src="https://img.shields.io/badge/python-3.10--3.12-4F46E5">
   <img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-4F46E5">
