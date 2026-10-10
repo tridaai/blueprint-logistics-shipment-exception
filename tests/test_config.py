@@ -89,6 +89,10 @@ def test_dotenv_file_drives_backend_selection(tmp_path, monkeypatch):
             captured.update(kwargs)
 
     monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeOpenAI))
+    # This test is THE .env-discovery test: the suite-wide hermetic
+    # fixture (tests/conftest.py) neutralises .env loading in consumer
+    # modules, so restore the real loader for the module under test.
+    monkeypatch.setattr("shipment_agent.model_backends.load_dotenv", load_dotenv)
     backend = get_backend()
     assert isinstance(backend, OpenAIBackend)
     assert captured["api_key"] == "sk-from-dotenv"
