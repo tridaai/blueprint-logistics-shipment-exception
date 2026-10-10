@@ -22,6 +22,43 @@ BANNED_PHRASES = (
     "100% guaranteed",
 )
 
+# Time-bound commitments are prohibited promises too (POL-COMM-01) —
+# a gap the live LLM-judge pack found: a draft that "guarantees
+# notification by end of business tomorrow" passed the phrase list
+# above while promising exactly what the policy forbids. Patterns:
+# hard time anchors (end of business/day, tomorrow, a weekday) and
+# digit-bound windows framed as commitments. Wording matters: the
+# sanctioned template phrase "within one business day" uses a number
+# WORD, and these patterns require digits, so the house style stays
+# clean — verified against every bundled sample and golden draft.
+_WEEKDAYS = "monday|tuesday|wednesday|thursday|friday|saturday|sunday"
+_TIME_COMMITMENT_RES = (
+    re.compile(r"\bby end of business\b"),
+    re.compile(r"\bby end of (the )?day\b"),
+    re.compile(r"\bby (tomorrow|tonight)\b"),
+    re.compile(rf"\bby (next )?({_WEEKDAYS})\b"),
+    re.compile(
+        r"\b(we will|we'll|will|guarantee\w*|promise\w*|commit\w*)\b[^.]{0,60}?"
+        r"\bwithin\s+\d+\s*(business\s+)?(hours?|days?)\b"
+    ),
+    re.compile(
+        r"\bwithin\s+\d+\s*(business\s+)?(hours?|days?)\b[^.]{0,40}?"
+        r"\b(guarantee\w*|promise\w*)\b"
+    ),
+    re.compile(r"\bguarantee\w*\b[^.]{0,80}?\bby\b"),
+)
+
+
+def time_commitment_hits(body: str) -> list[str]:
+    """Matched time-commitment fragments in ``body`` (lower-cased)."""
+    lowered = body.lower()
+    hits: list[str] = []
+    for pattern in _TIME_COMMITMENT_RES:
+        match = pattern.search(lowered)
+        if match:
+            hits.append(match.group().strip())
+    return hits
+
 # PII patterns a customer draft must never carry. The draft quotes the
 # source record (condition notes, carrier text) verbatim — exactly the
 # place a stray personal identifier typed by a human would ride along.
@@ -86,14 +123,15 @@ def guardrail_checks(
     )
 
     banned_hits = [phrase for phrase in BANNED_PHRASES if phrase in lowered]
+    promise_hits = banned_hits + time_commitment_hits(body)
     checks.append(
         GuardrailCheck(
             name="no_prohibited_promises",
-            passed=not banned_hits,
+            passed=not promise_hits,
             detail=(
                 "No prohibited promise phrases found."
-                if not banned_hits
-                else "Prohibited promise(s) found: " + ", ".join(f"'{p}'" for p in banned_hits)
+                if not promise_hits
+                else "Prohibited promise(s) found: " + ", ".join(f"'{p}'" for p in promise_hits)
             ),
         )
     )
