@@ -118,6 +118,27 @@
     </table>
   </section>
 
+  <section class="card">
+    <h2>Your tenant's policy corpus</h2>
+    <p class="note">The corpus this console's tenant retrieves from (<code>GET /policies</code>): the
+    <strong>shared</strong> documents every tenant cites, your tenant's <strong>bundled</strong> SOPs, and the
+    documents your operators supply at runtime (<strong>tenant</strong>). Add or replace one below and the next
+    analysis retrieves it — no restart. Removing a tenant document that overrode a bundled one resurfaces the
+    bundled original. Another tenant's documents never appear here.</p>
+    <div id="corpus-list"><p class="note">Loading…</p></div>
+    <h3>Add / replace a document</h3>
+    <label for="policy-id">Policy ID</label>
+    <input id="policy-id" type="text" placeholder="e.g. SOP-ACME-RETURNS" style="max-width:320px" autocomplete="off">
+    <label for="policy-title">Title</label>
+    <input id="policy-title" type="text" placeholder="e.g. Returns quarantine handling (Acme)" autocomplete="off">
+    <label for="policy-text">Text</label>
+    <textarea id="policy-text" spellcheck="false" style="min-height:80px" placeholder="The SOP text the agent should retrieve and cite…"></textarea>
+    <div class="row" style="margin-top:10px">
+      <button class="primary" id="policy-save">Save document</button>
+      <span class="note" id="policy-note"></span>
+    </div>
+  </section>
+
   <section class="card hidden" id="result">
     <h2>2 · Agent result</h2>
     <p>
@@ -559,11 +580,81 @@ async function loadQueue() {
 }
 $('queue-refresh').addEventListener('click', loadQueue);
 
-$('apikey').addEventListener('change', () => { loadSamples(); loadEvals(); loadQueue(); });
+async function loadCorpus() {
+  const list = $('corpus-list');
+  try {
+    const res = await fetch('/policies', {headers: apiHeaders()});
+    if (!res.ok) throw new Error('policies failed (' + res.status + ')');
+    const docs = await res.json();
+    if (!docs.length) {
+      list.innerHTML = '<p class="note">No documents — the corpus is empty for this tenant.</p>';
+      return;
+    }
+    list.innerHTML = '';
+    docs.forEach(doc => {
+      const div = document.createElement('div');
+      div.className = 'policy';
+      const badge = document.createElement('span');
+      badge.className = 'badge';
+      badge.textContent = doc.source || 'shared';
+      div.appendChild(badge);
+      div.appendChild(document.createTextNode(' '));
+      const strong = document.createElement('strong');
+      strong.textContent = doc.policy_id;
+      div.appendChild(strong);
+      div.appendChild(document.createTextNode(' — ' + doc.title + ' '));
+      const small = document.createElement('small');
+      small.textContent = doc.text.length > 140 ? doc.text.slice(0, 140) + '…' : doc.text;
+      div.appendChild(small);
+      if (doc.source === 'tenant') {
+        div.appendChild(document.createTextNode(' '));
+        const btn = document.createElement('button');
+        btn.textContent = 'Remove';
+        btn.addEventListener('click', async () => {
+          $('policy-note').textContent = '';
+          const del = await fetch('/policies/' + encodeURIComponent(doc.policy_id), {method: 'DELETE', headers: apiHeaders()});
+          if (!del.ok) { $('policy-note').textContent = 'Remove failed (' + del.status + '): ' + await del.text(); return; }
+          $('policy-note').textContent = 'Removed ' + doc.policy_id + ' — the next analysis retrieves without it.';
+          loadCorpus();
+        });
+        div.appendChild(btn);
+      }
+      list.appendChild(div);
+    });
+  } catch (e) {
+    list.innerHTML = '<p class="note">Corpus unavailable — ' + e.message + '</p>';
+  }
+}
+
+$('policy-save').addEventListener('click', async () => {
+  const note = $('policy-note');
+  note.textContent = '';
+  const payload = {
+    policy_id: $('policy-id').value.trim(),
+    title: $('policy-title').value.trim(),
+    text: $('policy-text').value.trim(),
+  };
+  try {
+    const res = await fetch('/policies', {
+      method: 'POST',
+      headers: Object.assign({'Content-Type': 'application/json'}, apiHeaders()),
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) throw new Error('save failed (' + res.status + '): ' + await res.text());
+    note.textContent = 'Saved ' + payload.policy_id + ' — the next analysis for this tenant retrieves it.';
+    loadCorpus();
+  } catch (e) {
+    note.textContent = e.message;
+  }
+});
+
+$('apikey').addEventListener('change', () => { loadSamples(); loadEvals(); loadQueue(); loadCorpus(); });
+$('tenant').addEventListener('change', () => { loadQueue(); loadCorpus(); });
 
 loadSamples();
 loadEvals();
 loadQueue();
+loadCorpus();
 </script>
 </body>
 </html>
