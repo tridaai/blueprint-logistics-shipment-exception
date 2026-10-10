@@ -28,7 +28,7 @@ services:
 
   minio:
     ports:
-      - "9000:9000"
+      - "8333:8333"
 
   api:
     environment:
