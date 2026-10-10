@@ -82,6 +82,7 @@ from .store import ApprovalRecord, ApprovalStore, carrier_summary, default_store
 __all__ = [
     "ApprovalRecord",
     "BatchItem",
+    "DecisionConflictError",
     "ShipmentService",
     "checkpoint_thread_id",
     "resolve_tenant_id",
@@ -141,6 +142,16 @@ def sign_webhook_body(body: bytes, secret: str) -> str:
     """
     digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
     return f"sha256={digest}"
+
+
+class DecisionConflictError(ValueError):
+    """An Idempotency-Key was spent on the *opposite* decision.
+
+    A subclass of ValueError so existing refusal handling keeps
+    working, but distinct: the API maps it to 409 Conflict (the key
+    names an operation that already happened, differently), where a
+    plain re-decision attempt is a 422.
+    """
 
 
 @dataclass
@@ -873,26 +884,65 @@ class ShipmentService:
             "carrier_type_counts": carrier["carrier_type_counts"],
         }
 
+    @staticmethod
+    def _decision_replay(
+        record: ApprovalRecord, key: str | None, requested: str
+    ) -> AgentResult:
+        """Answer a decision call for an already-decided record.
+
+        Three cases, mirroring the analyze idempotency contract one
+        level up:
+
+        - the record's decision was made under this same
+          ``Idempotency-Key`` and the caller asks for the *same*
+          decision again → the recorded decision, flagged
+          ``idempotent_replay``. Nothing re-fires: no second webhook
+          dispatch, no second thread resume, and the feedback loop
+          (derived from the record) sees the decision exactly once.
+          First write wins — a replay carrying a different actor or
+          reason still returns the decision as recorded.
+        - same key, *opposite* decision → :class:`DecisionConflictError`:
+          the key names an operation that already happened,
+          differently (the API maps this to 409).
+        - anything else (no key, a different key, an unkeyed
+          decision) → the long-standing refusal: the shipment is
+          not awaiting approval.
+        """
+        decided_as = record.result.approval_status
+        if key is not None and record.decision_idempotency_key == key:
+            if decided_as == requested:
+                return record.result.model_copy(update={"idempotent_replay": True})
+            raise DecisionConflictError(
+                f"Idempotency-Key {key!r} already decided shipment "
+                f"{record.result.shipment_id} as {decided_as!r}; it cannot "
+                f"also decide it as {requested!r}"
+            )
+        raise ValueError(
+            f"Shipment {record.result.shipment_id} is not awaiting approval "
+            f"(status: {decided_as})"
+        )
+
     def approve(
         self,
         shipment_id: str,
         approver: str,
         reason: str = "",
         tenant_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> AgentResult:
         store = self._get_store()
         record = store.get(shipment_id, tenant_id=resolve_tenant_id(tenant_id))
         if record is None:
             raise KeyError(f"Unknown shipment_id: {shipment_id} (analyze it first)")
+        key = self._normalize_idempotency_key(idempotency_key)
         if record.result.approval_status != "awaiting_approval":
-            raise ValueError(
-                f"Shipment {shipment_id} is not awaiting approval (status: {record.result.approval_status})"
-            )
+            return self._decision_replay(record, key, "approved")
         if not record.result.validation.passed:
             raise ValueError(
                 "Draft failed guardrail validation and cannot be approved: "
                 + "; ".join(record.result.validation.errors)
             )
+        record.decision_idempotency_key = key
         record.approved = True
         record.approver = approver
         record.approve_reason = reason
@@ -922,15 +972,16 @@ class ShipmentService:
         reviewer: str,
         reason: str = "",
         tenant_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> AgentResult:
         store = self._get_store()
         record = store.get(shipment_id, tenant_id=resolve_tenant_id(tenant_id))
         if record is None:
             raise KeyError(f"Unknown shipment_id: {shipment_id} (analyze it first)")
+        key = self._normalize_idempotency_key(idempotency_key)
         if record.result.approval_status != "awaiting_approval":
-            raise ValueError(
-                f"Shipment {shipment_id} is not awaiting approval (status: {record.result.approval_status})"
-            )
+            return self._decision_replay(record, key, "rejected")
+        record.decision_idempotency_key = key
         record.rejected_by = reviewer
         record.reject_reason = reason
         record.decided_at = _now_iso()

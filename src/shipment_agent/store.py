@@ -75,6 +75,12 @@ class ApprovalRecord:
     # which belongs to the approval packet's delivery alone.
     sla_breach_event_at: str | None = None
     sla_dispatch_attempts: list[dict] = field(default_factory=list)
+    # The Idempotency-Key the human decision was submitted with,
+    # when the caller sent one (see service.approve / reject). A
+    # repeat decision under the same key returns the recorded
+    # decision instead of erroring or re-firing its effects; the
+    # opposite decision under the same key is a conflict.
+    decision_idempotency_key: str | None = None
     # ISO-8601 UTC timestamps, stamped by the service ("" until set —
     # older rows simply have none). The audit export reads them.
     created_at: str = ""  # when the analysis was recorded
@@ -197,6 +203,7 @@ def _record_to_dict(record: ApprovalRecord) -> dict:
         "idempotency_key": record.idempotency_key,
         "sla_breach_event_at": record.sla_breach_event_at,
         "sla_dispatch_attempts": record.sla_dispatch_attempts,
+        "decision_idempotency_key": record.decision_idempotency_key,
         "created_at": record.created_at,
         "decided_at": record.decided_at,
     }
@@ -217,6 +224,7 @@ def _record_from_dict(data: dict) -> ApprovalRecord:
         idempotency_key=data.get("idempotency_key"),
         sla_breach_event_at=data.get("sla_breach_event_at"),
         sla_dispatch_attempts=data.get("sla_dispatch_attempts") or [],
+        decision_idempotency_key=data.get("decision_idempotency_key"),
         created_at=data.get("created_at", ""),
         decided_at=data.get("decided_at", ""),
     )
@@ -330,7 +338,8 @@ class SQLiteStore:
         "tenant_id, shipment_id, result_json, shipment_json, approver, "
         "approved, rejected_by, reject_reason, dispatch_status, "
         "approve_reason, created_at, decided_at, dispatch_attempts_json, "
-        "idempotency_key, sla_breach_event_at, sla_dispatch_attempts_json"
+        "idempotency_key, sla_breach_event_at, sla_dispatch_attempts_json, "
+        "decision_idempotency_key"
     )
 
     def __init__(self, path: Path | str) -> None:
@@ -394,6 +403,10 @@ class SQLiteStore:
                 conn.execute(
                     "ALTER TABLE approvals ADD COLUMN sla_dispatch_attempts_json TEXT NOT NULL DEFAULT '[]'"
                 )
+            if "decision_idempotency_key" not in columns:
+                conn.execute(
+                    "ALTER TABLE approvals ADD COLUMN decision_idempotency_key TEXT"
+                )
             # Tenancy changed the identity: a table created before it
             # keys rows by shipment_id alone, so two tenants' records
             # with the same id would shadow each other. Rebuild such a
@@ -425,6 +438,7 @@ class SQLiteStore:
                         idempotency_key TEXT,
                         sla_breach_event_at TEXT,
                         sla_dispatch_attempts_json TEXT NOT NULL DEFAULT '[]',
+                        decision_idempotency_key TEXT,
                         PRIMARY KEY (tenant_id, shipment_id)
                     )
                     """
@@ -448,7 +462,7 @@ class SQLiteStore:
             conn.execute(
                 f"""
                 INSERT OR REPLACE INTO approvals ({self._COLUMNS})
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.tenant_id,
@@ -467,6 +481,7 @@ class SQLiteStore:
                     record.idempotency_key,
                     record.sla_breach_event_at,
                     json.dumps(record.sla_dispatch_attempts),
+                    record.decision_idempotency_key,
                 ),
             )
 
@@ -510,6 +525,11 @@ class SQLiteStore:
                 row["sla_breach_event_at"] if "sla_breach_event_at" in keys else None
             ),
             sla_dispatch_attempts=sla_attempts,
+            decision_idempotency_key=(
+                row["decision_idempotency_key"]
+                if "decision_idempotency_key" in keys
+                else None
+            ),
             created_at=row["created_at"] if "created_at" in keys else "",
             decided_at=row["decided_at"] if "decided_at" in keys else "",
         )

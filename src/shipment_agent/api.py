@@ -514,38 +514,70 @@ def get_result(
 def approve(
     shipment_id: str,
     request: ApproveRequest,
+    response: Response,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
 ) -> AgentResult:
+    """Record the human approval. Send an ``Idempotency-Key``
+    header to make the decision safe to retry: a repeat approval
+    under the same key returns the recorded decision (flagged
+    ``idempotent_replay``, with an ``X-Idempotent-Replay: true``
+    header) instead of erroring — and never dispatches the webhook
+    a second time. The *opposite* decision under a spent key is a
+    409; a second decision under a different (or no) key stays a
+    422, as before."""
+    from .service import DecisionConflictError
+
     try:
-        return service.approve(
+        result = service.approve(
             shipment_id,
             approver=_decision_actor(request),
             reason=request.reason,
             tenant_id=x_tenant_id,
+            idempotency_key=idempotency_key,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except DecisionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if result.idempotent_replay:
+        response.headers["X-Idempotent-Replay"] = "true"
+    return result
 
 
 @app.post("/shipments/{shipment_id}/reject", response_model=AgentResult, dependencies=_AUTH)
 def reject(
     shipment_id: str,
     request: RejectRequest,
+    response: Response,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
 ) -> AgentResult:
+    """Record the human rejection — the mirror of approve,
+    including its ``Idempotency-Key`` contract (replay returns the
+    recorded rejection; an approval attempted under the rejection's
+    spent key is a 409)."""
+    from .service import DecisionConflictError
+
     try:
-        return service.reject(
+        result = service.reject(
             shipment_id,
             reviewer=_decision_actor(request),
             reason=request.reason,
             tenant_id=x_tenant_id,
+            idempotency_key=idempotency_key,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except DecisionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if result.idempotent_replay:
+        response.headers["X-Idempotent-Replay"] = "true"
+    return result
 
 
 @app.get("/shipments/{shipment_id}/dispatch", dependencies=_AUTH)
