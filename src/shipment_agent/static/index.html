@@ -99,6 +99,20 @@
     </div>
   </section>
 
+  <section class="card">
+    <h2>Approval queue — awaiting decisions</h2>
+    <p class="note">The worklist from <code>GET /queue</code>: severity first, then oldest, with the flags an
+    approver scans for. Load any item to inspect its full result below.</p>
+    <div class="row" style="margin:10px 0">
+      <button class="primary" id="queue-refresh">Refresh queue</button>
+      <span class="note" id="queue-note"></span>
+    </div>
+    <table>
+      <thead><tr><th>Shipment</th><th>Severity</th><th>Exception</th><th>Lane</th><th>Age</th><th>Flags</th><th></th></tr></thead>
+      <tbody id="queue-body"><tr><td colspan="7" class="note">Loading…</td></tr></tbody>
+    </table>
+  </section>
+
   <section class="card hidden" id="result">
     <h2>2 · Agent result</h2>
     <p>
@@ -399,6 +413,7 @@ $('analyze').addEventListener('click', async () => {
   });
   if (!res.ok) { $('error').textContent = 'Analyze failed (' + res.status + '): ' + await res.text(); return; }
   render(await res.json());
+  loadQueue();
 });
 
 async function decide(path) {
@@ -413,6 +428,7 @@ async function decide(path) {
   setStatus(result.approval_status);
   if (currentMeta) logEvent(currentId, currentMeta.type, currentMeta.severity,
     (result.approval_status === 'approved' ? 'Approved' : 'Rejected') + ' by ' + reviewer);
+  loadQueue();
 }
 $('approve').addEventListener('click', () => decide('approve'));
 $('reject').addEventListener('click', () => decide('reject'));
@@ -439,10 +455,92 @@ async function loadEvals() {
   }
 }
 
-$('apikey').addEventListener('change', () => { loadSamples(); loadEvals(); });
+function formatAge(seconds) {
+  if (seconds === null || seconds === undefined) return '—';
+  const total = Math.max(0, Math.round(seconds));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  if (hours >= 24) return Math.floor(hours / 24) + 'd ' + (hours % 24) + 'h';
+  if (hours > 0) return hours + 'h ' + minutes + 'm';
+  if (minutes > 0) return minutes + 'm';
+  return total + 's';
+}
+
+function queueFlagLabels(flags) {
+  const labels = [];
+  if (!flags) return labels;
+  if (flags.cross_check_disagreement) labels.push('⚠ cross-check disagreement (' + (flags.cross_check_resolution || 'unresolved') + ')');
+  if (flags.reviewer_blocked) labels.push('⛔ reviewer blocked');
+  else if (flags.reviewer_verdict === 'concerns') labels.push('reviewer concerns');
+  if (!flags.guardrails_passed) labels.push('❌ guardrails failed');
+  if (flags.repair_attempted) labels.push(flags.repaired ? 'repair applied' : 'repair attempted');
+  if (flags.needs_information) labels.push('information needed');
+  if (flags.eligible_for_auto_approval) labels.push('auto-approval eligible (recommendation only)');
+  return labels;
+}
+
+async function loadQueue() {
+  const body = $('queue-body');
+  const note = $('queue-note');
+  try {
+    const res = await fetch('/queue', {headers: apiHeaders()});
+    if (!res.ok) throw new Error('queue failed (' + res.status + ')');
+    const data = await res.json();
+    note.textContent = data.count + ' awaiting';
+    if (!data.queue.length) {
+      body.innerHTML = '<tr><td colspan="7" class="note">Queue is empty — analyze a shipment above and it will wait here for a decision.</td></tr>';
+      return;
+    }
+    body.innerHTML = '';
+    data.queue.forEach(item => {
+      const tr = document.createElement('tr');
+      const flags = queueFlagLabels(item.flags);
+      const cells = [
+        item.shipment_id,
+        null,  // severity badge, built below
+        item.exception_type,
+        item.lane || ((item.origin || '') + ' → ' + (item.destination || '')),
+        formatAge(item.age_seconds),
+        flags.length ? flags.join(' · ') : '—',
+      ];
+      cells.forEach((text, i) => {
+        const td = document.createElement('td');
+        if (i === 1) {
+          const badge = document.createElement('span');
+          badge.className = 'badge sev-' + item.severity;
+          badge.textContent = item.severity;
+          td.appendChild(badge);
+        } else {
+          td.textContent = text;
+        }
+        tr.appendChild(td);
+      });
+      const td = document.createElement('td');
+      const btn = document.createElement('button');
+      btn.textContent = 'Load';
+      btn.addEventListener('click', async () => {
+        $('error').textContent = '';
+        const res = await fetch('/shipments/' + encodeURIComponent(item.shipment_id), {headers: apiHeaders()});
+        if (!res.ok) { $('error').textContent = 'Load failed (' + res.status + '): ' + await res.text(); return; }
+        render(await res.json());
+        $('result').scrollIntoView({behavior: 'smooth'});
+      });
+      td.appendChild(btn);
+      tr.appendChild(td);
+      body.appendChild(tr);
+    });
+  } catch (e) {
+    body.innerHTML = '<tr><td colspan="7" class="note">Queue unavailable — ' + e.message + '</td></tr>';
+    note.textContent = '';
+  }
+}
+$('queue-refresh').addEventListener('click', loadQueue);
+
+$('apikey').addEventListener('change', () => { loadSamples(); loadEvals(); loadQueue(); });
 
 loadSamples();
 loadEvals();
+loadQueue();
 </script>
 </body>
 </html>
