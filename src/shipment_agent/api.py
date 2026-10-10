@@ -317,6 +317,29 @@ def approval_queue(
     }
 
 
+@app.post("/queue/sla-sweep", dependencies=_AUTH)
+def sla_breach_sweep(
+    x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
+) -> dict:
+    """Run one SLA breach sweep over the caller's tenant queue.
+
+    The sweep is the documented observer of the queue's SLA flags:
+    for every awaiting shipment whose wait has blown its severity's
+    budget and which has not yet fired, it delivers one signed
+    ``sla_breach`` webhook event (opt-in: ``SLA_BREACH_WEBHOOK=on``,
+    to ``SLA_BREACH_WEBHOOK_URL`` or the approval webhook URL) and
+    ledgers the attempt on the record. Dedupe is per shipment per
+    analysis — a second sweep fires nothing for the same breach.
+    The response lists what this sweep observed: ``outcome`` is
+    ``sent`` / ``failed`` for fired events, ``disabled`` /
+    ``not_configured`` when the channel is off (observed, marked
+    nothing). Operators running the multi-tenant sweep use the CLI
+    (``shipment-agent sla-sweep``); this endpoint is the
+    single-tenant shape of the same sweep."""
+    entries = service.sla_breach_sweep(tenant_id=x_tenant_id)
+    return {"count": len(entries), "events": entries}
+
+
 @app.get("/carriers/scorecards", dependencies=_AUTH)
 def carrier_scorecards(
     x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),

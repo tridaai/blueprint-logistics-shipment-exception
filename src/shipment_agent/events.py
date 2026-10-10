@@ -16,6 +16,11 @@ Event types: ``run_started``, ``node_started``, ``node_finished``
 ``run_failed`` (carries the clean error message). Events fire in the
 offline fallback exactly as in provider mode — durations are real
 wall-clock measurements either way.
+
+One further type is emitted outside a run: ``sla_breach``, by the
+service's queue sweep (``service.sla_breach_sweep``) when a waiting
+shipment's age first blows its severity's SLA budget — the stream
+counterpart of the signed ``sla_breach`` webhook event.
 """
 
 from __future__ import annotations

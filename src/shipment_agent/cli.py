@@ -9,6 +9,9 @@ Usage:
     shipment-agent --all --concurrency 4 # the batch, four at a time
     shipment-agent dispatch-retries [--once] [--interval SECONDS]
                                      # the webhook retry worker loop
+    shipment-agent sla-sweep         # one SLA breach sweep: fire a
+                                     # signed sla_breach event for each
+                                     # newly-breaching queue item
 
 The default data source is the sample set bundled inside the package, so
 this works identically from a source checkout and a pip install.
@@ -229,10 +232,66 @@ def _run_dispatch_retries(argv: list[str]) -> int:
     return 0
 
 
+def _run_sla_sweep(argv: list[str]) -> int:
+    """One SLA breach sweep as a process: ``shipment-agent sla-sweep``.
+
+    Runs :meth:`ShipmentService.sla_breach_sweep` against the
+    environment-configured service (the real store — DATABASE_URL /
+    STATE_DB_PATH), across every tenant's queue: each awaiting
+    shipment whose wait has blown its severity's budget and which
+    has not yet fired gets one signed ``sla_breach`` webhook event,
+    ledgered on its record. The cron shape — an operator (or a
+    timer) runs it as often as the tightest budget deserves.
+
+    Exit codes: 0 after a sweep (whatever it observed); 2 when
+    there is nothing for a sweep to act on (the event channel is
+    off — SLA_BREACH_WEBHOOK unset — or the store is the in-memory
+    test double, whose records die with this process).
+    """
+    parser = argparse.ArgumentParser(
+        prog="shipment-agent sla-sweep",
+        description="Fire signed sla_breach webhook events for newly-breaching queue items",
+    )
+    parser.parse_args(argv)
+
+    from .service import sla_breach_webhook_enabled
+
+    load_dotenv()
+    if not sla_breach_webhook_enabled():
+        print(
+            "sla-sweep: SLA_BREACH_WEBHOOK is not 'on' — the breach "
+            "event channel is opt-in and currently off.",
+            file=sys.stderr,
+        )
+        return 2
+    service = build_service_from_env()
+    if type(service._get_store()).__name__ == "InMemoryStore":
+        print(
+            "sla-sweep: the store is the in-memory test double "
+            "(no DATABASE_URL / STATE_DB_PATH) — its records do not "
+            "survive this process, so there is nothing to sweep.",
+            file=sys.stderr,
+        )
+        return 2
+
+    entries = service.sla_breach_sweep()
+    for entry in entries:
+        print(
+            f"sla-sweep: {entry['shipment_id']} (tenant {entry['tenant_id']}, "
+            f"{entry['severity']}, {entry['overdue_seconds']:g}s over a "
+            f"{entry['sla_hours']:g}h budget) -> {entry['outcome']}"
+        )
+    fired = sum(1 for e in entries if e["outcome"] in ("sent", "failed"))
+    print(f"sla-sweep: {len(entries)} new breach(es) observed, {fired} event(s) fired")
+    return 0
+
+
 def main() -> None:
     argv = sys.argv[1:]
     if argv and argv[0] == "dispatch-retries":
         raise SystemExit(_run_dispatch_retries(argv[1:]))
+    if argv and argv[0] == "sla-sweep":
+        raise SystemExit(_run_sla_sweep(argv[1:]))
     parser = argparse.ArgumentParser(description="Shipment Exception Agent CLI (offline, synthetic data)")
     parser.add_argument("--file", type=Path, default=None, help="Path to a shipments JSON file (default: bundled samples)")
     parser.add_argument("--index", type=int, default=0, help="Which sample shipment to run")

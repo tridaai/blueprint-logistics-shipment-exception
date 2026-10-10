@@ -67,6 +67,14 @@ class ApprovalRecord:
     # the same key for the same shipment returns this record instead
     # of re-running the pipeline.
     idempotency_key: str | None = None
+    # SLA breach event bookkeeping (see service.sla_breach_sweep):
+    # when the sweep first fired the record's signed ``sla_breach``
+    # webhook event (None = never fired — the dedupe marker, so a
+    # breach pages once, not on every sweep), and that event's own
+    # delivery ledger — kept separate from ``dispatch_attempts``,
+    # which belongs to the approval packet's delivery alone.
+    sla_breach_event_at: str | None = None
+    sla_dispatch_attempts: list[dict] = field(default_factory=list)
     # ISO-8601 UTC timestamps, stamped by the service ("" until set —
     # older rows simply have none). The audit export reads them.
     created_at: str = ""  # when the analysis was recorded
@@ -187,6 +195,8 @@ def _record_to_dict(record: ApprovalRecord) -> dict:
         "dispatch_status": record.dispatch_status,
         "dispatch_attempts": record.dispatch_attempts,
         "idempotency_key": record.idempotency_key,
+        "sla_breach_event_at": record.sla_breach_event_at,
+        "sla_dispatch_attempts": record.sla_dispatch_attempts,
         "created_at": record.created_at,
         "decided_at": record.decided_at,
     }
@@ -205,6 +215,8 @@ def _record_from_dict(data: dict) -> ApprovalRecord:
         dispatch_status=data.get("dispatch_status"),
         dispatch_attempts=data.get("dispatch_attempts") or [],
         idempotency_key=data.get("idempotency_key"),
+        sla_breach_event_at=data.get("sla_breach_event_at"),
+        sla_dispatch_attempts=data.get("sla_dispatch_attempts") or [],
         created_at=data.get("created_at", ""),
         decided_at=data.get("decided_at", ""),
     )
@@ -318,7 +330,7 @@ class SQLiteStore:
         "tenant_id, shipment_id, result_json, shipment_json, approver, "
         "approved, rejected_by, reject_reason, dispatch_status, "
         "approve_reason, created_at, decided_at, dispatch_attempts_json, "
-        "idempotency_key"
+        "idempotency_key, sla_breach_event_at, sla_dispatch_attempts_json"
     )
 
     def __init__(self, path: Path | str) -> None:
@@ -374,6 +386,14 @@ class SQLiteStore:
                 conn.execute(
                     "ALTER TABLE approvals ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'"
                 )
+            if "sla_breach_event_at" not in columns:
+                conn.execute(
+                    "ALTER TABLE approvals ADD COLUMN sla_breach_event_at TEXT"
+                )
+            if "sla_dispatch_attempts_json" not in columns:
+                conn.execute(
+                    "ALTER TABLE approvals ADD COLUMN sla_dispatch_attempts_json TEXT NOT NULL DEFAULT '[]'"
+                )
             # Tenancy changed the identity: a table created before it
             # keys rows by shipment_id alone, so two tenants' records
             # with the same id would shadow each other. Rebuild such a
@@ -403,6 +423,8 @@ class SQLiteStore:
                         decided_at TEXT NOT NULL DEFAULT '',
                         dispatch_attempts_json TEXT NOT NULL DEFAULT '[]',
                         idempotency_key TEXT,
+                        sla_breach_event_at TEXT,
+                        sla_dispatch_attempts_json TEXT NOT NULL DEFAULT '[]',
                         PRIMARY KEY (tenant_id, shipment_id)
                     )
                     """
@@ -426,7 +448,7 @@ class SQLiteStore:
             conn.execute(
                 f"""
                 INSERT OR REPLACE INTO approvals ({self._COLUMNS})
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.tenant_id,
@@ -443,6 +465,8 @@ class SQLiteStore:
                     record.decided_at,
                     json.dumps(record.dispatch_attempts),
                     record.idempotency_key,
+                    record.sla_breach_event_at,
+                    json.dumps(record.sla_dispatch_attempts),
                 ),
             )
 
@@ -460,6 +484,12 @@ class SQLiteStore:
                 attempts = json.loads(row["dispatch_attempts_json"]) or []
             except json.JSONDecodeError:
                 attempts = []
+        sla_attempts: list[dict] = []
+        if "sla_dispatch_attempts_json" in keys and row["sla_dispatch_attempts_json"]:
+            try:
+                sla_attempts = json.loads(row["sla_dispatch_attempts_json"]) or []
+            except json.JSONDecodeError:
+                sla_attempts = []
         return ApprovalRecord(
             result=AgentResult.model_validate_json(row["result_json"]),
             tenant_id=(
@@ -476,6 +506,10 @@ class SQLiteStore:
             dispatch_status=row["dispatch_status"] if "dispatch_status" in keys else None,
             dispatch_attempts=attempts,
             idempotency_key=row["idempotency_key"] if "idempotency_key" in keys else None,
+            sla_breach_event_at=(
+                row["sla_breach_event_at"] if "sla_breach_event_at" in keys else None
+            ),
+            sla_dispatch_attempts=sla_attempts,
             created_at=row["created_at"] if "created_at" in keys else "",
             decided_at=row["decided_at"] if "decided_at" in keys else "",
         )

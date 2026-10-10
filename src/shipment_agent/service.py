@@ -35,6 +35,16 @@ reason (``<tenant>:<shipment_id>``). The one deliberate exception is
 the dispatch-retry sweep: an operator process that works every
 tenant's failed deliveries, resolving each record's own tenant per
 retry.
+
+**SLA breach events.** The queue flags a shipment whose wait has
+blown its severity's age budget; :meth:`ShipmentService.sla_breach_sweep`
+is the documented observer that acts on the flag — the first time a
+sweep sees a breach, it fires one signed ``sla_breach`` webhook
+event (opt-in via ``SLA_BREACH_WEBHOOK``), ledgered on the record's
+own SLA ledger and deduped by its ``sla_breach_event_at`` marker.
+Operators run the sweep on a timer (``shipment-agent sla-sweep``,
+or ``POST /queue/sla-sweep`` for one tenant) next to the retry
+worker; no request path ever blocks on it.
 """
 
 from __future__ import annotations
@@ -50,6 +60,7 @@ from dataclasses import dataclass, field
 
 from .checkpoints import get_checkpointer
 from .config import DEFAULT_TENANT_ID, env_float, env_int, env_str, load_dotenv
+from .events import RunEvent
 from .graph import resume_approval, run_shipment
 from .insights import (
     all_carrier_scorecards,
@@ -189,29 +200,18 @@ def _parse_iso(value: str | None):
         return None
 
 
-def attempt_webhook_dispatch(record: ApprovalRecord) -> DispatchOutcome | None:
-    """Make ONE approval-webhook delivery attempt.
+def _deliver_webhook_payload(payload: dict, url: str) -> DispatchOutcome:
+    """POST one JSON payload to a webhook URL, signed when configured.
 
-    Returns ``None`` when no URL is configured (the default: no
-    external action at all) — no attempt happened, so nothing is
-    ledgered. Otherwise returns the outcome in full: a 2xx is
-    ``sent``; a non-2xx or any transport error is ``failed`` with
-    the status/error recorded — a failed dispatch never raises and
-    never undoes the approval it follows.
+    The transport shared by every outbound event (the approval
+    packet, the SLA breach event): when ``ACTION_WEBHOOK_SECRET``
+    is set the delivery is signed (``X-Trida-Signature``, see
+    :func:`sign_webhook_body`) whichever URL the event targets.
+    A 2xx is ``sent``; a non-2xx or any transport error is
+    ``failed`` with the status/error recorded — delivery never
+    raises, and the caller ledgers the outcome.
     """
     load_dotenv()
-    url = env_str("ACTION_WEBHOOK_URL")
-    if not url:
-        return None
-    result = record.result
-    payload = {
-        "shipment_id": result.shipment_id,
-        "approval_status": result.approval_status,
-        "decided_by": result.decided_by,
-        "classification": result.classification.model_dump(mode="json"),
-        "draft": {"subject": result.draft.subject, "body": result.draft.body},
-        "claim_packet": result.draft.claim_packet,
-    }
     body = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     signature_id = None
@@ -252,6 +252,136 @@ def attempt_webhook_dispatch(record: ApprovalRecord) -> DispatchOutcome | None:
             signature_id=signature_id,
             error=f"{type(exc).__name__}: {exc}",
         )
+
+
+def attempt_webhook_dispatch(record: ApprovalRecord) -> DispatchOutcome | None:
+    """Make ONE approval-webhook delivery attempt.
+
+    Returns ``None`` when no URL is configured (the default: no
+    external action at all) — no attempt happened, so nothing is
+    ledgered. Otherwise returns the outcome in full: a 2xx is
+    ``sent``; a non-2xx or any transport error is ``failed`` with
+    the status/error recorded — a failed dispatch never raises and
+    never undoes the approval it follows.
+    """
+    load_dotenv()
+    url = env_str("ACTION_WEBHOOK_URL")
+    if not url:
+        return None
+    result = record.result
+    payload = {
+        "shipment_id": result.shipment_id,
+        "approval_status": result.approval_status,
+        "decided_by": result.decided_by,
+        "classification": result.classification.model_dump(mode="json"),
+        "draft": {"subject": result.draft.subject, "body": result.draft.body},
+        "claim_packet": result.draft.claim_packet,
+    }
+    return _deliver_webhook_payload(payload, url)
+
+
+# ---------------------------------------------------------------------------
+# SLA breach events: the queue's own alarm, on the same signed channel
+# ---------------------------------------------------------------------------
+
+
+def sla_breach_webhook_enabled() -> bool:
+    """Whether SLA breach events fire at all (opt-in, default off).
+
+    ``SLA_BREACH_WEBHOOK=on`` turns the queue sweep's observations
+    into outbound events. Off (the default), the sweep still reports
+    the breaches it sees — it just sends nothing, like every other
+    external action in this codebase: configured, never assumed.
+    """
+    load_dotenv()
+    return (env_str("SLA_BREACH_WEBHOOK") or "").strip().lower() in (
+        "on",
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def sla_breach_webhook_url() -> str | None:
+    """Where SLA breach events are delivered.
+
+    ``SLA_BREACH_WEBHOOK_URL`` when set (a paging/on-call endpoint
+    separate from the system of record), else the approval
+    webhook's ``ACTION_WEBHOOK_URL`` — one receiver may take both
+    event shapes and route on the body's ``event`` field.
+    """
+    load_dotenv()
+    return env_str("SLA_BREACH_WEBHOOK_URL") or env_str("ACTION_WEBHOOK_URL")
+
+
+def build_sla_breach_payload(
+    record: ApprovalRecord, queue_item: dict, detected_at: str
+) -> dict:
+    """The ``sla_breach`` event body for one breaching queue item.
+
+    Everything a receiver needs to act without calling back: which
+    shipment, whose tenant, what severity and budget, how long it
+    has waited and by how much it is over, and the lane/carrier
+    context from the queue item itself.
+    """
+    return {
+        "event": "sla_breach",
+        "shipment_id": record.result.shipment_id,
+        "tenant_id": record.tenant_id,
+        "exception_type": queue_item["exception_type"],
+        "severity": queue_item["severity"],
+        "carrier": queue_item["carrier"],
+        "lane": queue_item["lane"],
+        "sla_hours": queue_item["sla_hours"],
+        "age_seconds": queue_item["age_seconds"],
+        "overdue_seconds": queue_item["sla_overdue_seconds"],
+        "created_at": record.created_at,
+        "detected_at": detected_at,
+    }
+
+
+def attempt_sla_breach_dispatch(
+    record: ApprovalRecord, queue_item: dict, detected_at: str
+) -> DispatchOutcome | None:
+    """Make ONE ``sla_breach`` delivery attempt for a breaching record.
+
+    Returns ``None`` when no URL resolves (see
+    :func:`sla_breach_webhook_url`) — no attempt happened, so
+    nothing is ledgered and the breach is not marked as fired.
+    Signed exactly like the approval packet when
+    ``ACTION_WEBHOOK_SECRET`` is configured.
+    """
+    url = sla_breach_webhook_url()
+    if not url:
+        return None
+    payload = build_sla_breach_payload(record, queue_item, detected_at)
+    return _deliver_webhook_payload(payload, url)
+
+
+def record_sla_attempt(
+    record: ApprovalRecord, outcome: DispatchOutcome, *, at: str
+) -> dict:
+    """Ledger one ``sla_breach`` delivery attempt on the record.
+
+    The event keeps its OWN ledger (``sla_dispatch_attempts``): the
+    approval packet's ``dispatch_attempts`` / ``dispatch_status``
+    describe that delivery alone and are never touched here. The
+    first attempt also stamps ``sla_breach_event_at`` — the marker
+    the sweep dedupes on, so the event fires once per shipment per
+    analysis however often the sweep runs. Returns the entry.
+    """
+    entry = {
+        "attempt": len(record.sla_dispatch_attempts) + 1,
+        "at": at,
+        "outcome": outcome.status,
+        "http_status": outcome.http_status,
+        "signature_id": outcome.signature_id,
+        "error": outcome.error,
+    }
+    record.sla_dispatch_attempts.append(entry)
+    if record.sla_breach_event_at is None:
+        record.sla_breach_event_at = at
+    return entry
 
 
 def record_dispatch_attempt(record: ApprovalRecord, outcome: DispatchOutcome) -> dict:
@@ -1049,6 +1179,124 @@ class ShipmentService:
         from .insights import queue_summary
 
         return queue_summary(self.approval_queue(tenant_id=tenant_id))
+
+    def sla_breach_sweep(
+        self,
+        *,
+        now=None,
+        event_sink: EventSink | None = None,
+        tenant_id: str | None = None,
+    ) -> list[dict]:
+        """Observe the queue; fire one ``sla_breach`` event per new breach.
+
+        The sweep is the SLA story's actor, the way the retry worker
+        is the delivery ledger's: the queue has always *flagged*
+        breaches, and this is what makes one page somebody. For
+        every awaiting shipment whose wait has blown its severity's
+        budget and whose record has not yet fired, one signed
+        ``sla_breach`` webhook event is delivered (see
+        :func:`attempt_sla_breach_dispatch`) and ledgered on the
+        record's own SLA ledger; the record's
+        ``sla_breach_event_at`` marker dedupes, so repeated sweeps
+        never re-fire — the event is "first observed", once per
+        shipment per analysis.
+
+        The feature is opt-in (``SLA_BREACH_WEBHOOK=on``): with it
+        off, or with no webhook URL configured, the sweep still
+        *reports* the breaches it observed (``outcome``:
+        ``disabled`` / ``not_configured``) and marks nothing, so
+        enabling the channel later fires for breaches still open.
+        A failed delivery IS marked: the event fired once and its
+        ledger entry carries the failure — the sweep is an alarm,
+        not a retry loop (deliveries that must land use the approval
+        packet's budget machinery instead).
+
+        Scope: with ``tenant_id`` the sweep covers that tenant's
+        queue (the API passes the caller's tenant); without one it
+        covers every tenant's queue — the operator shape the CLI
+        runs. A ``sla_breach`` stream event joins each firing when
+        an ``event_sink`` is given. Returns one entry per newly
+        observed breach: ``{"shipment_id", "tenant_id", "outcome",
+        ...}``.
+        """
+        from datetime import datetime, timezone
+
+        from .insights import approval_queue as _queue_projection
+        from .insights import sla_thresholds_from_env
+
+        moment = now or datetime.now(timezone.utc)
+        detected_at = moment.isoformat()
+        store = self._get_store()
+        if tenant_id is not None:
+            records = store.records(tenant_id=resolve_tenant_id(tenant_id))
+        else:
+            records = store.records()
+        by_key = {
+            (record.tenant_id, record.result.shipment_id): record
+            for record in records
+        }
+        # The queue projection runs per tenant partition: severity /
+        # age ordering is a within-tenant notion, and the sweep must
+        # never compute one tenant's queue from another's records.
+        partitions: dict[str, list[ApprovalRecord]] = {}
+        for record in records:
+            partitions.setdefault(record.tenant_id, []).append(record)
+        thresholds = sla_thresholds_from_env()
+        enabled = sla_breach_webhook_enabled()
+        entries: list[dict] = []
+        for partition_tenant, partition_records in partitions.items():
+            items = _queue_projection(
+                partition_records, now=moment, sla_hours=thresholds
+            )
+            for item in items:
+                if not item["sla_breach"]:
+                    continue
+                record = by_key.get((partition_tenant, item["shipment_id"]))
+                if record is None or record.sla_breach_event_at is not None:
+                    continue  # already fired for this analysis — dedupe
+                if record.result.approval_status != "awaiting_approval":
+                    continue  # decided between projection and firing
+                base = {
+                    "shipment_id": item["shipment_id"],
+                    "tenant_id": partition_tenant,
+                    "severity": item["severity"],
+                    "sla_hours": item["sla_hours"],
+                    "overdue_seconds": item["sla_overdue_seconds"],
+                }
+                if not enabled:
+                    entries.append({**base, "outcome": "disabled"})
+                    continue
+                outcome = attempt_sla_breach_dispatch(record, item, detected_at)
+                if outcome is None:
+                    entries.append({**base, "outcome": "not_configured"})
+                    continue
+                entry = record_sla_attempt(record, outcome, at=detected_at)
+                store.save(record)
+                if event_sink is not None:
+                    event_sink.emit(
+                        RunEvent(
+                            type="sla_breach",
+                            shipment_id=item["shipment_id"],
+                            detail={
+                                "tenant_id": partition_tenant,
+                                "severity": item["severity"],
+                                "sla_hours": item["sla_hours"],
+                                "overdue_seconds": item["sla_overdue_seconds"],
+                                "outcome": outcome.status,
+                            },
+                        )
+                    )
+                entries.append(
+                    {
+                        **base,
+                        "outcome": outcome.status,
+                        "http_status": outcome.http_status,
+                        "signature_id": outcome.signature_id,
+                        "error": outcome.error,
+                        "attempt": entry["attempt"],
+                    }
+                )
+        return entries
 
     def carrier_scorecards(self, tenant_id: str | None = None) -> list[dict]:
         """Scorecards for every carrier in the tenant's partition,
