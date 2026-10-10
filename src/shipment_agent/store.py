@@ -4,10 +4,15 @@ Two implementations behind one small interface:
 
 - ``SQLiteStore`` — the real one. Stdlib ``sqlite3``, one local file.
   Results (as JSON) plus the decision columns (approver, approved,
-  rejected_by, reject_reason) survive process restarts: an approval
-  queue that evaporates when the server restarts is not a product.
+  approve_reason, rejected_by, reject_reason) survive process
+  restarts: an approval queue that evaporates when the server restarts
+  is not a product.
 - ``InMemoryStore`` — the test double. Same interface, no file; this
   was the only store before v2 and remains what most unit tests use.
+
+Both stores also serve the reviewer feedback loop
+(``decision_feedback``): decided records with non-empty reasons,
+newest first, for the diagnosis of the next matching case.
 
 Selection (``default_store``): ``STATE_DB_PATH`` env var — a file path
 for SQLite, or ``:memory:`` for the in-memory store. Unset, it defaults
