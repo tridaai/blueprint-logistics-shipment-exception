@@ -446,6 +446,112 @@ def escalation_digest(
     }
 
 
+# ---------------------------------------------------------------------------
+# Digest snapshots and their delta
+# ---------------------------------------------------------------------------
+
+#: The ladder's stage order — a stage "worsens" by moving right.
+_STAGE_RANK = {"within_budget": 0, "breach": 1, "escalated": 2}
+
+
+def digest_delta(previous: dict, current: dict) -> dict:
+    """What moved between two digest snapshots of one tenant.
+
+    A pure projection over snapshot entries (see
+    ``service.ShipmentService`` for their shape — counts, ids, and
+    stages only, like the digest itself):
+
+    - ``new_escalations`` — shipments standing on the escalated
+      rung now that were not escalated in the previous snapshot
+      (arrived escalated, or climbed there since).
+    - ``worsened`` / ``improved`` — shipments awaiting in both
+      snapshots whose ladder stage moved (a worsening that reached
+      the escalated rung is counted as a new escalation, not
+      double-counted here).
+    - ``resolved`` — awaiting before, gone now (decided, or no
+      longer awaiting); ``new_awaiting`` — the reverse, minus the
+      ones already named as new escalations.
+    - ``breaches_fired_since`` / ``escalations_fired_since`` — the
+      ladder firings the current snapshot's window carries that
+      the previous one's did not: what the ladder actually did
+      between the two pictures.
+    - ``rotation`` — the tenant's key-rotation window: opened,
+      closed, or turned ``ready_to_close`` between the snapshots.
+    """
+    prev_items = previous.get("items") or {}
+    curr_items = current.get("items") or {}
+
+    def rank(stage: str | None) -> int:
+        return _STAGE_RANK.get(stage or "", -1)
+
+    new_escalations = sorted(
+        sid
+        for sid, stage in curr_items.items()
+        if stage == "escalated" and prev_items.get(sid) != "escalated"
+    )
+    worsened = sorted(
+        sid
+        for sid in curr_items.keys() & prev_items.keys()
+        if rank(curr_items[sid]) > rank(prev_items[sid])
+        and curr_items[sid] != "escalated"
+    )
+    improved = sorted(
+        sid
+        for sid in curr_items.keys() & prev_items.keys()
+        if rank(curr_items[sid]) < rank(prev_items[sid])
+    )
+    resolved = sorted(prev_items.keys() - curr_items.keys())
+    new_awaiting = sorted(
+        (curr_items.keys() - prev_items.keys()) - set(new_escalations)
+    )
+    stages = {
+        stage: {
+            "previous": (previous.get("stages") or {}).get(stage, 0),
+            "current": (current.get("stages") or {}).get(stage, 0),
+        }
+        for stage in ("within_budget", "breach", "escalated")
+    }
+
+    def _rotation_state(entry: dict) -> tuple[bool, bool]:
+        rotation = entry.get("rotation") or {}
+        return bool(rotation.get("grace_open")), bool(
+            rotation.get("ready_to_close")
+        )
+
+    prev_open, prev_ready = _rotation_state(previous)
+    curr_open, curr_ready = _rotation_state(current)
+    return {
+        "tenant_id": current.get("tenant_id"),
+        "since": previous.get("generated_at"),
+        "until": current.get("generated_at"),
+        "awaiting": {
+            "previous": previous.get("awaiting", 0),
+            "current": current.get("awaiting", 0),
+        },
+        "stages": stages,
+        "new_escalations": new_escalations,
+        "worsened": worsened,
+        "improved": improved,
+        "resolved": resolved,
+        "new_awaiting": new_awaiting,
+        "breaches_fired_since": sorted(
+            set(current.get("breaches_fired") or [])
+            - set(previous.get("breaches_fired") or [])
+        ),
+        "escalations_fired_since": sorted(
+            set(current.get("escalations_fired") or [])
+            - set(previous.get("escalations_fired") or [])
+        ),
+        "rotation": {
+            "opened": curr_open and not prev_open,
+            "closed": prev_open and not curr_open,
+            "turned_ready_to_close": bool(
+                curr_open and prev_open and curr_ready and not prev_ready
+            ),
+        },
+    }
+
+
 def queue_summary(items: list[dict]) -> dict:
     """The queue's own health, over :func:`approval_queue` items:
     depth, SLA breaches, and the age/severity mix — the numbers the

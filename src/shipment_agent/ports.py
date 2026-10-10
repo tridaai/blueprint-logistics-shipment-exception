@@ -166,6 +166,25 @@ class Store(Protocol):
         self, tenant_id: str, policy_id: str
     ) -> list[dict]: ...
 
+    # Digest snapshots: the escalation digest's dated series. The
+    # summaries row above holds only the latest digest (replaced
+    # per sweep); these rows keep one snapshot per tenant per
+    # stored digest, so GET /queue/digest?compare=previous can name
+    # what moved. Same ledger idiom as the policy history —
+    # append-only, partitioned by tenant, metadata and a content
+    # hash, never shipment content — with one deliberate
+    # difference: retention. A digest is an operational picture,
+    # not an audit trail, so each tenant's series is pruned to the
+    # newest DIGEST_SNAPSHOT_RETENTION entries on write.
+
+    def record_digest_snapshot(self, tenant_id: str, entry: dict) -> None: ...
+
+    def digest_snapshots(
+        self, tenant_id: str, limit: int | None = None
+    ) -> list[dict]: ...
+
+    def digest_snapshot_tenants(self) -> list[str]: ...
+
 
 class ObjectStore(Protocol):
     """The document-storage seam: shipment documents as objects.

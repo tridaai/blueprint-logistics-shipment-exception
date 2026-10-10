@@ -78,6 +78,9 @@ from .insights import (
     carrier_scorecard as _carrier_scorecard,
 )
 from .insights import (
+    digest_delta as _digest_delta,
+)
+from .insights import (
     fleet_baseline as _fleet_baseline,
 )
 from .insights import (
@@ -1803,6 +1806,23 @@ class ShipmentService:
         wide by design: the digest is an operator artefact, and its
         per-tenant sections are named inside it.
         """
+        digest, _snapshots = self._compose_digest_and_snapshots(now)
+        return digest
+
+    def _compose_digest_and_snapshots(self, now=None) -> tuple[dict, dict]:
+        """The digest, plus its per-tenant snapshot entries.
+
+        A snapshot is the digest's slice of one tenant, kept as a
+        dated series (see :meth:`_store_digest_snapshots`): stage
+        counts, the awaiting shipments' ids and stages, the
+        window's firings by id, the oldest waiters, the rotation
+        window's state — counts and ids only, like the digest
+        itself, plus a SHA-256 of the entry's canonical form (the
+        ledger discipline: content identified by hash, the entry
+        itself metadata). Tenants snapshotted: every tenant with
+        a queue partition, plus any tenant whose rotation window
+        stands open (its state can move with an empty queue).
+        """
         from datetime import datetime, timezone
 
         from .config import (
@@ -1857,7 +1877,7 @@ class ShipmentService:
                 )
             )
             rotations.append(status)
-        return escalation_digest(
+        digest = escalation_digest(
             queues,
             records,
             now=moment,
@@ -1866,6 +1886,83 @@ class ShipmentService:
             escalation_factors=factors,
             tenant_staleness=self.worker_tenant_staleness(now=moment),
         )
+        rotation_by_tenant = {s["tenant_id"]: s for s in rotations}
+        snapshot_tenants = set(queues) | {
+            tenant
+            for tenant, status in rotation_by_tenant.items()
+            if status.get("grace_open")
+        }
+        snapshots = {
+            tenant: self._digest_snapshot(
+                tenant,
+                queues.get(tenant, []),
+                digest,
+                rotation_by_tenant.get(tenant),
+            )
+            for tenant in sorted(snapshot_tenants)
+        }
+        return digest, snapshots
+
+    @staticmethod
+    def _digest_snapshot(
+        tenant: str, items: list[dict], digest: dict, rotation_status: dict | None
+    ) -> dict:
+        """One tenant's snapshot entry from a composed digest."""
+        stages = {"within_budget": 0, "breach": 0, "escalated": 0}
+        item_stages: dict[str, str] = {}
+        for item in items:
+            stages[item["sla_stage"]] = stages.get(item["sla_stage"], 0) + 1
+            item_stages[item["shipment_id"]] = item["sla_stage"]
+        entry = {
+            "tenant_id": tenant,
+            "generated_at": digest["generated_at"],
+            "awaiting": len(items),
+            "stages": stages,
+            "items": item_stages,
+            "breaches_fired": sorted(
+                e["shipment_id"]
+                for e in digest["breaches_fired"]
+                if e["tenant_id"] == tenant
+            ),
+            "escalations_fired": sorted(
+                e["shipment_id"]
+                for e in digest["escalations_fired"]
+                if e["tenant_id"] == tenant
+            ),
+            "oldest_waiter_per_severity": (
+                digest["oldest_waiter_per_severity"].get(tenant) or {}
+            ),
+            "rotation": (
+                {
+                    "grace_open": True,
+                    "ready_to_close": rotation_status.get("ready_to_close"),
+                }
+                if rotation_status and rotation_status.get("grace_open")
+                else None
+            ),
+        }
+        entry["content_hash"] = hashlib.sha256(
+            json.dumps(entry, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        return entry
+
+    def _store_digest_snapshots(self, snapshots: dict) -> None:
+        """Record each tenant's digest snapshot in its series.
+
+        Stored AFTER the digest itself, and with the same posture
+        as :meth:`_store_queue_digest`: a snapshot store failure
+        degrades silently — the digest already served its shift,
+        and the next sweep's snapshot simply becomes the series'
+        next entry (the delta spans the gap and says so through
+        its ``since``)."""
+        record = getattr(self._get_store(), "record_digest_snapshot", None)
+        if not callable(record):
+            return
+        for tenant, entry in snapshots.items():
+            try:
+                record(tenant, entry)
+            except Exception:
+                continue
 
     def _store_queue_digest(self, digest: dict) -> None:
         """Leave the composed digest on its summary row.
@@ -1881,7 +1978,7 @@ class ShipmentService:
         except Exception:  # a projection never breaks the sweep
             pass
 
-    def queue_digest(self, now=None) -> dict:
+    def queue_digest(self, now=None, compare: bool = False) -> dict:
         """The escalation digest, pull-first.
 
         Serves the summary row the sweep stored (``stored``: True,
@@ -1890,16 +1987,109 @@ class ShipmentService:
         one (or on a store without summary rows) the digest is
         composed on read instead (``stored``: False): the content
         is the same deterministic projection either way, only its
-        freshness differs, and the flag says which."""
+        freshness differs, and the flag says which.
+
+        With ``compare``, the result gains a per-tenant ``delta``
+        section: what moved since the tenant's previous stored
+        snapshot (see :func:`insights.digest_delta`) — new
+        escalations, worsened and resolved shipments, the ladder
+        firings between the two pictures, the rotation window's
+        turns. A tenant with no earlier snapshot gets
+        ``available: False`` and the reason, never an invented
+        baseline."""
         read = getattr(self._get_store(), "summary", None)
+        stored = None
         if callable(read):
             try:
                 stored = read(self.DIGEST_KEY)
             except Exception:
                 stored = None
-            if stored:
-                return {**stored, "stored": True}
-        return {**self.compose_queue_digest(now=now), "stored": False}
+        if stored:
+            result = {**stored, "stored": True}
+            current = None
+        else:
+            digest, current = self._compose_digest_and_snapshots(now)
+            result = {**digest, "stored": False}
+        if compare:
+            result["delta"] = self._digest_deltas(result, current)
+        return result
+
+    def _digest_deltas(
+        self, digest: dict, current: dict | None
+    ) -> dict[str, dict]:
+        """Per-tenant since-previous deltas for a served digest.
+
+        ``current`` is the snapshot map of a just-composed digest —
+        its previous is the newest stored snapshot. When the
+        digest itself was served from the store, the newest stored
+        snapshot is its own, and the previous is the one before
+        it. Tenants are discovered from the snapshot series
+        itself, unioned with the tenants the digest names — a
+        tenant whose queue emptied between pictures appears in
+        neither of the digest's sections, and its resolution is
+        exactly what the delta exists to say.
+        """
+        read = getattr(self._get_store(), "digest_snapshots", None)
+        if not callable(read):
+            return {}
+        tenants = set(current or ())
+        list_tenants = getattr(
+            self._get_store(), "digest_snapshot_tenants", None
+        )
+        if callable(list_tenants):
+            try:
+                tenants |= set(list_tenants())
+            except Exception:
+                pass
+        tenants |= set(digest.get("oldest_waiter_per_severity") or ())
+        tenants |= {
+            e.get("tenant_id") for e in digest.get("breaches_fired") or []
+        }
+        tenants |= {
+            e.get("tenant_id") for e in digest.get("escalations_fired") or []
+        }
+        tenants |= {
+            w.get("tenant_id")
+            for w in digest.get("open_key_rotation_windows") or []
+        }
+        tenants.discard(None)
+        deltas: dict[str, dict] = {}
+        for tenant in sorted(tenants):
+            try:
+                series = read(tenant)
+            except Exception:
+                series = []
+            if current is not None:
+                curr = current.get(tenant)
+                prev = series[-1] if series else None
+            else:
+                curr = series[-1] if series else None
+                prev = series[-2] if len(series) >= 2 else None
+            if curr is None:
+                continue
+            if prev is None:
+                deltas[tenant] = {
+                    "tenant_id": tenant,
+                    "available": False,
+                    "reason": "no earlier snapshot for this tenant",
+                }
+            else:
+                deltas[tenant] = {
+                    "available": True,
+                    **_digest_delta(prev, curr),
+                }
+        return deltas
+
+    def digest_history(
+        self, tenant_id: str, limit: int | None = None
+    ) -> dict:
+        """One tenant's digest snapshot series, oldest first —
+        the dated pictures behind the delta (GET
+        /queue/digest/history). Tenant-scoped by construction:
+        a series names only its own tenant's ids and stages."""
+        read = getattr(self._get_store(), "digest_snapshots", None)
+        snapshots = read(tenant_id, limit) if callable(read) else []
+        return {"tenant_id": tenant_id, "snapshots": snapshots}
 
     def sla_breach_sweep(
         self,
@@ -2097,8 +2287,12 @@ class ShipmentService:
         # The sweep also leaves the morning picture behind: the
         # escalation digest, composed now that this sweep's own
         # firings and heartbeat are on record, stored for
-        # GET /queue/digest to pull (see compose_queue_digest).
-        self._store_queue_digest(self.compose_queue_digest(now=moment))
+        # GET /queue/digest to pull (see compose_queue_digest) —
+        # and beside it, each tenant's snapshot in the dated
+        # series the digest's since-previous delta reads.
+        digest, snapshots = self._compose_digest_and_snapshots(now=moment)
+        self._store_queue_digest(digest)
+        self._store_digest_snapshots(snapshots)
         return entries
 
     def carrier_scorecards(self, tenant_id: str | None = None) -> list[dict]:

@@ -41,6 +41,12 @@ from pathlib import Path
 from .config import DEFAULT_TENANT_ID, env_str, load_dotenv
 from .schemas import AgentResult
 
+#: How many digest snapshots each tenant's series keeps. A digest
+#: is a shift picture, not an audit trail: a month of sweeps is
+#: plenty of "what moved", and the records themselves keep the
+#: permanent story. Every store prunes to this on write.
+DIGEST_SNAPSHOT_RETENTION = 30
+
 
 @dataclass
 class ApprovalRecord:
@@ -277,6 +283,7 @@ class InMemoryStore:
         self._summaries: dict[str, dict] = {}
         self._tenant_policies: dict[tuple[str, str], dict] = {}
         self._tenant_policy_history: dict[tuple[str, str], list[dict]] = {}
+        self._digest_history: dict[str, list[dict]] = {}
         self._lock = threading.Lock()
 
     # Worker status rows (see ports.Store): one summary per worker
@@ -341,6 +348,25 @@ class InMemoryStore:
                     (tenant_id, policy_id), []
                 )
             ]
+
+    # Digest snapshots (see ports.Store): append-only per tenant,
+    # pruned to the retention window on write, read oldest first.
+    def record_digest_snapshot(self, tenant_id: str, entry: dict) -> None:
+        with self._lock:
+            series = self._digest_history.setdefault(tenant_id, [])
+            series.append(dict(entry))
+            del series[:-DIGEST_SNAPSHOT_RETENTION]
+
+    def digest_snapshots(
+        self, tenant_id: str, limit: int | None = None
+    ) -> list[dict]:
+        with self._lock:
+            series = [dict(e) for e in self._digest_history.get(tenant_id, [])]
+        return series[-limit:] if limit else series
+
+    def digest_snapshot_tenants(self) -> list[str]:
+        with self._lock:
+            return sorted(self._digest_history)
 
     def save(self, record: ApprovalRecord) -> None:
         with self._lock:
@@ -724,6 +750,63 @@ class SQLiteStore:
             ).fetchall()
         return [json.loads(row["payload_json"]) for row in rows]
 
+    # Digest snapshots (see ports.Store): a side table the store
+    # owns its DDL for, like tenant_policy_history above.
+    def _ensure_digest_history_table(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS digest_history (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            )
+            """
+        )
+
+    def record_digest_snapshot(self, tenant_id: str, entry: dict) -> None:
+        with self._connect() as conn:
+            self._ensure_digest_history_table(conn)
+            conn.execute(
+                "INSERT INTO digest_history (tenant_id, payload_json) "
+                "VALUES (?, ?)",
+                (tenant_id, json.dumps(entry)),
+            )
+            conn.execute(
+                "DELETE FROM digest_history WHERE tenant_id = ? AND seq NOT IN "
+                "(SELECT seq FROM digest_history WHERE tenant_id = ? "
+                "ORDER BY seq DESC LIMIT ?)",
+                (tenant_id, tenant_id, DIGEST_SNAPSHOT_RETENTION),
+            )
+
+    def digest_snapshots(
+        self, tenant_id: str, limit: int | None = None
+    ) -> list[dict]:
+        with self._connect() as conn:
+            self._ensure_digest_history_table(conn)
+            if limit:
+                rows = conn.execute(
+                    "SELECT payload_json FROM ("
+                    "SELECT seq, payload_json FROM digest_history "
+                    "WHERE tenant_id = ? ORDER BY seq DESC LIMIT ?"
+                    ") ORDER BY seq",
+                    (tenant_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT payload_json FROM digest_history "
+                    "WHERE tenant_id = ? ORDER BY seq",
+                    (tenant_id,),
+                ).fetchall()
+        return [json.loads(row["payload_json"]) for row in rows]
+
+    def digest_snapshot_tenants(self) -> list[str]:
+        with self._connect() as conn:
+            self._ensure_digest_history_table(conn)
+            rows = conn.execute(
+                "SELECT DISTINCT tenant_id FROM digest_history ORDER BY tenant_id"
+            ).fetchall()
+        return [row["tenant_id"] for row in rows]
+
     def save(self, record: ApprovalRecord) -> None:
 
 
@@ -1104,6 +1187,52 @@ class PostgresStore:
                 "SELECT payload FROM tenant_policy_history "
                 "WHERE tenant_id = %s AND policy_id = %s ORDER BY seq",
                 (tenant_id, policy_id),
+            ).fetchall()
+        return [row[0] for row in rows]
+
+    # Digest snapshots (see ports.Store): the digest_history table
+    # is migration 0010's; this class issues no DDL, as everywhere.
+    def record_digest_snapshot(self, tenant_id: str, entry: dict) -> None:
+        from psycopg.types.json import Jsonb
+
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO digest_history (tenant_id, payload) "
+                "VALUES (%s, %s)",
+                (tenant_id, Jsonb(entry)),
+            )
+            conn.execute(
+                "DELETE FROM digest_history WHERE tenant_id = %s AND seq NOT IN "
+                "(SELECT seq FROM digest_history WHERE tenant_id = %s "
+                "ORDER BY seq DESC LIMIT %s)",
+                (tenant_id, tenant_id, DIGEST_SNAPSHOT_RETENTION),
+            )
+            conn.commit()
+
+    def digest_snapshots(
+        self, tenant_id: str, limit: int | None = None
+    ) -> list[dict]:
+        with self._connect() as conn:
+            if limit:
+                rows = conn.execute(
+                    "SELECT payload FROM ("
+                    "SELECT seq, payload FROM digest_history "
+                    "WHERE tenant_id = %s ORDER BY seq DESC LIMIT %s"
+                    ") AS recent ORDER BY seq",
+                    (tenant_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT payload FROM digest_history "
+                    "WHERE tenant_id = %s ORDER BY seq",
+                    (tenant_id,),
+                ).fetchall()
+        return [row[0] for row in rows]
+
+    def digest_snapshot_tenants(self) -> list[str]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT tenant_id FROM digest_history ORDER BY tenant_id"
             ).fetchall()
         return [row[0] for row in rows]
 

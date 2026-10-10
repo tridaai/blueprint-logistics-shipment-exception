@@ -542,7 +542,7 @@ def approval_queue(
 
 
 @app.get("/queue/digest", dependencies=_AUTH)
-def queue_digest() -> dict:
+def queue_digest(compare: str | None = None) -> dict:
     """The escalation digest: the shift lead's morning picture.
 
     Breaches by ladder stage (and by severity), the breach and
@@ -556,8 +556,30 @@ def queue_digest() -> dict:
     first sweep, the same projection is composed on read
     (``stored``: false). Deployment-wide by design — an operator
     artefact whose per-tenant sections are named inside it, like
-    /metrics."""
-    return service.queue_digest()
+    /metrics.
+
+    ``?compare=previous`` attaches a per-tenant ``delta`` section:
+    what moved since each tenant's previous stored snapshot (the
+    sweep also records one snapshot per tenant per digest in the
+    dated series) — new escalations, worsened and resolved
+    shipments, the ladder firings between the two pictures, and
+    the key-rotation window's turns."""
+    return service.queue_digest(compare=compare == "previous")
+
+
+@app.get("/queue/digest/history", dependencies=_AUTH)
+def queue_digest_history(tenant_id: str, limit: int | None = None) -> dict:
+    """One tenant's digest snapshot series, oldest first.
+
+    The dated pictures behind the digest's delta: per stored
+    digest, the tenant's stage counts, awaiting shipment ids and
+    stages, the window's firings, the oldest waiters, and the
+    rotation window's state — metadata and content hashes, the
+    series pruned to a retention window (it is a shift picture,
+    not the audit trail; the records keep the permanent story).
+    Tenant-scoped by construction: a series names only its own
+    tenant's ids."""
+    return service.digest_history(tenant_id, limit=limit)
 
 
 @app.get("/workers", dependencies=_AUTH)
