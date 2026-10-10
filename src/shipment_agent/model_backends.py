@@ -35,6 +35,7 @@ import re
 
 from .config import env_float, env_str, load_dotenv
 from .errors import translate_construction_error, translate_provider_error
+from .tracing import provider_span
 from .prompts import (
     CLASSIFY_SYSTEM_PROMPT,
     CLASSIFY_USER_TEMPLATE,
@@ -690,28 +691,33 @@ class OpenAIBackend(_BaseLLMBackend):
         self._model = env_str("OPENAI_MODEL", "gpt-4o-mini")
 
     def _complete(self, system: str, user: str, max_tokens: int = 600) -> str:
-        try:
-            response = self._client.chat.completions.create(
-                model=self._model,
-                max_tokens=max_tokens,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-            )
-        except Exception as exc:
-            raise translate_provider_error(
-                exc, backend=self.name, base_url=getattr(self, "base_url", None)
-            ) from exc
-        usage = getattr(response, "usage", None)
-        if usage is not None:
-            self._record_usage(
-                {
-                    "input_tokens": getattr(usage, "prompt_tokens", 0),
-                    "output_tokens": getattr(usage, "completion_tokens", 0),
-                }
-            )
-        return response.choices[0].message.content or ""
+        with provider_span(self.name, self._model, "chat_completion") as handle:
+            try:
+                response = self._client.chat.completions.create(
+                    model=self._model,
+                    max_tokens=max_tokens,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                )
+            except Exception as exc:
+                raise translate_provider_error(
+                    exc, backend=self.name, base_url=getattr(self, "base_url", None)
+                ) from exc
+            usage = getattr(response, "usage", None)
+            if usage is not None:
+                self._record_usage(
+                    {
+                        "input_tokens": getattr(usage, "prompt_tokens", 0),
+                        "output_tokens": getattr(usage, "completion_tokens", 0),
+                    }
+                )
+                handle.set_counts(
+                    input_tokens=getattr(usage, "prompt_tokens", 0),
+                    output_tokens=getattr(usage, "completion_tokens", 0),
+                )
+            return response.choices[0].message.content or ""
 
     def _create_chat(self, kwargs: dict):
         """chat.completions.create, tolerating clients without tool support.
@@ -720,14 +726,15 @@ class OpenAIBackend(_BaseLLMBackend):
         outright (TypeError); those get one retry without it and the
         loop then composes from the up-front facts alone.
         """
-        try:
-            return self._client.chat.completions.create(**kwargs)
-        except TypeError:
-            if "tools" not in kwargs:
-                raise
-            self._tools_unsupported = True
-            kwargs = {k: v for k, v in kwargs.items() if k != "tools"}
-            return self._client.chat.completions.create(**kwargs)
+        with provider_span(self.name, self._model, "chat_completion"):
+            try:
+                return self._client.chat.completions.create(**kwargs)
+            except TypeError:
+                if "tools" not in kwargs:
+                    raise
+                self._tools_unsupported = True
+                kwargs = {k: v for k, v in kwargs.items() if k != "tools"}
+                return self._client.chat.completions.create(**kwargs)
 
     def _tool_loop(self, system, user, tool_specs, dispatch, max_tool_calls):
         tools = [
@@ -830,38 +837,46 @@ class AnthropicBackend(_BaseLLMBackend):
         self._model = env_str("ANTHROPIC_MODEL", "claude-sonnet-4-5")
 
     def _complete(self, system: str, user: str, max_tokens: int = 600) -> str:
-        try:
-            message = self._client.messages.create(
-                model=self._model,
-                max_tokens=max_tokens,
-                system=system,
-                messages=[{"role": "user", "content": user}],
+        with provider_span(self.name, self._model, "messages") as handle:
+            try:
+                message = self._client.messages.create(
+                    model=self._model,
+                    max_tokens=max_tokens,
+                    system=system,
+                    messages=[{"role": "user", "content": user}],
+                )
+            except Exception as exc:
+                raise translate_provider_error(
+                    exc, backend=self.name, base_url=getattr(self, "base_url", None)
+                ) from exc
+            usage = getattr(message, "usage", None)
+            if usage is not None:
+                self._record_usage(
+                    {
+                        "input_tokens": getattr(usage, "input_tokens", 0),
+                        "output_tokens": getattr(usage, "output_tokens", 0),
+                    }
+                )
+                handle.set_counts(
+                    input_tokens=getattr(usage, "input_tokens", 0),
+                    output_tokens=getattr(usage, "output_tokens", 0),
+                )
+            return "".join(
+                block.text for block in message.content if block.type == "text"
             )
-        except Exception as exc:
-            raise translate_provider_error(
-                exc, backend=self.name, base_url=getattr(self, "base_url", None)
-            ) from exc
-        usage = getattr(message, "usage", None)
-        if usage is not None:
-            self._record_usage(
-                {
-                    "input_tokens": getattr(usage, "input_tokens", 0),
-                    "output_tokens": getattr(usage, "output_tokens", 0),
-                }
-            )
-        return "".join(block.text for block in message.content if block.type == "text")
 
     def _create_message(self, kwargs: dict):
         """messages.create, tolerating clients without tool support
         (see the OpenAI backend's ``_create_chat``)."""
-        try:
-            return self._client.messages.create(**kwargs)
-        except TypeError:
-            if "tools" not in kwargs:
-                raise
-            self._tools_unsupported = True
-            kwargs = {k: v for k, v in kwargs.items() if k != "tools"}
-            return self._client.messages.create(**kwargs)
+        with provider_span(self.name, self._model, "messages"):
+            try:
+                return self._client.messages.create(**kwargs)
+            except TypeError:
+                if "tools" not in kwargs:
+                    raise
+                self._tools_unsupported = True
+                kwargs = {k: v for k, v in kwargs.items() if k != "tools"}
+                return self._client.messages.create(**kwargs)
 
     def _tool_loop(self, system, user, tool_specs, dispatch, max_tool_calls):
         tools = [

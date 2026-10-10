@@ -49,6 +49,7 @@ from .errors import translate_construction_error, translate_provider_error
 from .model_backends import DEFAULT_TIMEOUT_SECONDS, _missing_sdk_error
 from .policies_data import full_corpus
 from .schemas import RetrievedPolicy
+from .tracing import provider_span
 
 _STOPWORDS = {
     "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "is", "was",
@@ -403,16 +404,22 @@ class SemanticRetriever:
         return (client, model, "openai", base_url or "https://api.openai.com/v1")
 
     def _embed(self, texts: list[str]) -> list[list[float]]:
-        try:
-            response = self._client.embeddings.create(model=self._model, input=texts)
-        except Exception as exc:
-            raise translate_provider_error(
-                exc,
-                backend=f"{self._embeddings_backend} embeddings (RETRIEVER={self._mode_label})",
-                base_url=self._embeddings_base_url,
-            ) from exc
-        ordered = sorted(response.data, key=lambda d: getattr(d, "index", 0))
-        return [list(d.embedding) for d in ordered]
+        with provider_span(
+            self._embeddings_backend, self._model, "embeddings"
+        ) as handle:
+            handle.set_counts(input_count=len(texts))
+            try:
+                response = self._client.embeddings.create(
+                    model=self._model, input=texts
+                )
+            except Exception as exc:
+                raise translate_provider_error(
+                    exc,
+                    backend=f"{self._embeddings_backend} embeddings (RETRIEVER={self._mode_label})",
+                    base_url=self._embeddings_base_url,
+                ) from exc
+            ordered = sorted(response.data, key=lambda d: getattr(d, "index", 0))
+            return [list(d.embedding) for d in ordered]
 
     # -- pgvector (the production store: the application's Postgres) --
 

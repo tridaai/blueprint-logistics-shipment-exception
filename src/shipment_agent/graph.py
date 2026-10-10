@@ -42,6 +42,7 @@ from .extractor import (
 )
 from .guardrails import validate_draft
 from .model_backends import DraftContext, ModelBackend, MockModelBackend, estimate_cost_usd
+from .tracing import node_span, run_span
 from .options import build_recovery_options
 from .retriever import KeywordRetriever, Retriever
 from .reviewer import review_draft
@@ -1224,7 +1225,8 @@ def build_graph(
                     RunEvent(type="node_started", shipment_id=shipment_id, node=name)
                 )
             started = time.perf_counter()
-            update = fn(state)
+            with node_span(name, shipment_id):
+                update = fn(state)
             elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
             durations[name] = elapsed_ms
             if event_sink is not None:
@@ -1357,14 +1359,15 @@ def run_shipment(
     if event_sink is not None:
         event_sink.emit(RunEvent(type="run_started", shipment_id=shipment_model.shipment_id))
     try:
-        final = app.invoke(
-            {
-                "shipment": shipment_model.model_dump(mode="json"),
-                "history": history,
-                "priors": priors or [],
-            },
-            invoke_config,
-        )
+        with run_span(shipment_model.shipment_id):
+            final = app.invoke(
+                {
+                    "shipment": shipment_model.model_dump(mode="json"),
+                    "history": history,
+                    "priors": priors or [],
+                },
+                invoke_config,
+            )
     except Exception as exc:
         if event_sink is not None:
             event_sink.emit(

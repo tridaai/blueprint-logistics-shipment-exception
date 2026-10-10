@@ -194,6 +194,12 @@ async def lifespan(app: FastAPI):
     graceful drain.
     """
     configure_json_logging(env_str("LOG_LEVEL", "INFO") or "INFO")
+    # Trace export is opt-in (OTEL_EXPORTER_OTLP_ENDPOINT); wiring it
+    # here means the variable is honoured from process start, and a
+    # misconfiguration logs once instead of failing startup.
+    from .tracing import configure_tracing
+
+    configure_tracing()
     if database_url():
         ensure_migrated()
         logger.info("startup: migrations current, database configured")
