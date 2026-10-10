@@ -42,6 +42,8 @@ from .prompts import (
     DIAGNOSE_SYSTEM_PROMPT,
     DIAGNOSE_TOOLS_SYSTEM_PROMPT,
     DIAGNOSE_USER_TEMPLATE,
+    INFO_REQUEST_SYSTEM_PROMPT,
+    INFO_REQUEST_USER_TEMPLATE,
     DRAFT_SYSTEM_PROMPT,
     DRAFT_USER_TEMPLATE,
     EXTRACT_SYSTEM_PROMPT,
@@ -545,6 +547,27 @@ class _BaseLLMBackend:
                     {"kind": kind, "title": title[:120], "description": description[:300]}
                 )
         return proposals or None
+
+    def compose_information_request(self, context: DraftContext) -> str | None:
+        """Compose a clarification request (LLM backends only).
+
+        The missing-items list is computed by code (``clarify.py``);
+        the model only words the message. Returns the message text, or
+        ``None`` when the reply is empty — the caller then uses the
+        template wording with the same items.
+        """
+        user = INFO_REQUEST_USER_TEMPLATE.format(
+            shipment_id=context["shipment_id"],
+            origin=context["origin"],
+            destination=context["destination"],
+            carrier=context["carrier"],
+            customer_name=context.get("customer_name") or "the consignee",
+            missing_items="\n".join(
+                f"- {item}" for item in context.get("missing_items", [])
+            ),
+        )
+        text = self._complete(INFO_REQUEST_SYSTEM_PROMPT, user, max_tokens=400)
+        return text.strip() or None
 
     def verify_draft(self, context: dict) -> dict | None:
         """LLM self-verification critique (LLM backends only).

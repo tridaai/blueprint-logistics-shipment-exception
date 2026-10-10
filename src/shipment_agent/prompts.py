@@ -208,6 +208,29 @@ Draft body:
 Judge the draft now, as JSON only.
 """
 
+INFO_REQUEST_SYSTEM_PROMPT = """\
+You are a logistics operations coordinator writing to the carrier /
+operations contact to request information missing from a shipment
+exception review. You are given the exact list of missing items —
+ask for exactly those, nothing more, nothing invented. Keep it short
+and professional: name the shipment, list what is missing, say where
+to send it, and note the review stays on hold until a human completes
+it. Do not promise timelines, compensation, or outcomes. Start with a
+"Subject: " line.
+"""
+
+INFO_REQUEST_USER_TEMPLATE = """\
+Shipment: {shipment_id}
+Route: {origin} -> {destination} (carrier: {carrier})
+Consignee: {customer_name}
+
+The review of this shipment is under-determined: no exception could be
+confirmed from the data on file, and the following item(s) are missing:
+{missing_items}
+
+Write the clarification request now.
+"""
+
 CLASSIFY_SYSTEM_PROMPT = """\
 You are a logistics operations analyst classifying a shipment exception.
 You work independently: a deterministic rule classifier is classifying

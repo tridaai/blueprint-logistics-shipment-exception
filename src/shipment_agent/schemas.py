@@ -317,6 +317,22 @@ class ValidationResult(BaseModel):
     checks: list[GuardrailCheck] = Field(default_factory=list)
 
 
+class InformationRequest(BaseModel):
+    """A composed clarification request for an under-determined case.
+
+    Built when the classification is ``none`` at low confidence AND
+    concrete inputs are missing (see ``clarify.py``). ``missing_items``
+    is computed by code; ``message`` is the composed request text
+    (LLM in provider mode, template in the default mode). The request
+    is attached to the result and the claim packet — never sent by
+    the pipeline.
+    """
+
+    message: str
+    missing_items: list[str] = Field(default_factory=list)
+    source: str  # llm | template
+
+
 class RunTelemetry(BaseModel):
     """Per-run observability: what the run used and how long it took.
 
@@ -387,6 +403,8 @@ class AgentResult(BaseModel):
     repair_attempts: int = 0
     original_validation: ValidationResult | None = None
     autonomy: AutonomyRecommendation | None = None
+    needs_information: bool = False
+    information_request: InformationRequest | None = None
     telemetry: RunTelemetry | None = None
     trace: list[TraceStep] = Field(default_factory=list)
     approval_status: str = "awaiting_approval"

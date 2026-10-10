@@ -150,6 +150,11 @@ def print_trace(
         print(f"    Autonomy recommendation: {label} (recommendation only — never acted on)")
         for reason in result.autonomy.reasons:
             print(f"      - {reason}")
+    if result.needs_information and result.information_request is not None:
+        print("    Information : NEEDED — this case is under-determined; a clarification")
+        print("                  request was composed for the carrier/ops contact (not sent):")
+        for item in result.information_request.missing_items:
+            print(f"      - missing: {item}")
     if result.telemetry is not None:
         t = result.telemetry
         if t.input_tokens is not None:

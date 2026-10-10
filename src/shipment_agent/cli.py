@@ -77,6 +77,8 @@ def _print_result(
     if result.autonomy is not None:
         label = "eligible for auto-approval" if result.autonomy.eligible_for_auto_approval else "human decision required"
         print(f"Autonomy  : {label} (recommendation only) — {'; '.join(result.autonomy.reasons)}")
+    if result.needs_information and result.information_request is not None:
+        print(f"Info needed: clarification request composed (not sent) — missing: {'; '.join(result.information_request.missing_items)}")
     if result.telemetry is not None:
         t = result.telemetry
         if t.input_tokens is not None:

@@ -19,6 +19,7 @@ from typing import TypedDict
 from langgraph.graph import END, StateGraph
 
 from .autonomy import compute_autonomy
+from .clarify import build_information_request
 from .classifier import classify_shipment
 from .crosscheck import resolve_classification
 from .diagnosis import build_diagnosis
@@ -344,6 +345,21 @@ def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
                 ]
                 if autonomy
                 else []
+            )
+            + (
+                [
+                    "information requested: this case is under-determined — a "
+                    "clarification request was composed for the carrier/ops "
+                    "contact and attached to the result (not sent)",
+                    *[
+                        f"missing: {item}"
+                        for item in (final.get("information_request") or {}).get(
+                            "missing_items", []
+                        )
+                    ],
+                ]
+                if final.get("needs_information")
+                else []
             ),
         ),
     ]
@@ -377,6 +393,8 @@ class AgentState(TypedDict, total=False):
     repair_attempts: int
     original_validation: dict | None
     autonomy: dict
+    needs_information: bool
+    information_request: dict | None
     approval_status: str
 
 
@@ -730,14 +748,33 @@ def build_graph(
             cross_check=state.get("cross_check"),
             repair_attempted=bool(state.get("repair_attempted")),
         )
+        # Information-needed flow: an under-determined case (classification
+        # "none" at low confidence, with concrete inputs missing) gets a
+        # composed clarification request attached — the gate is unchanged
+        # and nothing is sent (see clarify.py).
+        shipment = ShipmentInput.model_validate(state["shipment"])
+        info_request = build_information_request(
+            shipment=shipment,
+            classification=state["classification"],
+            document_check_warning=state.get("document_check_warning"),
+            extractions=state.get("extractions", []),
+            backend=backend,
+        )
         draft = DraftOutput.model_validate(state["draft"])
         draft.claim_packet = {
             **draft.claim_packet,
             "autonomy_recommendation": autonomy.model_dump(),
         }
+        if info_request is not None:
+            draft.claim_packet = {
+                **draft.claim_packet,
+                "information_request": info_request.model_dump(),
+            }
         return {
             "approval_status": "awaiting_approval",
             "autonomy": autonomy.model_dump(),
+            "needs_information": info_request is not None,
+            "information_request": info_request.model_dump() if info_request else None,
             "draft": draft.model_dump(),
         }
 
@@ -825,6 +862,8 @@ def run_shipment(
         repair_attempts=int(final.get("repair_attempts") or 0),
         original_validation=final.get("original_validation"),
         autonomy=final.get("autonomy"),
+        needs_information=bool(final.get("needs_information")),
+        information_request=final.get("information_request"),
         telemetry=telemetry,
         trace=_build_trace(shipment_model, final),
         approval_status=final.get("approval_status", "awaiting_approval"),

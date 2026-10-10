@@ -79,6 +79,7 @@ serialisable shape:
 | `original_validation` | validate | the first (failed) validation, preserved when repair ran |
 | `autonomy` | human_approval | deterministic routing recommendation + reasons (never acted on) |
 | `telemetry` | run wrapper | backend, model, model-call count, token totals, estimated cost, wall-clock latency |
+| `needs_information` / `information_request` | human_approval | composed clarification request when the case is under-determined (attached, never sent) |
 | `approval_status` | human_approval | always `awaiting_approval` at graph exit |
 
 Why a graph instead of a chain? Each node is independently testable, the
@@ -288,6 +289,19 @@ list prices, labelled an estimate; an unlisted model reports cost as
 null rather than a guess). In the default mode no model ran, so
 tokens and cost are null — the call count and latency stay real. An
 agent a customer cannot meter is an agent they cannot budget.
+
+**Information-needed flow: under-determined cases ask, precisely.**
+When the final classification is `none` below 0.6 confidence *and*
+concrete inputs are missing — no bill_of_lading/invoice pair (so the
+document-mismatch check was skipped) or a critical field the
+extraction could not find in the document text — the pipeline
+attaches a clarification request (`clarify.py`): the missing-items
+list is computed by code, the wording is composed by the LLM in
+provider mode or a template in default mode, and the result carries
+`needs_information=True` plus the request text (also in the claim
+packet). Diagnosis still runs, best effort. The gate is unchanged and
+the request is never sent by the pipeline — sending it is the
+customer's integration step, exactly like acting on an approval.
 
 **Approvals persist; the API can be gated.** Analyses and decisions are
 stored through a small store interface (`store.py`): SQLite on disk by
