@@ -17,6 +17,17 @@ newest first, for the diagnosis of the next matching case.
 
 Re-analyzing a shipment replaces its record and resets the decision,
 matching the service's long-standing behaviour.
+
+**Tenancy.** Every record carries a ``tenant_id`` and the store's
+identity key is the pair ``(tenant_id, shipment_id)``: two tenants
+may both have a ``SYN-1001``, and neither can see the other's. Every
+read takes an optional ``tenant_id`` — a scoped read returns only
+that tenant's partition (a cross-tenant ``get`` finds nothing, which
+the API surfaces as a 404), and ``None`` means the operator's
+unscoped view across all tenants, which only process-internal sweeps
+(the dispatch retry worker) use. The service resolves the caller's
+tenant (header / ``TENANT_ID`` / the default tenant) and always
+reads scoped; see ``service.resolve_tenant_id``.
 """
 
 from __future__ import annotations
@@ -27,13 +38,18 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .config import env_str, load_dotenv
+from .config import DEFAULT_TENANT_ID, env_str, load_dotenv
 from .schemas import AgentResult
 
 
 @dataclass
 class ApprovalRecord:
     result: AgentResult
+    # The tenant this record belongs to. Stamped by the service at
+    # analysis time from the caller's resolved tenant; rows written
+    # before tenancy (and hand-built test records) sit in the default
+    # tenant, which is where single-tenant deployments live anyway.
+    tenant_id: str = DEFAULT_TENANT_ID
     shipment: dict | None = None  # the analysed ShipmentInput, for history lookups
     approver: str | None = None
     approved: bool = False
@@ -161,6 +177,7 @@ def _record_to_dict(record: ApprovalRecord) -> dict:
     shape (JSONB), and the shape the SQLite double's columns mirror."""
     return {
         "result": record.result.model_dump(mode="json"),
+        "tenant_id": record.tenant_id,
         "shipment": record.shipment,
         "approver": record.approver,
         "approved": record.approved,
@@ -178,6 +195,7 @@ def _record_to_dict(record: ApprovalRecord) -> dict:
 def _record_from_dict(data: dict) -> ApprovalRecord:
     return ApprovalRecord(
         result=AgentResult.model_validate(data["result"]),
+        tenant_id=data.get("tenant_id") or DEFAULT_TENANT_ID,
         shipment=data.get("shipment"),
         approver=data.get("approver"),
         approved=data.get("approved", False),
@@ -203,36 +221,65 @@ class InMemoryStore:
     """
 
     def __init__(self) -> None:
-        self._records: dict[str, ApprovalRecord] = {}
+        # Keyed by (tenant_id, shipment_id): the store's identity is
+        # the pair, so two tenants' SYN-1001s coexist without ever
+        # shadowing each other.
+        self._records: dict[tuple[str, str], ApprovalRecord] = {}
         self._lock = threading.Lock()
 
     def save(self, record: ApprovalRecord) -> None:
         with self._lock:
-            self._records[record.result.shipment_id] = record
+            key = (record.tenant_id, record.result.shipment_id)
+            self._records[key] = record
 
-    def get(self, shipment_id: str) -> ApprovalRecord | None:
-        with self._lock:
-            return self._records.get(shipment_id)
-
-    def get_by_idempotency(
-        self, key: str, shipment_id: str
+    def get(
+        self, shipment_id: str, tenant_id: str | None = None
     ) -> ApprovalRecord | None:
         with self._lock:
-            record = self._records.get(shipment_id)
-        if record is not None and record.idempotency_key == key:
-            return record
+            if tenant_id is not None:
+                return self._records.get((tenant_id, shipment_id))
+            # Unscoped (operator) read: the newest record under this
+            # id, whichever tenant owns it.
+            for record in reversed(list(self._records.values())):
+                if record.result.shipment_id == shipment_id:
+                    return record
+            return None
+
+    def get_by_idempotency(
+        self, key: str, shipment_id: str, tenant_id: str | None = None
+    ) -> ApprovalRecord | None:
+        with self._lock:
+            if tenant_id is not None:
+                candidates = [self._records.get((tenant_id, shipment_id))]
+            else:
+                candidates = [
+                    record
+                    for record in reversed(list(self._records.values()))
+                    if record.result.shipment_id == shipment_id
+                ]
+        for record in candidates:
+            if record is not None and record.idempotency_key == key:
+                return record
         return None
 
-    def records(self) -> list[ApprovalRecord]:
-        """Every stored record, newest first (metrics / audit read)."""
+    def records(self, tenant_id: str | None = None) -> list[ApprovalRecord]:
+        """Stored records, newest first — one tenant's partition when
+        ``tenant_id`` is given (metrics / audit read), else all."""
         with self._lock:
-            return list(reversed(list(self._records.values())))
+            records = list(reversed(list(self._records.values())))
+        if tenant_id is None:
+            return records
+        return [record for record in records if record.tenant_id == tenant_id]
 
-    def prior_shipments(self, exclude_shipment_id: str | None = None) -> list[dict]:
+    def prior_shipments(
+        self, exclude_shipment_id: str | None = None, tenant_id: str | None = None
+    ) -> list[dict]:
         with self._lock:
             records = list(self._records.values())
         entries = []
         for record in reversed(records):
+            if tenant_id is not None and record.tenant_id != tenant_id:
+                continue
             if record.result.shipment_id == exclude_shipment_id:
                 continue
             entry = history_entry(record)
@@ -240,11 +287,15 @@ class InMemoryStore:
                 entries.append(entry)
         return entries
 
-    def decision_feedback(self, exclude_shipment_id: str | None = None) -> list[dict]:
+    def decision_feedback(
+        self, exclude_shipment_id: str | None = None, tenant_id: str | None = None
+    ) -> list[dict]:
         with self._lock:
             records = list(self._records.values())
         entries = []
         for record in reversed(records):
+            if tenant_id is not None and record.tenant_id != tenant_id:
+                continue
             if record.result.shipment_id == exclude_shipment_id:
                 continue
             entry = feedback_entry(record)
@@ -254,7 +305,21 @@ class InMemoryStore:
 
 
 class SQLiteStore:
-    """SQLite-backed store (stdlib only). One row per shipment."""
+    """SQLite-backed store (stdlib only).
+
+    One row per (tenant, shipment): the primary key is the pair, so
+    two tenants' records with the same shipment id coexist.
+    """
+
+    # The columns every current row carries, in table order — the
+    # rebuild below copies by name, so this list is the one place a
+    # new column joins both the fresh-table and the migrated shapes.
+    _COLUMNS = (
+        "tenant_id, shipment_id, result_json, shipment_json, approver, "
+        "approved, rejected_by, reject_reason, dispatch_status, "
+        "approve_reason, created_at, decided_at, dispatch_attempts_json, "
+        "idempotency_key"
+    )
 
     def __init__(self, path: Path | str) -> None:
         self._path = Path(path)
@@ -263,12 +328,14 @@ class SQLiteStore:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS approvals (
-                    shipment_id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
+                    shipment_id TEXT NOT NULL,
                     result_json TEXT NOT NULL,
                     approver TEXT,
                     approved INTEGER NOT NULL DEFAULT 0,
                     rejected_by TEXT,
-                    reject_reason TEXT NOT NULL DEFAULT ''
+                    reject_reason TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (tenant_id, shipment_id)
                 )
                 """
             )
@@ -303,6 +370,49 @@ class SQLiteStore:
                 conn.execute(
                     "ALTER TABLE approvals ADD COLUMN idempotency_key TEXT"
                 )
+            if "tenant_id" not in columns:
+                conn.execute(
+                    "ALTER TABLE approvals ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'"
+                )
+            # Tenancy changed the identity: a table created before it
+            # keys rows by shipment_id alone, so two tenants' records
+            # with the same id would shadow each other. Rebuild such a
+            # table with the composite key, copying every row (their
+            # tenant_id is the default the ALTER just stamped). The
+            # identity columns in PRAGMA table_info carry pk > 0.
+            pk_columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(approvals)")
+                if row["pk"]
+            }
+            if "tenant_id" not in pk_columns:
+                conn.execute(
+                    f"""
+                    CREATE TABLE approvals_tenanted (
+                        tenant_id TEXT NOT NULL DEFAULT 'default',
+                        shipment_id TEXT NOT NULL,
+                        result_json TEXT NOT NULL,
+                        shipment_json TEXT,
+                        approver TEXT,
+                        approved INTEGER NOT NULL DEFAULT 0,
+                        rejected_by TEXT,
+                        reject_reason TEXT NOT NULL DEFAULT '',
+                        dispatch_status TEXT,
+                        approve_reason TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL DEFAULT '',
+                        decided_at TEXT NOT NULL DEFAULT '',
+                        dispatch_attempts_json TEXT NOT NULL DEFAULT '[]',
+                        idempotency_key TEXT,
+                        PRIMARY KEY (tenant_id, shipment_id)
+                    )
+                    """
+                )
+                conn.execute(
+                    f"INSERT OR IGNORE INTO approvals_tenanted ({self._COLUMNS}) "
+                    f"SELECT {self._COLUMNS} FROM approvals"
+                )
+                conn.execute("DROP TABLE approvals")
+                conn.execute("ALTER TABLE approvals_tenanted RENAME TO approvals")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._path)
@@ -314,14 +424,12 @@ class SQLiteStore:
 
         with self._connect() as conn:
             conn.execute(
-                """
-                INSERT OR REPLACE INTO approvals
-                    (shipment_id, result_json, shipment_json, approver, approved,
-                     rejected_by, reject_reason, dispatch_status, approve_reason,
-                     created_at, decided_at, dispatch_attempts_json, idempotency_key)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                f"""
+                INSERT OR REPLACE INTO approvals ({self._COLUMNS})
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    record.tenant_id,
                     record.result.shipment_id,
                     record.result.model_dump_json(),
                     json.dumps(record.shipment) if record.shipment else None,
@@ -354,6 +462,11 @@ class SQLiteStore:
                 attempts = []
         return ApprovalRecord(
             result=AgentResult.model_validate_json(row["result_json"]),
+            tenant_id=(
+                row["tenant_id"]
+                if "tenant_id" in keys and row["tenant_id"]
+                else DEFAULT_TENANT_ID
+            ),
             shipment=shipment,
             approver=row["approver"],
             approved=bool(row["approved"]),
@@ -367,43 +480,65 @@ class SQLiteStore:
             decided_at=row["decided_at"] if "decided_at" in keys else "",
         )
 
-    def get(self, shipment_id: str) -> ApprovalRecord | None:
+    def get(
+        self, shipment_id: str, tenant_id: str | None = None
+    ) -> ApprovalRecord | None:
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM approvals WHERE shipment_id = ?", (shipment_id,)
-            ).fetchone()
+            if tenant_id is not None:
+                row = conn.execute(
+                    "SELECT * FROM approvals WHERE tenant_id = ? AND shipment_id = ?",
+                    (tenant_id, shipment_id),
+                ).fetchone()
+            else:  # unscoped (operator) read: the newest row under the id
+                row = conn.execute(
+                    "SELECT * FROM approvals WHERE shipment_id = ? "
+                    "ORDER BY rowid DESC LIMIT 1",
+                    (shipment_id,),
+                ).fetchone()
         if row is None:
             return None
         return self._row_to_record(row)
 
     def get_by_idempotency(
-        self, key: str, shipment_id: str
+        self, key: str, shipment_id: str, tenant_id: str | None = None
     ) -> ApprovalRecord | None:
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM approvals WHERE shipment_id = ? AND idempotency_key = ?",
-                (shipment_id, key),
-            ).fetchone()
+            if tenant_id is not None:
+                row = conn.execute(
+                    "SELECT * FROM approvals WHERE tenant_id = ? "
+                    "AND shipment_id = ? AND idempotency_key = ?",
+                    (tenant_id, shipment_id, key),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM approvals WHERE shipment_id = ? "
+                    "AND idempotency_key = ? ORDER BY rowid DESC LIMIT 1",
+                    (shipment_id, key),
+                ).fetchone()
         if row is None:
             return None
         return self._row_to_record(row)
 
-    def records(self) -> list[ApprovalRecord]:
-        """Every stored record, newest first (metrics / audit read)."""
+    def records(self, tenant_id: str | None = None) -> list[ApprovalRecord]:
+        """Stored records, newest first — one tenant's partition when
+        ``tenant_id`` is given (metrics / audit read), else all."""
         with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM approvals ORDER BY rowid DESC"
-            ).fetchall()
+            if tenant_id is not None:
+                rows = conn.execute(
+                    "SELECT * FROM approvals WHERE tenant_id = ? ORDER BY rowid DESC",
+                    (tenant_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM approvals ORDER BY rowid DESC"
+                ).fetchall()
         return [self._row_to_record(row) for row in rows]
 
-    def prior_shipments(self, exclude_shipment_id: str | None = None) -> list[dict]:
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM approvals ORDER BY rowid DESC"
-            ).fetchall()
+    def prior_shipments(
+        self, exclude_shipment_id: str | None = None, tenant_id: str | None = None
+    ) -> list[dict]:
         entries = []
-        for row in rows:
-            record = self._row_to_record(row)
+        for record in self.records(tenant_id):
             if record.result.shipment_id == exclude_shipment_id:
                 continue
             entry = history_entry(record)
@@ -411,14 +546,11 @@ class SQLiteStore:
                 entries.append(entry)
         return entries
 
-    def decision_feedback(self, exclude_shipment_id: str | None = None) -> list[dict]:
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM approvals ORDER BY rowid DESC"
-            ).fetchall()
+    def decision_feedback(
+        self, exclude_shipment_id: str | None = None, tenant_id: str | None = None
+    ) -> list[dict]:
         entries = []
-        for row in rows:
-            record = self._row_to_record(row)
+        for record in self.records(tenant_id):
             if record.result.shipment_id == exclude_shipment_id:
                 continue
             entry = feedback_entry(record)
@@ -454,12 +586,13 @@ class PostgresStore:
         decided = record.result.approval_status in ("approved", "rejected")
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO approvals (shipment_id, payload, decided) "
-                "VALUES (%s, %s, %s) "
-                "ON CONFLICT (shipment_id) DO UPDATE SET "
+                "INSERT INTO approvals (tenant_id, shipment_id, payload, decided) "
+                "VALUES (%s, %s, %s, %s) "
+                "ON CONFLICT (tenant_id, shipment_id) DO UPDATE SET "
                 "payload = EXCLUDED.payload, decided = EXCLUDED.decided, "
                 "updated_at = now()",
                 (
+                    record.tenant_id,
                     record.result.shipment_id,
                     Jsonb(_record_to_dict(record)),
                     decided,
@@ -467,39 +600,68 @@ class PostgresStore:
             )
             conn.commit()
 
-    def get(self, shipment_id: str) -> ApprovalRecord | None:
+    def get(
+        self, shipment_id: str, tenant_id: str | None = None
+    ) -> ApprovalRecord | None:
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT payload FROM approvals WHERE shipment_id = %s",
-                (shipment_id,),
-            ).fetchone()
+            if tenant_id is not None:
+                row = conn.execute(
+                    "SELECT payload FROM approvals "
+                    "WHERE tenant_id = %s AND shipment_id = %s",
+                    (tenant_id, shipment_id),
+                ).fetchone()
+            else:  # unscoped (operator) read: the newest row under the id
+                row = conn.execute(
+                    "SELECT payload FROM approvals WHERE shipment_id = %s "
+                    "ORDER BY seq DESC LIMIT 1",
+                    (shipment_id,),
+                ).fetchone()
         return _record_from_dict(row[0]) if row else None
 
     def get_by_idempotency(
-        self, key: str, shipment_id: str
+        self, key: str, shipment_id: str, tenant_id: str | None = None
     ) -> ApprovalRecord | None:
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT payload FROM approvals WHERE shipment_id = %s "
-                "AND payload ->> 'idempotency_key' = %s",
-                (shipment_id, key),
-            ).fetchone()
+            if tenant_id is not None:
+                row = conn.execute(
+                    "SELECT payload FROM approvals WHERE tenant_id = %s "
+                    "AND shipment_id = %s "
+                    "AND payload ->> 'idempotency_key' = %s",
+                    (tenant_id, shipment_id, key),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT payload FROM approvals WHERE shipment_id = %s "
+                    "AND payload ->> 'idempotency_key' = %s "
+                    "ORDER BY seq DESC LIMIT 1",
+                    (shipment_id, key),
+                ).fetchone()
         return _record_from_dict(row[0]) if row else None
 
-    def _all_records(self) -> list[ApprovalRecord]:
+    def _all_records(self, tenant_id: str | None = None) -> list[ApprovalRecord]:
         with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT payload FROM approvals ORDER BY seq"
-            ).fetchall()
+            if tenant_id is not None:
+                rows = conn.execute(
+                    "SELECT payload FROM approvals WHERE tenant_id = %s "
+                    "ORDER BY seq",
+                    (tenant_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT payload FROM approvals ORDER BY seq"
+                ).fetchall()
         return [_record_from_dict(row[0]) for row in rows]
 
-    def records(self) -> list[ApprovalRecord]:
-        """Every stored record, newest first (metrics / audit read)."""
-        return list(reversed(self._all_records()))
+    def records(self, tenant_id: str | None = None) -> list[ApprovalRecord]:
+        """Stored records, newest first — one tenant's partition when
+        ``tenant_id`` is given (metrics / audit read), else all."""
+        return list(reversed(self._all_records(tenant_id)))
 
-    def prior_shipments(self, exclude_shipment_id: str | None = None) -> list[dict]:
+    def prior_shipments(
+        self, exclude_shipment_id: str | None = None, tenant_id: str | None = None
+    ) -> list[dict]:
         entries = []
-        for record in reversed(self._all_records()):
+        for record in reversed(self._all_records(tenant_id)):
             if record.result.shipment_id == exclude_shipment_id:
                 continue
             entry = history_entry(record)
@@ -507,9 +669,11 @@ class PostgresStore:
                 entries.append(entry)
         return entries
 
-    def decision_feedback(self, exclude_shipment_id: str | None = None) -> list[dict]:
+    def decision_feedback(
+        self, exclude_shipment_id: str | None = None, tenant_id: str | None = None
+    ) -> list[dict]:
         entries = []
-        for record in reversed(self._all_records()):
+        for record in reversed(self._all_records(tenant_id)):
             if record.result.shipment_id == exclude_shipment_id:
                 continue
             entry = feedback_entry(record)

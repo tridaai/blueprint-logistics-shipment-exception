@@ -66,21 +66,34 @@ class Retriever(Protocol):
 
 
 class Store(Protocol):
-    """The record seam: analyses in, decisions and history out."""
+    """The record seam: analyses in, decisions and history out.
+
+    Records are partitioned by tenant: the identity key is
+    ``(tenant_id, shipment_id)`` and every read accepts a
+    ``tenant_id`` scope — a scoped read sees only that tenant's
+    partition, while ``tenant_id=None`` is the operator's unscoped
+    view (process-internal sweeps only; the service always scopes).
+    """
 
     def save(self, record: "ApprovalRecord") -> None: ...
 
-    def get(self, shipment_id: str) -> "ApprovalRecord | None": ...
-
-    def get_by_idempotency(
-        self, key: str, shipment_id: str
+    def get(
+        self, shipment_id: str, tenant_id: str | None = None
     ) -> "ApprovalRecord | None": ...
 
-    def records(self) -> list["ApprovalRecord"]: ...
+    def get_by_idempotency(
+        self, key: str, shipment_id: str, tenant_id: str | None = None
+    ) -> "ApprovalRecord | None": ...
 
-    def prior_shipments(self, exclude_shipment_id: str | None = None) -> list[dict]: ...
+    def records(self, tenant_id: str | None = None) -> list["ApprovalRecord"]: ...
 
-    def decision_feedback(self, exclude_shipment_id: str | None = None) -> list[dict]: ...
+    def prior_shipments(
+        self, exclude_shipment_id: str | None = None, tenant_id: str | None = None
+    ) -> list[dict]: ...
+
+    def decision_feedback(
+        self, exclude_shipment_id: str | None = None, tenant_id: str | None = None
+    ) -> list[dict]: ...
 
 
 class ObjectStore(Protocol):

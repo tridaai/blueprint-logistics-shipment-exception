@@ -1,8 +1,10 @@
 """Checkpointed approval gate: graph state persists, decisions resume it.
 
 With a checkpointer attached, an analysis pauses its graph at the
-approval gate (thread_id = the shipment id) and the service's
-approve/reject resumes the thread with the decision. These tests pin
+approval gate (thread_id = the shipment id at graph level; the
+service namespaces it by tenant — ``<tenant>:<shipment_id>``) and
+the service's approve/reject resumes the thread with the decision.
+These tests pin
 the contract: threads survive across service instances over the same
 database files (a process restart), the gate semantics are unchanged
 (a guardrail-failed draft still cannot be approved, and its thread
@@ -19,7 +21,8 @@ from shipment_agent.graph import build_graph, resume_approval, run_shipment
 from shipment_agent.model_backends import MockModelBackend
 from shipment_agent.retriever import KeywordRetriever
 from shipment_agent.samples import load_sample_shipments, sample_shipment_models
-from shipment_agent.service import ShipmentService
+from shipment_agent.config import DEFAULT_TENANT_ID
+from shipment_agent.service import ShipmentService, checkpoint_thread_id
 from shipment_agent.store import InMemoryStore
 
 
@@ -103,10 +106,9 @@ def test_approve_after_restart_resumes_the_thread(monkeypatch, tmp_path):
     # The graph thread completed too: nothing left to resume.
     saver = get_checkpointer()
     assert saver is not None
-    assert not _thread_snapshot(saver, result.shipment_id).next
-    assert _thread_snapshot(saver, result.shipment_id).values[
-        "approval_status"
-    ] == "approved"
+    thread = checkpoint_thread_id(DEFAULT_TENANT_ID, result.shipment_id)
+    assert not _thread_snapshot(saver, thread).next
+    assert _thread_snapshot(saver, thread).values["approval_status"] == "approved"
 
 
 def test_reject_after_restart_resumes_the_thread(monkeypatch, tmp_path):
@@ -117,9 +119,8 @@ def test_reject_after_restart_resumes_the_thread(monkeypatch, tmp_path):
     decided = second.reject(result.shipment_id, reviewer="ops-lead", reason="wrong lane")
     assert decided.approval_status == "rejected"
     saver = get_checkpointer()
-    assert _thread_snapshot(saver, result.shipment_id).values[
-        "approval_status"
-    ] == "rejected"
+    thread = checkpoint_thread_id(DEFAULT_TENANT_ID, result.shipment_id)
+    assert _thread_snapshot(saver, thread).values["approval_status"] == "rejected"
 
 
 def test_guardrail_failed_draft_still_refused_and_thread_stays_parked(
@@ -136,10 +137,11 @@ def test_guardrail_failed_draft_still_refused_and_thread_stays_parked(
     # The refusal did not consume the thread: it is still parked, and a
     # reject can still land on it.
     saver = get_checkpointer()
-    assert _thread_snapshot(saver, "SYN-1013").next
+    thread = checkpoint_thread_id(DEFAULT_TENANT_ID, "SYN-1013")
+    assert _thread_snapshot(saver, thread).next
     decided = service.reject("SYN-1013", reviewer="ops-lead", reason="blocked draft")
     assert decided.approval_status == "rejected"
-    assert not _thread_snapshot(saver, "SYN-1013").next
+    assert not _thread_snapshot(saver, thread).next
 
 
 def test_reanalysis_resets_the_thread(monkeypatch, tmp_path):
@@ -153,7 +155,8 @@ def test_reanalysis_resets_the_thread(monkeypatch, tmp_path):
     again = service.analyze(shipment)
     assert again.approval_status == "awaiting_approval"
     saver = get_checkpointer()
-    assert _thread_snapshot(saver, shipment.shipment_id).next
+    thread = checkpoint_thread_id(DEFAULT_TENANT_ID, shipment.shipment_id)
+    assert _thread_snapshot(saver, thread).next
     decided = service.approve(shipment.shipment_id, approver="ops-lead")
     assert decided.approval_status == "approved"
 

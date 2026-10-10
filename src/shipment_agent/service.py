@@ -23,6 +23,18 @@ that thread with the decision. The split is deliberate — the store is
 the record of decisions (and the only thing the decision flow reads);
 the checkpointer holds graph state. A missing/finished thread never
 blocks a decision.
+
+**Tenancy.** The store is partitioned by tenant (``store.py``):
+every method here takes an optional ``tenant_id`` and resolves it
+with :func:`resolve_tenant_id` — explicit argument, else the
+``TENANT_ID`` environment default, else the default tenant — and
+every store read is scoped to the resolved tenant, so one tenant's
+shipments, memory, queue, and scorecards are invisible to another.
+The gate's checkpoint threads are namespaced by tenant for the same
+reason (``<tenant>:<shipment_id>``). The one deliberate exception is
+the dispatch-retry sweep: an operator process that works every
+tenant's failed deliveries, resolving each record's own tenant per
+retry.
 """
 
 from __future__ import annotations
@@ -37,7 +49,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from .checkpoints import get_checkpointer
-from .config import env_float, env_int, env_str, load_dotenv
+from .config import DEFAULT_TENANT_ID, env_float, env_int, env_str, load_dotenv
 from .graph import resume_approval, run_shipment
 from .insights import (
     all_carrier_scorecards,
@@ -56,7 +68,13 @@ from .retriever import Retriever, get_retriever
 from .schemas import AgentResult, ShipmentInput
 from .store import ApprovalRecord, ApprovalStore, carrier_summary, default_store
 
-__all__ = ["ApprovalRecord", "BatchItem", "ShipmentService"]
+__all__ = [
+    "ApprovalRecord",
+    "BatchItem",
+    "ShipmentService",
+    "checkpoint_thread_id",
+    "resolve_tenant_id",
+]
 
 
 def _now_iso() -> str:
@@ -64,6 +82,31 @@ def _now_iso() -> str:
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc).isoformat()
+
+
+def resolve_tenant_id(tenant_id: str | None = None) -> str:
+    """Resolve the tenant a call operates on.
+
+    Precedence: the explicit argument (the API passes the
+    ``X-Tenant-ID`` header), then the ``TENANT_ID`` environment
+    default (a single-client deployment pins its tenant there), then
+    :data:`~shipment_agent.config.DEFAULT_TENANT_ID`. Whitespace is
+    never significant; an empty value is no value.
+    """
+    load_dotenv()
+    for candidate in (tenant_id, env_str("TENANT_ID")):
+        if candidate and candidate.strip():
+            return candidate.strip()
+    return DEFAULT_TENANT_ID
+
+
+def checkpoint_thread_id(tenant_id: str, shipment_id: str) -> str:
+    """The gate checkpoint thread for one tenant's shipment.
+
+    Namespaced by tenant so two tenants' same-id shipments never
+    share a graph thread (and one tenant's decision can never resume
+    another's run)."""
+    return f"{tenant_id}:{shipment_id}"
 
 
 @dataclass
@@ -374,20 +417,23 @@ class ShipmentService:
             payload["documents"][index]["object_key"] = key
         return payload
 
-    def _resume_thread(self, shipment_id: str, decision: dict) -> None:
+    def _resume_thread(
+        self, shipment_id: str, decision: dict, tenant_id: str = DEFAULT_TENANT_ID
+    ) -> None:
         """Complete the checkpointed graph thread with a decision.
 
         Best-effort by design: the store record the caller just saved
         is the decision of record. A thread that is missing or already
         finished (the analysis ran with checkpoints off, modes were
         mixed) has nothing to resume, and a resume failure never
-        unmakes a recorded human decision.
+        unmakes a recorded human decision. The thread id is the
+        tenant-namespaced one the analysis ran under.
         """
         checkpointer = self._get_checkpointer()
         if checkpointer is None:
             return
         try:
-            resume_approval(shipment_id, decision, checkpointer)
+            resume_approval(checkpoint_thread_id(tenant_id, shipment_id), decision, checkpointer)
         except Exception:
             pass
 
@@ -401,20 +447,28 @@ class ShipmentService:
         return key or None
 
     def idempotent_result(
-        self, idempotency_key: str | None, shipment_id: str
+        self,
+        idempotency_key: str | None,
+        shipment_id: str,
+        tenant_id: str | None = None,
     ) -> AgentResult | None:
-        """The stored run for (key, shipment id), flagged as a replay.
+        """The stored run for (tenant, key, shipment id), flagged as
+        a replay.
 
         The dedupe lookup behind :meth:`analyze`'s idempotency: a
         hit means this exact submission was already analysed, so the
         stored result — with the original run's telemetry — is the
         answer, and no model is called again. Returns None when there
-        is no key or no stored run under it.
+        is no key or no stored run under it. The lookup is scoped to
+        the resolved tenant: another tenant's run under the same key
+        and shipment id is a different submission, not a replay.
         """
         key = self._normalize_idempotency_key(idempotency_key)
         if key is None:
             return None
-        record = self._get_store().get_by_idempotency(key, shipment_id)
+        record = self._get_store().get_by_idempotency(
+            key, shipment_id, tenant_id=resolve_tenant_id(tenant_id)
+        )
         if record is None:
             return None
         return record.result.model_copy(update={"idempotent_replay": True})
@@ -424,6 +478,7 @@ class ShipmentService:
         shipment: ShipmentInput | dict,
         event_sink: EventSink | None = None,
         idempotency_key: str | None = None,
+        tenant_id: str | None = None,
     ) -> AgentResult:
         # Backend and retriever come from the environment (MODEL_BACKEND /
         # RETRIEVER, with the repo-root .env loaded) unless injected.
@@ -435,14 +490,20 @@ class ShipmentService:
         # stored result is returned flagged ``idempotent_replay`` and
         # the pipeline does not run again — no duplicate model spend,
         # no second record, no reset of a decision already taken.
+        #
+        # ``tenant_id`` (optional) names the tenant partition the run
+        # belongs to (see resolve_tenant_id for the precedence); the
+        # record, its memory reads, and its idempotency scope all live
+        # in that partition.
         model = (
             shipment
             if isinstance(shipment, ShipmentInput)
             else ShipmentInput.model_validate(shipment)
         )
+        tenant = resolve_tenant_id(tenant_id)
         key = self._normalize_idempotency_key(idempotency_key)
         if key is not None:
-            replay = self.idempotent_result(key, model.shipment_id)
+            replay = self.idempotent_result(key, model.shipment_id, tenant_id=tenant)
             if replay is not None:
                 return replay
         backend = self.backend or get_backend()
@@ -454,6 +515,7 @@ class ShipmentService:
             self.retriever,
             event_sink=event_sink,
             idempotency_key=key,
+            tenant_id=tenant,
         )
 
     def _analyze_model(
@@ -463,6 +525,7 @@ class ShipmentService:
         retriever: Retriever,
         event_sink: EventSink | None = None,
         idempotency_key: str | None = None,
+        tenant_id: str = DEFAULT_TENANT_ID,
     ) -> AgentResult:
         # Key-only documents get their text through the object-store
         # port before anything reads them (single + batch paths share
@@ -472,14 +535,17 @@ class ShipmentService:
         # this lane becomes diagnosis evidence for the new analysis.
         # The raw entries ride along too — the diagnosis tool loop
         # (provider mode) reads lane / carrier history through them.
-        priors = self._get_store().prior_shipments(
-            exclude_shipment_id=model.shipment_id
+        # Every read is scoped to this run's tenant: memory is a
+        # tenant's own history, never another tenant's.
+        store = self._get_store()
+        priors = store.prior_shipments(
+            exclude_shipment_id=model.shipment_id, tenant_id=tenant_id
         )
         history = self._history_summary(model, priors)
         # Feedback loop: what human deciders said about earlier cases
         # for this consignee / lane (with their reasons) joins the same
         # evidence — the next diagnosis shows the pattern of oversight.
-        feedback = self._feedback_for(model)
+        feedback = self._feedback_for(model, tenant_id=tenant_id)
         if feedback:
             history = {**(history or {}), "feedback": feedback}
         # Carrier scorecard: the carrier's whole stored track record
@@ -490,7 +556,7 @@ class ShipmentService:
         # compared against when option scoring applies its carrier
         # reliability term (options.reliability_adjustment). Both are
         # computed over the priors only (this shipment excluded).
-        records = self._get_store().records()
+        records = store.records(tenant_id=tenant_id)
         card = _carrier_scorecard(
             records,
             model.carrier,
@@ -511,11 +577,12 @@ class ShipmentService:
             priors=priors,
             event_sink=event_sink,
             checkpointer=self._get_checkpointer(),
-            thread_id=model.shipment_id,
+            thread_id=checkpoint_thread_id(tenant_id, model.shipment_id),
         )
-        self._get_store().save(
+        store.save(
             ApprovalRecord(
                 result=result,
+                tenant_id=tenant_id,
                 shipment=self._archive_documents(model),
                 created_at=_now_iso(),
                 idempotency_key=idempotency_key,
@@ -527,6 +594,7 @@ class ShipmentService:
         self,
         shipments: list[ShipmentInput | dict],
         concurrency: int = 1,
+        tenant_id: str | None = None,
     ) -> list[BatchItem]:
         """Analyse many shipments, in input order, optionally concurrently.
 
@@ -540,8 +608,10 @@ class ShipmentService:
         writes are serialised by the store itself (SQLite: one
         connection per call; in-memory: a lock). A shipment that fails
         (bad payload, provider down) lands in its item's ``error``;
-        it never fails the batch.
+        it never fails the batch. The whole batch lands in one tenant
+        partition (``tenant_id``, resolved like everywhere else).
         """
+        tenant = resolve_tenant_id(tenant_id)
 
         def run_one(raw: ShipmentInput | dict) -> BatchItem:
             shipment_id = (
@@ -557,7 +627,7 @@ class ShipmentService:
                 )
                 backend = self.backend or get_backend()
                 retriever = self.retriever or get_retriever()
-                result = self._analyze_model(model, backend, retriever)
+                result = self._analyze_model(model, backend, retriever, tenant_id=tenant)
                 return BatchItem(shipment_id=model.shipment_id, result=result)
             except Exception as exc:  # one bad shipment never fails the batch
                 return BatchItem(
@@ -590,16 +660,19 @@ class ShipmentService:
             "",
         )
 
-    def _feedback_for(self, shipment: ShipmentInput) -> list[dict]:
+    def _feedback_for(
+        self, shipment: ShipmentInput, tenant_id: str = DEFAULT_TENANT_ID
+    ) -> list[dict]:
         """Recent reviewer feedback matching this consignee or lane.
 
         Bounded to the last 3 matching decisions (the store returns
         newest first), reasons truncated — feedback is evidence, not a
         transcript. Each entry: {decision, reason, match} where match
         is "consignee" or "lane" (consignee wins when both match).
+        Reads only the run's own tenant partition.
         """
         entries = self._get_store().decision_feedback(
-            exclude_shipment_id=shipment.shipment_id
+            exclude_shipment_id=shipment.shipment_id, tenant_id=tenant_id
         )
         if not entries:
             return []
@@ -625,7 +698,10 @@ class ShipmentService:
         return matched
 
     def _history_summary(
-        self, shipment: ShipmentInput, priors: list[dict] | None = None
+        self,
+        shipment: ShipmentInput,
+        priors: list[dict] | None = None,
+        tenant_id: str = DEFAULT_TENANT_ID,
     ) -> dict | None:
         """Summarise prior analysed shipments for this consignee + lane.
 
@@ -636,7 +712,7 @@ class ShipmentService:
         """
         if priors is None:
             priors = self._get_store().prior_shipments(
-                exclude_shipment_id=shipment.shipment_id
+                exclude_shipment_id=shipment.shipment_id, tenant_id=tenant_id
             )
         if not priors:
             return None
@@ -668,10 +744,14 @@ class ShipmentService:
         }
 
     def approve(
-        self, shipment_id: str, approver: str, reason: str = ""
+        self,
+        shipment_id: str,
+        approver: str,
+        reason: str = "",
+        tenant_id: str | None = None,
     ) -> AgentResult:
         store = self._get_store()
-        record = store.get(shipment_id)
+        record = store.get(shipment_id, tenant_id=resolve_tenant_id(tenant_id))
         if record is None:
             raise KeyError(f"Unknown shipment_id: {shipment_id} (analyze it first)")
         if record.result.approval_status != "awaiting_approval":
@@ -702,12 +782,19 @@ class ShipmentService:
         self._resume_thread(
             shipment_id,
             {"decision": "approved", "actor": approver, "reason": reason},
+            tenant_id=record.tenant_id,
         )
         return record.result
 
-    def reject(self, shipment_id: str, reviewer: str, reason: str = "") -> AgentResult:
+    def reject(
+        self,
+        shipment_id: str,
+        reviewer: str,
+        reason: str = "",
+        tenant_id: str | None = None,
+    ) -> AgentResult:
         store = self._get_store()
-        record = store.get(shipment_id)
+        record = store.get(shipment_id, tenant_id=resolve_tenant_id(tenant_id))
         if record is None:
             raise KeyError(f"Unknown shipment_id: {shipment_id} (analyze it first)")
         if record.result.approval_status != "awaiting_approval":
@@ -725,20 +812,26 @@ class ShipmentService:
         self._resume_thread(
             shipment_id,
             {"decision": "rejected", "actor": reviewer, "reason": reason},
+            tenant_id=record.tenant_id,
         )
         return record.result
 
-    def dispatch_ledger(self, shipment_id: str) -> dict | None:
+    def dispatch_ledger(
+        self, shipment_id: str, tenant_id: str | None = None
+    ) -> dict | None:
         """The webhook delivery ledger for one shipment, or None.
 
         The durable account of the approval's output routing: every
         attempt (when, outcome, HTTP status, signature id, error),
         the current status, and the retry bookkeeping (attempts used
         / remaining, when the next retry falls due). ``None`` for an
-        unknown shipment; a known shipment with no webhook configured
-        reports an empty ledger, not an error.
+        unknown shipment — including one that exists only in another
+        tenant's partition; a known shipment with no webhook
+        configured reports an empty ledger, not an error.
         """
-        record = self._get_store().get(shipment_id)
+        record = self._get_store().get(
+            shipment_id, tenant_id=resolve_tenant_id(tenant_id)
+        )
         if record is None:
             return None
         attempts = record.dispatch_attempts
@@ -754,7 +847,12 @@ class ShipmentService:
         }
 
     def retry_dispatch(
-        self, shipment_id: str, *, force: bool = False, now=None
+        self,
+        shipment_id: str,
+        *,
+        force: bool = False,
+        now=None,
+        tenant_id: str | None = None,
     ) -> AgentResult:
         """Retry a failed approval-webhook delivery, once.
 
@@ -768,11 +866,15 @@ class ShipmentService:
         attempt joins the ledger either way it lands; a retry never
         re-records the decision and never resumes the graph thread —
         the approval happened once, this is only its delivery.
+
+        ``tenant_id`` scopes the record lookup like every other read;
+        the retry sweep passes each due record's own tenant (see
+        :meth:`run_dispatch_retries_once`).
         """
         from datetime import datetime, timezone
 
         store = self._get_store()
-        record = store.get(shipment_id)
+        record = store.get(shipment_id, tenant_id=resolve_tenant_id(tenant_id))
         if record is None:
             raise KeyError(f"Unknown shipment_id: {shipment_id} (analyze it first)")
         if record.result.approval_status != "approved":
@@ -814,19 +916,19 @@ class ShipmentService:
         store.save(record)
         return record.result
 
-    def due_dispatch_retries(self, now=None) -> list[str]:
-        """Shipment ids whose failed delivery is due a retry now.
+    def _due_retry_records(self, now=None) -> list[ApprovalRecord]:
+        """Records (any tenant) whose failed delivery is due a retry.
 
         A record qualifies when its latest dispatch failed, attempts
         remain in the budget, and the recorded backoff has elapsed.
-        This is the poll a scheduler/worker loop calls; performing
-        the retries stays with :meth:`retry_dispatch`, one bounded
-        attempt per call.
+        The scan is deliberately unscoped — the retry worker is an
+        operator process serving every tenant — and each record
+        carries its own tenant for the scoped retry that follows.
         """
         from datetime import datetime, timezone
 
         moment = now or datetime.now(timezone.utc)
-        due: list[str] = []
+        due: list[ApprovalRecord] = []
         for record in self._get_store().records():
             if record.dispatch_status != "failed" or not record.dispatch_attempts:
                 continue
@@ -834,8 +936,21 @@ class ShipmentService:
                 continue
             due_at = _parse_iso(record.dispatch_attempts[-1].get("next_retry_at"))
             if due_at is None or moment >= due_at:
-                due.append(record.result.shipment_id)
+                due.append(record)
         return due
+
+    def due_dispatch_retries(self, now=None) -> list[str]:
+        """Shipment ids whose failed delivery is due a retry now.
+
+        This is the poll a scheduler/worker loop calls; performing
+        the retries stays with :meth:`retry_dispatch`, one bounded
+        attempt per call. (Ids alone cannot name a record across
+        tenants — the sweep itself works from the records, see
+        :meth:`run_dispatch_retries_once`.)
+        """
+        return [
+            record.result.shipment_id for record in self._due_retry_records(now=now)
+        ]
 
     def run_dispatch_retries_once(self, now=None) -> list[dict]:
         """Perform every due dispatch retry, one bounded attempt each.
@@ -852,9 +967,15 @@ class ShipmentService:
 
         moment = now or datetime.now(timezone.utc)
         outcomes: list[dict] = []
-        for shipment_id in self.due_dispatch_retries(now=moment):
+        for record in self._due_retry_records(now=moment):
+            shipment_id = record.result.shipment_id
             try:
-                result = self.retry_dispatch(shipment_id, now=moment)
+                # Each retry is scoped to the record's own tenant:
+                # the sweep serves every tenant, but a retry still
+                # reads and writes inside one partition.
+                result = self.retry_dispatch(
+                    shipment_id, now=moment, tenant_id=record.tenant_id
+                )
             except (KeyError, ValueError) as exc:
                 outcomes.append({"shipment_id": shipment_id, "error": str(exc)})
                 continue
@@ -908,32 +1029,48 @@ class ShipmentService:
             stop_event.wait(interval_seconds)
         return totals
 
-    def approval_queue(self) -> list[dict]:
+    def approval_queue(self, tenant_id: str | None = None) -> list[dict]:
         """The approval queue: awaiting shipments, severity first,
         then oldest, each with the flags an approver scans for, its
         age bucket, and its SLA view under the configured budgets
-        (``QUEUE_SLA_HOURS_<SEVERITY>``, see ``insights``)."""
+        (``QUEUE_SLA_HOURS_<SEVERITY>``, see ``insights``). Scoped to
+        the resolved tenant's partition — a tenant's approvers work
+        their own queue."""
         from .insights import sla_thresholds_from_env
 
         return _approval_queue(
-            self._get_store().records(), sla_hours=sla_thresholds_from_env()
+            self._get_store().records(tenant_id=resolve_tenant_id(tenant_id)),
+            sla_hours=sla_thresholds_from_env(),
         )
 
-    def approval_queue_summary(self) -> dict:
+    def approval_queue_summary(self, tenant_id: str | None = None) -> dict:
         """The queue's health summary (depth, SLA breaches, age and
         severity mix) — see ``insights.queue_summary``."""
         from .insights import queue_summary
 
-        return queue_summary(self.approval_queue())
+        return queue_summary(self.approval_queue(tenant_id=tenant_id))
 
-    def carrier_scorecards(self) -> list[dict]:
-        """Scorecards for every carrier in the store, busiest first."""
-        return all_carrier_scorecards(self._get_store().records())
+    def carrier_scorecards(self, tenant_id: str | None = None) -> list[dict]:
+        """Scorecards for every carrier in the tenant's partition,
+        busiest first."""
+        return all_carrier_scorecards(
+            self._get_store().records(tenant_id=resolve_tenant_id(tenant_id))
+        )
 
-    def carrier_scorecard(self, carrier: str) -> dict | None:
-        """One carrier's scorecard, or None when it has no history."""
-        return _carrier_scorecard(self._get_store().records(), carrier)
+    def carrier_scorecard(
+        self, carrier: str, tenant_id: str | None = None
+    ) -> dict | None:
+        """One carrier's scorecard within the tenant's partition, or
+        None when it has no history there."""
+        return _carrier_scorecard(
+            self._get_store().records(tenant_id=resolve_tenant_id(tenant_id)),
+            carrier,
+        )
 
-    def get(self, shipment_id: str) -> AgentResult | None:
-        record = self._get_store().get(shipment_id)
+    def get(
+        self, shipment_id: str, tenant_id: str | None = None
+    ) -> AgentResult | None:
+        record = self._get_store().get(
+            shipment_id, tenant_id=resolve_tenant_id(tenant_id)
+        )
         return record.result if record else None

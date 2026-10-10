@@ -89,6 +89,14 @@ def silence_langchain_deprecation_warnings() -> None:
     warnings.filterwarnings("ignore", message=r".*allowed_objects.*")
 
 
+# Every record belongs to exactly one tenant (store.py partitions on
+# it). Requests name theirs with the ``X-Tenant-ID`` header; a process
+# serving a single client sets ``TENANT_ID`` instead; with neither,
+# everything lives in this default tenant — the single-tenant
+# deployment shape the earlier rounds shipped.
+DEFAULT_TENANT_ID = "default"
+
+
 def env_str(name: str, default: str | None = None) -> str | None:
     """Read a string variable, treating an empty value as unset."""
     value = os.environ.get(name)

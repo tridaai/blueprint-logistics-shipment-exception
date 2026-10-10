@@ -242,24 +242,46 @@ def readiness() -> JSONResponse:
     )
 
 
+# Tenancy: every data endpoint accepts an ``X-Tenant-ID`` header
+# naming the tenant partition it operates on (resolution: header,
+# else the TENANT_ID environment default, else the default tenant —
+# see service.resolve_tenant_id). A read for a shipment that lives
+# in another tenant's partition is a 404, exactly as if it did not
+# exist: partitions are invisible to each other, not just filtered.
+
+
 @app.get("/metrics")
-def metrics() -> PlainTextResponse:
+def metrics(
+    x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
+) -> PlainTextResponse:
     """Prometheus text exposition, computed live from the store:
     runs, decisions, guardrail failures, latency, tokens, estimated
     cost (see ``metrics.py``). Open like /health — aggregates only,
     no shipment content; scrapers live on a trusted network segment
-    in any real deployment."""
-    payload = render_prometheus(compute_metrics(service._get_store().records()))
+    in any real deployment. The aggregates cover the resolved
+    tenant's partition (``X-Tenant-ID``), so a multi-tenant
+    deployment scrapes per tenant."""
+    from .service import resolve_tenant_id
+
+    records = service._get_store().records(tenant_id=resolve_tenant_id(x_tenant_id))
+    payload = render_prometheus(compute_metrics(records))
     return PlainTextResponse(payload, media_type="text/plain; version=0.0.4")
 
 
 @app.get("/audit/export", dependencies=_AUTH)
-def audit_export(format: str = Query(default="json")):
+def audit_export(
+    format: str = Query(default="json"),
+    x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
+):
     """The audit trail: one row per analysed shipment — conclusion,
     decider, reason, timestamps — as JSON (default) or CSV
-    (``?format=csv``). A projection of the store, the system of
-    record; see ``audit.py``."""
-    rows = audit_rows(service._get_store().records())
+    (``?format=csv``). A projection of the caller's tenant partition
+    of the store, the system of record; see ``audit.py``."""
+    from .service import resolve_tenant_id
+
+    rows = audit_rows(
+        service._get_store().records(tenant_id=resolve_tenant_id(x_tenant_id))
+    )
     if format == "json":
         return {"count": len(rows), "decisions": rows}
     if format == "csv":
@@ -270,7 +292,9 @@ def audit_export(format: str = Query(default="json")):
 
 
 @app.get("/queue", dependencies=_AUTH)
-def approval_queue() -> dict:
+def approval_queue(
+    x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
+) -> dict:
     """The approval queue: shipments awaiting a human decision,
     sorted by severity then age (oldest first), each with the flags
     an approver scans for — cross-check disagreement, guardrail
@@ -280,11 +304,11 @@ def approval_queue() -> dict:
     wait has blown it). The response also carries the queue's own
     ``summary`` (depth, breaches, age/severity mix) and the active
     ``sla_hours`` budgets (``QUEUE_SLA_HOURS_<SEVERITY>``). The
-    approver's worklist, computed from the store (see
-    ``insights.py``)."""
+    approver's worklist, computed from the caller's tenant partition
+    of the store (see ``insights.py``)."""
     from .insights import queue_summary, sla_thresholds_from_env
 
-    queue_items = service.approval_queue()
+    queue_items = service.approval_queue(tenant_id=x_tenant_id)
     return {
         "count": len(queue_items),
         "queue": queue_items,
@@ -294,20 +318,25 @@ def approval_queue() -> dict:
 
 
 @app.get("/carriers/scorecards", dependencies=_AUTH)
-def carrier_scorecards() -> dict:
-    """Carrier scorecards: per-carrier aggregates over the stored
-    history — shipments, exception mix and rate, damage rate, and
-    the human decision record (approvals / rejections / approval
-    rate), busiest carrier first."""
-    cards = service.carrier_scorecards()
+def carrier_scorecards(
+    x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
+) -> dict:
+    """Carrier scorecards: per-carrier aggregates over the caller's
+    tenant partition — shipments, exception mix and rate, damage
+    rate, and the human decision record (approvals / rejections /
+    approval rate), busiest carrier first."""
+    cards = service.carrier_scorecards(tenant_id=x_tenant_id)
     return {"count": len(cards), "carriers": cards}
 
 
 @app.get("/carriers/{carrier}/scorecard", dependencies=_AUTH)
-def carrier_scorecard(carrier: str) -> dict:
+def carrier_scorecard(
+    carrier: str,
+    x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
+) -> dict:
     """One carrier's scorecard (404 when the carrier has no stored
-    history)."""
-    card = service.carrier_scorecard(carrier)
+    history in the caller's tenant partition)."""
+    card = service.carrier_scorecard(carrier, tenant_id=x_tenant_id)
     if card is None:
         raise HTTPException(
             status_code=404, detail=f"No stored history for carrier: {carrier}"
@@ -330,14 +359,18 @@ def analyze(
     shipment: ShipmentInput,
     response: Response,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
 ) -> AgentResult:
     """Analyse one shipment. Send an ``Idempotency-Key`` header to
     make the call safe to retry: a repeat with the same key (and the
     same shipment id) returns the stored run — flagged
     ``idempotent_replay`` in the body and with an
     ``X-Idempotent-Replay: true`` response header — instead of
-    running the pipeline (and spending model calls) again."""
-    result = service.analyze(shipment, idempotency_key=idempotency_key)
+    running the pipeline (and spending model calls) again. The run
+    is recorded in the caller's tenant partition (``X-Tenant-ID``)."""
+    result = service.analyze(
+        shipment, idempotency_key=idempotency_key, tenant_id=x_tenant_id
+    )
     if result.idempotent_replay:
         response.headers["X-Idempotent-Replay"] = "true"
     return result
@@ -351,6 +384,7 @@ def _sse(payload: dict) -> str:
 def analyze_stream(
     shipment: ShipmentInput,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
 ) -> StreamingResponse:
     """The same analysis as ``POST /shipments/analyze``, streamed.
 
@@ -365,7 +399,9 @@ def analyze_stream(
     is nothing to stream: the response is the single ``run_completed``
     event carrying the stored (replay-flagged) result.
     """
-    replay = service.idempotent_result(idempotency_key, shipment.shipment_id)
+    replay = service.idempotent_result(
+        idempotency_key, shipment.shipment_id, tenant_id=x_tenant_id
+    )
     if replay is not None:
 
         def replay_stream():
@@ -388,7 +424,10 @@ def analyze_stream(
     def work() -> None:
         try:
             outcome["result"] = service.analyze(
-                shipment, event_sink=sink, idempotency_key=idempotency_key
+                shipment,
+                event_sink=sink,
+                idempotency_key=idempotency_key,
+                tenant_id=x_tenant_id,
             )
         except Exception as exc:  # surfaced as the run_failed event below
             outcome["error"] = exc
@@ -436,18 +475,30 @@ def analyze_stream(
 
 
 @app.get("/shipments/{shipment_id}", response_model=AgentResult, dependencies=_AUTH)
-def get_result(shipment_id: str) -> AgentResult:
-    result = service.get(shipment_id)
+def get_result(
+    shipment_id: str,
+    x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
+) -> AgentResult:
+    """One shipment's stored run, from the caller's tenant partition
+    — a shipment that exists only under another tenant is a 404."""
+    result = service.get(shipment_id, tenant_id=x_tenant_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Shipment not analyzed yet.")
     return result
 
 
 @app.post("/shipments/{shipment_id}/approve", response_model=AgentResult, dependencies=_AUTH)
-def approve(shipment_id: str, request: ApproveRequest) -> AgentResult:
+def approve(
+    shipment_id: str,
+    request: ApproveRequest,
+    x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
+) -> AgentResult:
     try:
         return service.approve(
-            shipment_id, approver=_decision_actor(request), reason=request.reason
+            shipment_id,
+            approver=_decision_actor(request),
+            reason=request.reason,
+            tenant_id=x_tenant_id,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -456,10 +507,17 @@ def approve(shipment_id: str, request: ApproveRequest) -> AgentResult:
 
 
 @app.post("/shipments/{shipment_id}/reject", response_model=AgentResult, dependencies=_AUTH)
-def reject(shipment_id: str, request: RejectRequest) -> AgentResult:
+def reject(
+    shipment_id: str,
+    request: RejectRequest,
+    x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
+) -> AgentResult:
     try:
         return service.reject(
-            shipment_id, reviewer=_decision_actor(request), reason=request.reason
+            shipment_id,
+            reviewer=_decision_actor(request),
+            reason=request.reason,
+            tenant_id=x_tenant_id,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -468,14 +526,17 @@ def reject(shipment_id: str, request: RejectRequest) -> AgentResult:
 
 
 @app.get("/shipments/{shipment_id}/dispatch", dependencies=_AUTH)
-def dispatch_ledger(shipment_id: str) -> dict:
+def dispatch_ledger(
+    shipment_id: str,
+    x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
+) -> dict:
     """The approval webhook's delivery ledger for one shipment:
     every attempt (timestamp, outcome, HTTP status, signature id,
     error), the current dispatch status, and the retry bookkeeping
     (attempts used/remaining, next-retry due time). Empty attempts
     when no webhook is configured — the default no-external-action
     mode ledgers nothing because nothing was attempted."""
-    ledger = service.dispatch_ledger(shipment_id)
+    ledger = service.dispatch_ledger(shipment_id, tenant_id=x_tenant_id)
     if ledger is None:
         raise HTTPException(status_code=404, detail="Shipment not analyzed yet.")
     return ledger
@@ -492,7 +553,11 @@ class DispatchRetryRequest(BaseModel):
     response_model=AgentResult,
     dependencies=_AUTH,
 )
-def retry_dispatch(shipment_id: str, request: DispatchRetryRequest) -> AgentResult:
+def retry_dispatch(
+    shipment_id: str,
+    request: DispatchRetryRequest,
+    x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
+) -> AgentResult:
     """Retry a failed approval-webhook delivery — one bounded attempt.
 
     Refused (422) when the shipment is not approved, no webhook is
@@ -500,7 +565,9 @@ def retry_dispatch(shipment_id: str, request: DispatchRetryRequest) -> AgentResu
     is exhausted, or the backoff has not elapsed and ``force`` is
     not set. The attempt joins the delivery ledger either way."""
     try:
-        return service.retry_dispatch(shipment_id, force=request.force)
+        return service.retry_dispatch(
+            shipment_id, force=request.force, tenant_id=x_tenant_id
+        )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

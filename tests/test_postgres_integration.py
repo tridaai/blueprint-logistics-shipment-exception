@@ -71,7 +71,7 @@ def test_migrations_are_idempotent(pg_env):
     first = run_migrations(pg_env)
     second = run_migrations(pg_env)
     assert second == []  # nothing left to apply the second time
-    assert set(first) <= {"0001", "0002", "0003"}
+    assert set(first) <= {"0001", "0002", "0003", "0004"}
 
 
 def test_postgres_store_survives_reopen(clean_approvals):
