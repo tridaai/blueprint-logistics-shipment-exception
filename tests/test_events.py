@@ -30,6 +30,12 @@ PIPELINE_NODES = [
     "draft", "verify", "review", "validate", "human_approval",
 ]
 
+# The graph's node set: the eleven trace-step nodes plus the two
+# evidence fan-out branches (discrepancies, history), which run
+# concurrently with retrieve and so interleave in the event stream —
+# order is only asserted where the topology actually orders events.
+GRAPH_NODES = set(PIPELINE_NODES) | {"discrepancies", "history"}
+
 
 def _run_sample(index=0, sink=None, **kwargs):
     shipment = sample_shipment_models()[index]
@@ -57,8 +63,15 @@ def test_event_sequence_is_complete_and_ordered():
 
     started = [e.node for e in sink.events if e.type == "node_started"]
     finished = [e.node for e in sink.events if e.type == "node_finished"]
-    assert started == PIPELINE_NODES
-    assert finished == PIPELINE_NODES
+    assert set(started) == GRAPH_NODES
+    assert set(finished) == GRAPH_NODES
+    # The order the topology does guarantee: intake before classify,
+    # the evidence branches before diagnose, the gate last.
+    assert max(finished.index(n) for n in ("extract", "ingest")) < finished.index("classify")
+    assert max(
+        finished.index(n) for n in ("retrieve", "discrepancies", "history")
+    ) < finished.index("diagnose")
+    assert finished[-1] == "human_approval"
     for event in sink.events:
         if event.type == "node_finished":
             assert event.duration_ms is not None and event.duration_ms >= 0
@@ -180,7 +193,8 @@ def test_sse_endpoint_streams_events_and_the_final_result():
     events = _parse_sse(body)
     assert events[0]["type"] == "run_started"
     node_finishes = [e["node"] for e in events if e["type"] == "node_finished"]
-    assert node_finishes == PIPELINE_NODES
+    assert set(node_finishes) == GRAPH_NODES
+    assert node_finishes[-1] == "human_approval"
     final = events[-1]
     assert final["type"] == "run_completed"
     assert final["detail"]["status"] == "awaiting_approval"

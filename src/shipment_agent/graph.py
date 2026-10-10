@@ -1,8 +1,13 @@
 """The agent graph (LangGraph).
 
-Pipeline — every step is a named, inspectable node:
+Pipeline — every step is a named, inspectable node. The evidence
+phase fans out (independent branches run concurrently and merge
+before diagnose); the rest is a chain:
 
-    extract ──► ingest ──► classify ──► retrieve ──► diagnose ──► options
+    extract ──┐
+              ├──► classify ──┬──► retrieve ──────┐
+    ingest ───┘               ├──► discrepancies ──┼──► diagnose ──► options
+                              └──► history ────────┘
         ──► draft ──► verify ──► review ──► validate ──► human_approval
         ──► approval_gate ──► END
 
@@ -22,14 +27,14 @@ from __future__ import annotations
 import time
 from typing import TypedDict
 
-from langgraph.graph import END, StateGraph
+from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 from .autonomy import compute_autonomy
 from .clarify import build_information_request
 from .classifier import classify_shipment
 from .crosscheck import resolve_classification
-from .diagnosis import build_diagnosis
+from .diagnosis import build_diagnosis, memory_evidence_lines
 from .extractor import (
     discrepancies_from_dicts,
     extract_documents,
@@ -570,6 +575,8 @@ class AgentState(TypedDict, total=False):
     classification_suggestion: dict | None
     policies: list[dict]
     retrieval_info: dict
+    extraction_discrepancies: list[str]
+    history_evidence: list[str]
     history: dict | None
     priors: list[dict]
     diagnosis: dict
@@ -598,6 +605,7 @@ def build_graph(
     event_sink: EventSink | None = None,
     run_context: dict | None = None,
     checkpointer: Checkpointer | None = None,
+    evidence_mode: str = "parallel",
 ):
     """Compile the LangGraph pipeline with injectable backend + retriever.
 
@@ -613,7 +621,19 @@ def build_graph(
     an ``interrupt()`` with its state persisted under the caller's
     thread_id, and :func:`resume_approval` completes it with the
     human's decision. Without one, the gate node is a pass-through.
+
+    ``evidence_mode`` selects the evidence-phase topology:
+    ``"parallel"`` (default) fans the independent work out — extract
+    ∥ ingest, then retrieval ∥ extraction cross-check ∥ history
+    evidence after classification, merging before diagnose — while
+    ``"sequential"`` chains the same node functions linearly. The
+    node functions and the merge are identical; only the schedule
+    differs, and an equivalence test pins that the results are too.
     """
+    if evidence_mode not in ("parallel", "sequential"):
+        raise ValueError(
+            f"evidence_mode must be 'parallel' or 'sequential', got {evidence_mode!r}"
+        )
     backend = backend or MockModelBackend()
     retriever = retriever or KeywordRetriever()
     # Cost guardrail: with RUN_TOKEN_BUDGET set, the backend is wrapped
@@ -749,11 +769,33 @@ def build_graph(
             "retrieval_info": info,
         }
 
+    def discrepancies(state: AgentState) -> AgentState:
+        # Evidence fan-out branch: the extraction cross-check (provided
+        # vs extracted field comparison), computed from the extraction
+        # records. Pure and independent of retrieval/history, so it
+        # runs concurrently with them (see the topology below).
+        extractions = [
+            DocumentExtraction.model_validate(e) for e in state.get("extractions", [])
+        ]
+        return {"extraction_discrepancies": extraction_discrepancies(extractions)}
+
+    def history(state: AgentState) -> AgentState:
+        # Evidence fan-out branch: the memory + reviewer-feedback
+        # evidence lines over the store summary the service supplied.
+        return {"history_evidence": memory_evidence_lines(state.get("history"))}
+
     def diagnose(state: AgentState) -> AgentState:
         shipment = ShipmentInput.model_validate(state["shipment"])
         extractions = [
             DocumentExtraction.model_validate(e) for e in state.get("extractions", [])
         ]
+        # The fan-out branches computed the cross-check discrepancies
+        # and the history evidence in parallel; fall back to computing
+        # them here if a branch did not run (defensive — the topology
+        # guarantees both precede this node).
+        disc = state.get("extraction_discrepancies")
+        if disc is None:
+            disc = extraction_discrepancies(extractions)
         # The toolbox is what makes the provider-mode diagnosis agentic:
         # the model can pull policy search, history, and computed facts
         # through it before composing. In the default mode nothing calls
@@ -763,7 +805,7 @@ def build_graph(
             classification=state["classification"],
             delay_hours=state.get("delay_hours"),
             mismatches=state.get("document_mismatches", []),
-            discrepancies=extraction_discrepancies(extractions),
+            discrepancies=disc,
             document_check_warning=state.get("document_check_warning"),
             retriever=retriever,
             priors=state.get("priors", []),
@@ -778,6 +820,8 @@ def build_graph(
             backend=backend,
             history=state.get("history"),
             toolbox=toolbox,
+            discrepancies=disc,
+            history_lines=state.get("history_evidence"),
         )
         return {"diagnosis": diagnosis.model_dump()}
 
@@ -1170,6 +1214,8 @@ def build_graph(
     graph.add_node("ingest", _wrap("ingest", ingest))
     graph.add_node("classify", _wrap("classify", classify))
     graph.add_node("retrieve", _wrap("retrieve", retrieve))
+    graph.add_node("discrepancies", _wrap("discrepancies", discrepancies))
+    graph.add_node("history", _wrap("history", history))
     graph.add_node("diagnose", _wrap("diagnose", diagnose))
     graph.add_node("options", _wrap("options", options))
     graph.add_node("draft", _wrap("draft", draft))
@@ -1178,12 +1224,34 @@ def build_graph(
     graph.add_node("validate", _wrap("validate", validate))
     graph.add_node("human_approval", _wrap("human_approval", human_approval))
     graph.add_node("approval_gate", approval_gate)
-    graph.set_entry_point("extract")
+    if evidence_mode == "parallel":
+        # Fan-out: extract and ingest are independent; classification
+        # joins them (its LLM half reads the computed facts). After
+        # classification, retrieval, the extraction cross-check, and
+        # the history evidence are mutually independent — they run
+        # concurrently and merge (disjoint state keys, so the merge
+        # is order-stable) before diagnose. LangGraph branches were
+        # chosen over a thread pool inside one node because each
+        # branch stays a named, traced, individually timed node.
+        graph.add_edge(START, "extract")
+        graph.add_edge(START, "ingest")
+        graph.add_edge("extract", "classify")
+        graph.add_edge("ingest", "classify")
+        for branch in ("retrieve", "discrepancies", "history"):
+            graph.add_edge("classify", branch)
+            graph.add_edge(branch, "diagnose")
+    else:
+        graph.add_edge(START, "extract")
+        for source, target in [
+            ("extract", "ingest"),
+            ("ingest", "classify"),
+            ("classify", "retrieve"),
+            ("retrieve", "discrepancies"),
+            ("discrepancies", "history"),
+            ("history", "diagnose"),
+        ]:
+            graph.add_edge(source, target)
     for source, target in [
-        ("extract", "ingest"),
-        ("ingest", "classify"),
-        ("classify", "retrieve"),
-        ("retrieve", "diagnose"),
         ("diagnose", "options"),
         ("options", "draft"),
         ("draft", "verify"),
@@ -1208,6 +1276,7 @@ def run_shipment(
     event_sink: EventSink | None = None,
     checkpointer: Checkpointer | None = None,
     thread_id: str | None = None,
+    evidence_mode: str = "parallel",
 ) -> AgentResult:
     """Run one shipment through the full graph and return the typed result.
 
@@ -1240,6 +1309,7 @@ def run_shipment(
         event_sink=event_sink,
         run_context=run_context,
         checkpointer=checkpointer,
+        evidence_mode=evidence_mode,
     )
     invoke_config = None
     if checkpointer is not None:

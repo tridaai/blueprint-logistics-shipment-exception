@@ -75,8 +75,17 @@ def build_evidence(
     extractions: list[DocumentExtraction],
     policies: list[dict],
     history: dict | None = None,
+    discrepancies: list[str] | None = None,
+    history_lines: list[str] | None = None,
 ) -> list[str]:
-    """The deterministic evidence list every diagnosis cites."""
+    """The deterministic evidence list every diagnosis cites.
+
+    ``discrepancies`` / ``history_lines`` are the precomputed
+    extraction cross-check and memory/feedback evidence (the graph's
+    evidence fan-out computes them in parallel branches); when they
+    are None they are computed here, exactly as before — the lines
+    are identical either way, only *when* they are computed differs.
+    """
     evidence: list[str] = []
     if delay_hours is not None:
         evidence.append(f"computed delay_hours={delay_hours} (tool: compute_delay_hours)")
@@ -85,13 +94,17 @@ def build_evidence(
             f"document mismatch on '{m['field']}': BOL={m.get('bol_value')} vs "
             f"invoice={m.get('invoice_value')} (tool: compare_documents)"
         )
-    for line in extraction_discrepancies(extractions):
+    if discrepancies is None:
+        discrepancies = extraction_discrepancies(extractions)
+    for line in discrepancies:
         evidence.append(f"extraction cross-check: {line}")
     if classification.get("signals"):
         evidence.append("classification signals: " + "; ".join(classification["signals"]))
     for p in policies:
         evidence.append(f"policy {p['policy_id']}: {p['title']}")
-    evidence.extend(memory_evidence_lines(history))
+    evidence.extend(
+        history_lines if history_lines is not None else memory_evidence_lines(history)
+    )
     return evidence
 
 
@@ -138,6 +151,8 @@ def build_diagnosis(
     backend,
     history: dict | None = None,
     toolbox: DiagnosisToolBox | None = None,
+    discrepancies: list[str] | None = None,
+    history_lines: list[str] | None = None,
 ) -> Diagnosis:
     """Compose the diagnosis: LLM prose in provider mode, template otherwise.
 
@@ -156,6 +171,8 @@ def build_diagnosis(
         shipment = shipment.model_copy(
             update={"latest_event": event_text, "condition_notes": notes_text}
         )
+    if discrepancies is None:
+        discrepancies = extraction_discrepancies(extractions)
     evidence = build_evidence(
         classification=classification,
         delay_hours=delay_hours,
@@ -163,6 +180,8 @@ def build_diagnosis(
         extractions=extractions,
         policies=policies,
         history=history,
+        discrepancies=discrepancies,
+        history_lines=history_lines,
     )
     citations = [p["policy_id"] for p in policies]
     template = Diagnosis(
@@ -194,7 +213,7 @@ def build_diagnosis(
         rationale=classification["rationale"],
         delay_hours=delay_hours,
         mismatches=mismatches,
-        discrepancies=extraction_discrepancies(extractions),
+        discrepancies=discrepancies,
         latest_event=shipment.latest_event,
         condition_notes=shipment.condition_notes,
         policy_details=policies,
