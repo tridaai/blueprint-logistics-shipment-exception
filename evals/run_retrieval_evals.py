@@ -43,6 +43,10 @@ reported:
   rerank. Offline it runs over a **stand-in embedder** (hashed
   bag-of-words vectors, in this file): that measures the merge and
   the harness, NOT real embedding quality — the output says so.
+  The semantic half is the shipped code path end to end, including
+  its polarity strike (denied signal phrases struck from the query
+  before embedding — the stand-in replaces only the client that
+  turns text into vectors).
   Pass ``--real`` to measure the configured embeddings instead
   (``RETRIEVER=hybrid`` stack: OpenAI/Ollama per the environment);
   that fails loudly when no embeddings are configured.

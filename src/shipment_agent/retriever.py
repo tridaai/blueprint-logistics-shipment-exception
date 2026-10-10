@@ -168,6 +168,44 @@ def _query_analysis(query: str) -> tuple[set[str], set[str]]:
     return base, denied
 
 
+def _embedding_query(query: str) -> str:
+    """The query as the semantic half should embed it: denied
+    signals struck.
+
+    An embedding has no negation. Cosine over vectors reads "no
+    damage reported" as *damage* — the denied noun at full weight —
+    and the damage policy outranks the routine one for a shipment
+    whose whole point is that nothing is wrong (RQ-34, the case the
+    hybrid ranking missed after round 9 taught the keyword half
+    polarity). The semantic half now applies the same discipline
+    as :func:`_query_analysis`, with the classifier's own rules:
+    every occurrence of a denied signal phrase is blanked from the
+    text before embedding. A phrase counts as denied only when
+    *every* occurrence is negated (``signal_phrase_states``), so an
+    affirmed mention is never struck, and the cue-view rule keeps
+    the leading exception-type label from negating the shipment's
+    own first clause. A query that denies nothing is returned
+    unchanged — affirmed retrieval embeds exactly what it always
+    did.
+    """
+    from .classifier import _phrase_pattern, signal_phrase_states
+
+    _, denied = signal_phrase_states(_cue_view(query))
+    if not denied:
+        return query
+    lowered = query.lower()
+    struck = list(query)
+    for phrase in denied:
+        for match in _phrase_pattern(phrase).finditer(lowered):
+            for index in range(match.start(), match.end()):
+                struck[index] = " "
+    cleaned = " ".join("".join(struck).split())
+    # A query that was *only* denials ("no damage, no delay")
+    # strikes to nothing; embed the original rather than send an
+    # empty string to the provider.
+    return cleaned or query
+
+
 # The Retriever protocol is declared in ports.py (the seam registry);
 # it is re-exported here so existing imports keep working.
 from .ports import Retriever  # noqa: E402,F401
@@ -331,6 +369,13 @@ class SemanticRetriever:
     The corpus is embedded once (lazily, on first use) and cached; each
     query is embedded per call. Same return shape as the keyword
     retriever: ``RetrievedPolicy`` snippets with similarity scores.
+
+    The query is embedded in its polarity-adjusted form (see
+    :func:`_embedding_query`): denied signal phrases are struck
+    before embedding, because a vector cannot hear the "no" in
+    "no damage" — without the strike, the denied signal's own
+    policy outranks the routine one. The corpus side is embedded
+    as written: a document's stance is its own business.
     """
 
     name = "semantic"
@@ -727,6 +772,7 @@ class SemanticRetriever:
         return retrieved
 
     def retrieve(self, query: str, top_k: int = 3) -> list[RetrievedPolicy]:
+        query = _embedding_query(query)
         if self._pgvector_available():
             return self._retrieve_pgvector(query, top_k)
         collection = self._get_chroma_collection()

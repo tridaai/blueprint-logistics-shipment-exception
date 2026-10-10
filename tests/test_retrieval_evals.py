@@ -81,6 +81,32 @@ def test_both_rankings_clear_the_recall_gate():
     assert "stand-in" in report["embeddings"]
 
 
+def test_hybrid_carries_the_denial_cases_and_holds_the_floor():
+    """Round 10's polarity strike, measured on the labelled set.
+
+    RQ-34 (the clean inspection: "no damage, no leak found") was
+    the case the hybrid merge kept burying — the semantic half
+    embedded the denials at full weight and the damage policy
+    outranked the routine one. With denied signals struck before
+    embedding, the routine policy reaches the fused top-3. The
+    floor assertion is the regression guard the round-9 backlog
+    asked for: the hybrid mean may not sit below the keyword mean
+    on this set, so the merge cannot silently re-bury a case the
+    keyword half already carries."""
+    runner = _load_runner()
+    report = runner.evaluate(_cases())
+    hybrid_name = next(
+        name for name in report["summary"] if name.startswith("hybrid")
+    )
+    rows = {r["case_id"]: r for r in report["cases"]}
+    for case_id in ("RQ-17", "RQ-21", "RQ-34"):
+        assert rows[case_id]["results"][hybrid_name]["recall_at_3"] == 1.0, case_id
+    assert (
+        report["summary"][hybrid_name]["mean_recall_at_3"]
+        >= report["summary"]["keyword"]["mean_recall_at_3"]
+    )
+
+
 def test_customer_sop_case_ranks_the_sop_first():
     runner = _load_runner()
     report = runner.evaluate(_cases())
