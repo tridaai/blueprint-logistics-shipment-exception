@@ -24,6 +24,19 @@ A production corpus fed by the client's own document systems would
 swap the corpus source (and could put LlamaIndex in front of the
 same pgvector tables); the agent only depends on the ``Retriever``
 protocol, so that swap touches one file, not the graph.
+
+**Tenancy.** The corpus is tagged: shared documents carry no
+``tenant_id``, a tenant's own SOPs carry theirs (see
+``policies_data.TENANT_POLICIES``). Every implementation scopes its
+corpus with :func:`corpus_for_tenant` and offers ``for_tenant`` —
+the service resolves a scoped view per run, so one tenant's runs
+retrieve its own SOPs on top of the shared corpus while another
+tenant's documents are absent from the corpus entirely (never
+ranked, never cited — not filtered from the results after the
+fact). An unscoped retriever (the CLI / demo default) sees the
+shared corpus only. A retriever built over an explicitly injected
+corpus is the injector's own: ``for_tenant`` returns it unchanged,
+which is what the eval harnesses and tests rely on.
 """
 
 from __future__ import annotations
@@ -34,13 +47,30 @@ import re
 from .config import env_float, env_str, load_dotenv
 from .errors import translate_construction_error, translate_provider_error
 from .model_backends import DEFAULT_TIMEOUT_SECONDS, _missing_sdk_error
-from .policies_data import POLICIES
+from .policies_data import full_corpus
 from .schemas import RetrievedPolicy
 
 _STOPWORDS = {
     "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "is", "was",
     "by", "with", "when", "if", "it", "its", "are", "be", "at", "as",
 }
+
+
+def corpus_for_tenant(
+    policies: list[dict[str, str]], tenant_id: str | None
+) -> list[dict[str, str]]:
+    """The slice of a tagged corpus one tenant may retrieve from.
+
+    A document is visible when it is shared (no ``tenant_id``) or
+    belongs to this tenant. ``tenant_id=None`` (no tenant claimed)
+    sees shared documents only — tenant documents never surface for
+    an anonymous run, and never for another tenant's.
+    """
+    return [
+        policy
+        for policy in policies
+        if not policy.get("tenant_id") or policy.get("tenant_id") == tenant_id
+    ]
 
 
 def _tokens(text: str) -> list[str]:
@@ -57,15 +87,53 @@ class KeywordRetriever:
 
     Deliberately simple and deterministic so evals and tests are stable
     offline. Score = shared tokens normalised by policy length.
+
+    With no ``policies`` argument the corpus is the deployment's
+    tagged corpus (shared + every tenant's documents), scoped to
+    ``tenant_id`` — ``None`` (the default) sees the shared corpus
+    only, and :meth:`for_tenant` returns the view for one tenant. An
+    explicitly injected corpus is used exactly as given (the eval
+    harnesses own their corpora), and ``for_tenant`` then returns
+    this retriever unchanged.
     """
 
     name = "keyword"
 
-    def __init__(self, policies: list[dict[str, str]] | None = None) -> None:
-        self._policies = policies if policies is not None else POLICIES
+    def __init__(
+        self,
+        policies: list[dict[str, str]] | None = None,
+        *,
+        tenant_id: str | None = None,
+        _corpus: list[dict[str, str]] | None = None,
+    ) -> None:
+        self._tenant_id = tenant_id
+        if _corpus is not None:
+            # A scoped view over the deployment corpus (for_tenant).
+            self._explicit = False
+            self._corpus = _corpus
+            self._policies = corpus_for_tenant(_corpus, tenant_id)
+        elif policies is not None:
+            self._explicit = True
+            self._corpus = list(policies)
+            self._policies = self._corpus
+        else:
+            self._explicit = False
+            self._corpus = full_corpus()
+            self._policies = corpus_for_tenant(self._corpus, tenant_id)
         self._index = [
             (p, set(_tokens(f"{p['title']} {p['text']}"))) for p in self._policies
         ]
+
+    @property
+    def tenant_id(self) -> str | None:
+        """The tenant this view is scoped to (None = shared only)."""
+        return self._tenant_id
+
+    def for_tenant(self, tenant_id: str | None) -> "KeywordRetriever":
+        """The view of this retriever scoped to one tenant's corpus."""
+        if self._explicit or tenant_id == self._tenant_id:
+            return self
+        return KeywordRetriever(tenant_id=tenant_id, _corpus=self._corpus)
 
     def retrieve(self, query: str, top_k: int = 3) -> list[RetrievedPolicy]:
         query_tokens = set(_tokens(query))
@@ -121,8 +189,26 @@ class SemanticRetriever:
         policies: list[dict[str, str]] | None = None,
         *,
         mode_label: str = "semantic",
+        tenant_id: str | None = None,
+        _corpus: list[dict[str, str]] | None = None,
     ) -> None:
-        self._policies = policies if policies is not None else POLICIES
+        # Corpus scoping follows the keyword retriever's model (see
+        # its docstring): the default corpus is the deployment's
+        # tagged corpus scoped to ``tenant_id``; an injected corpus
+        # is the injector's own and for_tenant leaves it alone.
+        self._tenant_id = tenant_id
+        if _corpus is not None:
+            self._explicit = False
+            self._corpus = _corpus
+            self._policies = corpus_for_tenant(_corpus, tenant_id)
+        elif policies is not None:
+            self._explicit = True
+            self._corpus = list(policies)
+            self._policies = self._corpus
+        else:
+            self._explicit = False
+            self._corpus = full_corpus()
+            self._policies = corpus_for_tenant(self._corpus, tenant_id)
         # The RETRIEVER value this instance serves ("semantic", or
         # "hybrid" when the hybrid retriever owns it) — error messages
         # name the value the operator actually set, never a sibling mode.
@@ -144,6 +230,33 @@ class SemanticRetriever:
         self._chroma_checked = False
         self._pgvector_checked = False
         self._pgvector_ready = False
+
+    @property
+    def tenant_id(self) -> str | None:
+        """The tenant this view is scoped to (None = shared only)."""
+        return self._tenant_id
+
+    def for_tenant(self, tenant_id: str | None) -> "SemanticRetriever":
+        """The view of this retriever scoped to one tenant's corpus.
+
+        A shallow copy sharing the embeddings client (construction
+        is the expensive part, and it is tenant-independent), with
+        the corpus rescoped and the per-corpus caches reset: the
+        pgvector availability answer carries over (it is a property
+        of the database, not of the corpus), and the pgvector query
+        itself filters on the tenant axis (see _retrieve_pgvector).
+        """
+        if self._explicit or tenant_id == self._tenant_id:
+            return self
+        import copy
+
+        view = copy.copy(self)
+        view._tenant_id = tenant_id
+        view._policies = corpus_for_tenant(self._corpus, tenant_id)
+        view._corpus_vectors = None
+        view._chroma_collection = None
+        view._chroma_checked = False
+        return view
 
     def _build_embeddings_client(self):
         """Resolve the embeddings client, failing loudly when unusable.
@@ -292,16 +405,18 @@ class SemanticRetriever:
         for policy, vector in zip(stale, vectors):
             conn.execute(
                 "INSERT INTO policy_embeddings "
-                "(policy_id, model, content_hash, embedding) "
-                "VALUES (%s, %s, %s, %s::vector) "
+                "(policy_id, model, content_hash, embedding, tenant_id) "
+                "VALUES (%s, %s, %s, %s::vector, %s) "
                 "ON CONFLICT (policy_id, model) DO UPDATE SET "
                 "content_hash = EXCLUDED.content_hash, "
-                "embedding = EXCLUDED.embedding",
+                "embedding = EXCLUDED.embedding, "
+                "tenant_id = EXCLUDED.tenant_id",
                 (
                     policy["policy_id"],
                     self._model,
                     content_hash(policy),
                     _vector_literal(vector),
+                    policy.get("tenant_id"),
                 ),
             )
         conn.commit()
@@ -312,11 +427,16 @@ class SemanticRetriever:
         query_vector = _vector_literal(self._embed([query])[0])
         with connect() as conn:
             self._pg_ensure_corpus(conn)
+            # The tenant axis (migration 0005): a row serves when it
+            # is shared (tenant_id NULL) or belongs to this view's
+            # tenant. IS NOT DISTINCT FROM keeps the unscoped view
+            # (tenant None) on shared rows only.
             rows = conn.execute(
                 "SELECT policy_id, 1 - (embedding <=> %s::vector) AS score "
                 "FROM policy_embeddings WHERE model = %s "
+                "AND (tenant_id IS NULL OR tenant_id IS NOT DISTINCT FROM %s) "
                 "ORDER BY embedding <=> %s::vector LIMIT %s",
-                (query_vector, self._model, query_vector, top_k),
+                (query_vector, self._model, self._tenant_id, query_vector, top_k),
             ).fetchall()
         by_id = {p["policy_id"]: p for p in self._policies}
         retrieved: list[RetrievedPolicy] = []
@@ -512,6 +632,26 @@ class HybridRetriever:
     def vector_store(self) -> str:
         """The store serving the semantic half (chroma | memory)."""
         return self._semantic.vector_store
+
+    @property
+    def tenant_id(self) -> str | None:
+        """The tenant this view is scoped to (None = shared only)."""
+        return self._keyword.tenant_id
+
+    def for_tenant(self, tenant_id: str | None) -> "HybridRetriever":
+        """The view of this retriever scoped to one tenant's corpus:
+        both halves rescoped, the merge unchanged."""
+        keyword = self._keyword.for_tenant(tenant_id)
+        semantic = self._semantic.for_tenant(tenant_id)
+        if keyword is self._keyword and semantic is self._semantic:
+            return self
+        import copy
+
+        view = copy.copy(self)
+        view._keyword = keyword
+        view._semantic = semantic
+        view.last_stats = {}
+        return view
 
     def retrieve(self, query: str, top_k: int = 3) -> list[RetrievedPolicy]:
         pool = top_k * 2

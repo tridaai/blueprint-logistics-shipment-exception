@@ -38,7 +38,6 @@ from .audit import audit_rows, render_audit_csv
 from .errors import ProviderError
 from .events import CallbackSink, RunEvent
 from .metrics import compute_metrics, render_prometheus
-from .policies_data import POLICIES
 from .samples import load_sample_shipments
 from .schemas import AgentResult, ShipmentInput
 from .wiring import build_service_from_env
@@ -428,8 +427,18 @@ def carrier_scorecard(
 
 
 @app.get("/policies", dependencies=_AUTH)
-def list_policies() -> list[dict[str, str]]:
-    return POLICIES
+def list_policies(
+    x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
+) -> list[dict[str, str]]:
+    """The policy corpus the caller's tenant retrieves from: the
+    shared documents plus that tenant's own tagged SOPs (their
+    ``tenant_id`` field says which). Another tenant's documents are
+    not listed — the listing is the corpus, and the corpus is the
+    partition."""
+    from .policies_data import policies_for_tenant
+    from .service import resolve_tenant_id
+
+    return policies_for_tenant(resolve_tenant_id(x_tenant_id))
 
 
 @app.get("/samples", dependencies=_AUTH)

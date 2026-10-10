@@ -1,0 +1,18 @@
+{
+  "acme": [
+    {
+      "policy_id": "SOP-ACME-01",
+      "tenant_id": "acme",
+      "title": "Reefer temperature excursion response (Acme)",
+      "text": "When a reefer unit reports a temperature excursion above the setpoint on a cold-chain load, keep the trailer at the cross-dock, download the reefer telemetry log, and notify the Acme cold-chain duty manager before the freight is released. Record the excursion duration and the highest temperature reached in the load record."
+    }
+  ],
+  "globex": [
+    {
+      "policy_id": "SOP-GLOBEX-01",
+      "tenant_id": "globex",
+      "title": "High-value freight security protocol (Globex)",
+      "text": "For Globex high-value loads, the trailer stays sealed and under camera watch at every stop, the security desk verifies the seal number at each handover, and any seal mismatch is treated as a security incident: the load does not move until the Globex security desk clears it."
+    }
+  ]
+}

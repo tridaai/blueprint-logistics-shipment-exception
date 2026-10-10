@@ -31,10 +31,13 @@ with :func:`resolve_tenant_id` — explicit argument, else the
 every store read is scoped to the resolved tenant, so one tenant's
 shipments, memory, queue, and scorecards are invisible to another.
 The gate's checkpoint threads are namespaced by tenant for the same
-reason (``<tenant>:<shipment_id>``). The one deliberate exception is
-the dispatch-retry sweep: an operator process that works every
-tenant's failed deliveries, resolving each record's own tenant per
-retry.
+reason (``<tenant>:<shipment_id>``), and retrieval is scoped too:
+each run resolves its retriever's per-tenant view (see
+:func:`_scoped_retriever`), so a tenant's runs cite the shared
+policy corpus plus its own SOPs, and no other tenant's. The one
+deliberate exception is the dispatch-retry sweep: an operator
+process that works every tenant's failed deliveries, resolving each
+record's own tenant per retry.
 
 **SLA breach events.** The queue flags a shipment whose wait has
 blown its severity's age budget; :meth:`ShipmentService.sla_breach_sweep`
@@ -125,6 +128,26 @@ def checkpoint_thread_id(tenant_id: str, shipment_id: str) -> str:
     share a graph thread (and one tenant's decision can never resume
     another's run)."""
     return f"{tenant_id}:{shipment_id}"
+
+
+def _scoped_retriever(retriever: Retriever, tenant_id: str) -> Retriever:
+    """The retriever view for one run's tenant.
+
+    Retrieval was the last surface still shared across tenants:
+    the corpus is tagged (shared documents plus each tenant's own
+    SOPs), and a retriever that offers ``for_tenant`` (the shipped
+    keyword / semantic / hybrid implementations do) is resolved to
+    the run's tenant view here, so the run retrieves the shared
+    corpus plus its own tenant's documents — another tenant's SOPs
+    are absent from the corpus, not filtered from the results. A
+    retriever without the capability (an injected double, a custom
+    port implementation) is used exactly as provided: the seam's
+    contract is the injector's to honour.
+    """
+    for_tenant = getattr(retriever, "for_tenant", None)
+    if callable(for_tenant):
+        return for_tenant(tenant_id)
+    return retriever
 
 
 @dataclass
@@ -742,7 +765,7 @@ class ShipmentService:
         result = run_shipment(
             model,
             backend=backend,
-            retriever=retriever,
+            retriever=_scoped_retriever(retriever, tenant_id),
             history=history,
             priors=priors,
             event_sink=event_sink,

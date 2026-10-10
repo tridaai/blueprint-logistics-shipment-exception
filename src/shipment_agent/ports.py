@@ -60,7 +60,15 @@ class ModelBackend(Protocol):
 
 
 class Retriever(Protocol):
-    """The policy-retrieval seam."""
+    """The policy-retrieval seam.
+
+    Implementations may additionally offer ``for_tenant(tenant_id)``
+    returning a view scoped to one tenant's policy corpus (shared
+    documents plus that tenant's own — see ``retriever.py``); the
+    service discovers it with ``getattr``, the same optional-
+    capability pattern as the model backend's, and uses an
+    implementation without it exactly as provided.
+    """
 
     def retrieve(self, query: str, top_k: int = 3) -> list["RetrievedPolicy"]: ...
 

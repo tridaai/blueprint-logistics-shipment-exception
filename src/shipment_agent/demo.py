@@ -4,6 +4,10 @@
     python -m shipment_agent demo  (module form)
     make demo
 
+    python -m shipment_agent demo --tenant-demo
+        The per-tenant corpus in miniature: one case analysed as
+        three tenants, only one of whose corpora holds its SOP.
+
 Default: offline, deterministic mock backend, synthetic sample data. Set
 MODEL_BACKEND=openai|anthropic (plus the API key, e.g. in .env) and the
 same trace runs against the real provider — the header line says which
@@ -205,12 +209,87 @@ def print_trace(
     print(_LINE)
 
 
+# The tenant-corpus demonstration case: a reefer temperature
+# excursion, phrased the way the tenant's own SOP phrases it. Only
+# the tenant whose corpus holds that SOP (acme) can retrieve it.
+TENANT_DEMO_SHIPMENT = {
+    "shipment_id": "TEN-DEMO-1",
+    "origin": "Indianapolis, IN",
+    "destination": "Louisville, KY",
+    "customer_name": "Acme Cold Chain (synthetic)",
+    "carrier": "Synthetic Reefer Lines",
+    "scheduled_delivery": "2026-10-10T09:00:00",
+    "estimated_delivery": "2026-10-10T15:00:00",
+    "latest_event": (
+        "Reefer unit alarm at the cross-dock: temperature excursion "
+        "above the setpoint held for ninety minutes"
+    ),
+    "condition_notes": (
+        "Cold-chain load; reefer telemetry logged the excursion "
+        "before the trailer was released"
+    ),
+    "documents": [],
+}
+
+
+def print_tenant_demo() -> None:
+    """Per-tenant policy corpora, in miniature.
+
+    One reefer-excursion case analysed three ways over an in-memory
+    store — the default tenant, acme, and globex — with the offline
+    mock backend. Acme's own SOP (SOP-ACME-01, written in the same
+    operational vocabulary as the case) is in acme's corpus, so
+    acme's run cites it; the other runs' corpora do not contain it
+    at all, so it cannot surface for them — scoping by absence, not
+    by filtering.
+    """
+    from .model_backends import MockModelBackend
+    from .retriever import KeywordRetriever
+    from .service import ShipmentService
+    from .store import InMemoryStore
+
+    service = ShipmentService(
+        backend=MockModelBackend(),
+        retriever=KeywordRetriever(),
+        store=InMemoryStore(),
+        checkpointer=False,
+    )
+    print(_LINE)
+    print("TENANT CORPUS DEMO — one case, three tenants, three corpora")
+    print("Case: reefer temperature excursion (synthetic). Acme's SOP for")
+    print("exactly this case lives in acme's corpus only.")
+    print(_LINE)
+    for label, tenant_id in (
+        ("default tenant", None),
+        ("acme", "acme"),
+        ("globex", "globex"),
+    ):
+        result = service.analyze(TENANT_DEMO_SHIPMENT, tenant_id=tenant_id)
+        cited = [policy.policy_id for policy in result.policies]
+        marker = (
+            "  <- cites SOP-ACME-01: acme's own SOP, in acme's corpus"
+            if "SOP-ACME-01" in cited
+            else ""
+        )
+        print(f"{label:<16} retrieved: {cited}{marker}")
+    print(_LINE)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Shipment Exception Agent — traced demo (offline)")
     parser.add_argument("--index", type=int, default=0, help="Which bundled sample shipment to run (0-based)")
+    parser.add_argument(
+        "--tenant-demo",
+        action="store_true",
+        help="Show per-tenant policy corpora instead: one case analysed "
+        "as three tenants, only one of whose corpora holds its SOP",
+    )
     args = parser.parse_args()
     try:
-        print_trace(args.index)
+        if args.tenant_demo:
+            print_tenant_demo()
+        else:
+            print_trace(args.index)
     except (RuntimeError, ValueError) as exc:
         # e.g. MODEL_BACKEND=openai with no key — fail loudly and cleanly.
         print(f"error: {exc}", file=sys.stderr)
