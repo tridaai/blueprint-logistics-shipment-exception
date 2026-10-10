@@ -37,7 +37,7 @@ the offline smoke-test backend. The primary workflow is
 ```bash
 uv sync --extra dev              # 1 · install the locked set (uv.lock)
 uv run shipment-agent-demo       # 2 · one shipment, end to end, with a trace
-uv run pytest -q                 # 3 · the full test suite (591 tests)
+uv run pytest -q                 # 3 · the full test suite (589 tests)
 ```
 
 No uv? Create a virtual environment and use pip. The direct dependencies
@@ -789,7 +789,7 @@ the verified facts (invented ETAs and prohibited promises fail the pack),
 with per-case tokens, latency, and estimated cost. It fails loudly
 without a real provider and is never part of the default gate or CI.
 
-Test suite: **591 tests** (`pytest -q`: 586 passing, 5 Postgres
+Test suite: **589 tests** (`pytest -q`: 584 passing, 5 Postgres
 integration tests gated on `DATABASE_URL`) — classifier, tools,
 retriever (keyword, semantic, hybrid + rerank, Chroma path with a faked
 client, pgvector SQL formatting + a gated live round-trip), the retrieval query built from shipment content, intake
@@ -918,7 +918,7 @@ evals/                golden dataset (32 cases) + run_evals.py +
                       run_llm_evals.py (opt-in LLM-judge pack) +
                       retrieval relevance set (42 labelled cases) +
                       run_retrieval_evals.py
-tests/                591 pytest tests: unit, integration, API, UI,
+tests/                589 pytest tests: unit, integration, API, UI,
                       negation, persistence, auth, LLM backends and
                       eval pack (mocked SDKs), config, retrieval,
                       object storage, observability, signed webhooks,
