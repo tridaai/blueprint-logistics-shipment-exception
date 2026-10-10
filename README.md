@@ -74,6 +74,7 @@ Real excerpt from the demo's output:
 [9] GUARDRAIL CHECKS
     [PASS] references_shipment_id — Draft references shipment SYN-1001.
     [PASS] no_prohibited_promises — No prohibited promise phrases found.
+    [PASS] no_pii_in_draft — No PII patterns (SSN / card / passport-like) found in the draft.
     [PASS] policy_citations_present — Cites 3 policy citation(s): POL-DELAY-01, POL-COMM-01, POL-DMG-01.
     [PASS] states_next_step — Draft states the next update / next step.
     Overall: PASSED

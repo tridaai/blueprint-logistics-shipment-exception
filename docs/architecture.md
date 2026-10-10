@@ -318,9 +318,13 @@ Approve and reject take one decision-maker field, `actor` (legacy
 `approver`/`reviewer` accepted), and the result returns `decided_by`.
 
 **Guardrails as code, not prompts.** `guardrails.py` rejects drafts that
-lack the shipment ID, lack policy citations on exception drafts, or contain
-prohibited promise language ("we guarantee", "full refund", …). A draft
-that fails validation cannot be approved through the service layer.
+lack the shipment ID, lack policy citations on exception drafts, contain
+prohibited promise language ("we guarantee", "full refund", …), or carry
+PII (`no_pii_in_draft`: SSN-like patterns, Luhn-valid card-like
+sequences, passport-like patterns — the draft quotes the source record,
+so this is where a stray identifier would escape; found values are
+masked in the check's own report). A draft that fails validation cannot
+be approved through the service layer.
 
 **The approval gate is structural.** There is no send/file/act node in the
 graph at all. Approval in `service.py` records *who* approved and marks the
