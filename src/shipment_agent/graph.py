@@ -861,6 +861,11 @@ def build_graph(
             policy_details=state.get("policies", []),
         )
         notes: list[str] = []
+        # Scorecard-aware scoring: the service put the carrier's
+        # track record and the fleet baseline in the run's history;
+        # the scorer's reliability term reads them (options.py). A
+        # direct run (evals, demos) has neither — base scores stand.
+        history = state.get("history") or {}
         scored = build_recovery_options(
             exception_type=classification["exception_type"],
             severity=classification["severity"],
@@ -868,6 +873,8 @@ def build_graph(
             backend=backend,
             context=context,
             notes=notes,
+            carrier_scorecard=history.get("carrier_scorecard"),
+            fleet_baseline=history.get("fleet_baseline"),
         )
         recommended = next((o for o in scored if o.recommended), None)
         return {

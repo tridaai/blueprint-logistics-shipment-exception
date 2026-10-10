@@ -271,6 +271,11 @@ class RecoveryOption(BaseModel):
     added_cost_units: float
     sla_score: float
     score: float
+    # The carrier reliability term inside ``score`` (options.py):
+    # points added (or subtracted, for waiting) because the carrier's
+    # stored track record runs worse than the fleet baseline. 0.0 when
+    # no track record applied — the score is then the base formula's.
+    carrier_reliability_adjustment: float = 0.0
     recommended: bool = False
 
 

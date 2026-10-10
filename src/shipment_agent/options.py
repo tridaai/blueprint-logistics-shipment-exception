@@ -13,6 +13,20 @@ Score (0-100-ish, clamped at 0):
     0.60 * sla_score * 100
   + 0.40 * min(eta_improvement, 48) / 48 * 100
   - 0.25 * min(added_cost, 200) / 200 * 100
+
+On top of that base sits one memory term: the **carrier reliability
+adjustment** (:func:`reliability_adjustment`). When the shipment's
+carrier has a stored track record (its scorecard, ``insights.py``)
+that is worse than the fleet baseline — more damage, more exceptions
+per shipment — options that reduce reliance on that carrier's
+current handling gain a few points, and the option that simply
+waits with the same carrier loses them. The term is small (at most
+±``RELIABILITY_MAX_POINTS``), explicit, computed here in code, and
+printed on every option it touches (``carrier_reliability_adjustment``)
+with its workings in the run's option notes — memory feeding the
+decision, never hiding inside it. No track record (or one at/better
+than the fleet) means no adjustment: the base formula stands alone,
+which is why the golden evals — run without a store — are unchanged.
 """
 
 from __future__ import annotations
@@ -97,6 +111,75 @@ def score_option(
     return round(eta, 2), round(cost, 2), round(sla, 4), round(max(score, 0.0), 2)
 
 
+# The reliability term's bound, in score points, and the minimum
+# stored history before a carrier HAS a track record — a single bad
+# shipment is an anecdote, and an anecdote must not move a score.
+RELIABILITY_MAX_POINTS = 6.0
+RELIABILITY_MIN_SHIPMENTS = 3
+
+# How strongly each option kind answers carrier unreliability: moving
+# the freight off the troubled path (reroute) answers it most;
+# replacing the goods (partial_reship) and shortening exposure
+# (expedite) answer it partly; leaving the shipment with the same
+# carrier (wait_and_monitor) is penalised by the same amount. Kinds
+# not listed are reliability-neutral (they fix paper, not carriage).
+_RELIABILITY_FACTORS = {
+    "reroute": 1.0,
+    "partial_reship": 0.75,
+    "expedite": 0.5,
+    "wait_and_monitor": -1.0,
+}
+
+
+def reliability_adjustment(
+    kind: str, scorecard: dict | None, baseline: dict | None
+) -> float:
+    """The carrier reliability term for one option kind, in points.
+
+    ``unreliability`` is the carrier's excess over the fleet
+    baseline — damage excess counts double, because damage is the
+    failure waiting cannot undo:
+
+        min(1, 2 * max(0, damage_rate - fleet_damage_rate)
+               + max(0, exception_rate - fleet_exception_rate))
+
+    The term is that index scaled to at most
+    ``RELIABILITY_MAX_POINTS`` and signed by the kind's factor.
+    Zero when there is no scorecard, no baseline, too little
+    history, a reliability-neutral kind, or a carrier performing
+    at/better than the fleet — the common case, by design.
+    """
+    if not scorecard or not baseline:
+        return 0.0
+    if scorecard.get("shipments", 0) < RELIABILITY_MIN_SHIPMENTS:
+        return 0.0
+    factor = _RELIABILITY_FACTORS.get(kind, 0.0)
+    if factor == 0.0:
+        return 0.0
+    excess_damage = max(0.0, scorecard["damage_rate"] - baseline["damage_rate"])
+    excess_exception = max(
+        0.0, scorecard["exception_rate"] - baseline["exception_rate"]
+    )
+    unreliability = min(1.0, 2.0 * excess_damage + excess_exception)
+    if unreliability <= 0.0:
+        return 0.0
+    return round(RELIABILITY_MAX_POINTS * unreliability * factor, 2)
+
+
+def reliability_note(scorecard: dict, baseline: dict) -> str:
+    """The one-line workings of a run's reliability term, for the
+    trace/console: the numbers the adjustment came from."""
+    return (
+        f"carrier reliability term applied: {scorecard['carrier']} runs "
+        f"damage rate {scorecard['damage_rate']} / exception rate "
+        f"{scorecard['exception_rate']} against the fleet's "
+        f"{baseline['damage_rate']} / {baseline['exception_rate']} "
+        f"over {scorecard['shipments']} prior shipment(s) — options "
+        "that reduce reliance on this carrier gain, waiting loses "
+        f"(max ±{RELIABILITY_MAX_POINTS:g} points, computed in options.py)"
+    )
+
+
 def _template_proposals(exception_type: str) -> list[dict]:
     return [
         {"kind": kind, "title": title, "description": description}
@@ -112,12 +195,18 @@ def build_recovery_options(
     backend=None,
     context: DraftContext | None = None,
     notes: list[str] | None = None,
+    carrier_scorecard: dict | None = None,
+    fleet_baseline: dict | None = None,
 ) -> list[RecoveryOption]:
     """Propose (template or LLM), validate kinds, score in code, recommend.
 
     When ``notes`` is given, a provider failure that degraded this node
     to template proposals is appended to it — degradation is recorded,
-    never silent.
+    never silent. ``carrier_scorecard`` + ``fleet_baseline`` (the
+    shipment carrier's stored track record and the fleet's rates, from
+    ``insights.py``) feed the reliability term on top of the base
+    score — see :func:`reliability_adjustment`; both absent (the eval
+    and first-run case) leaves every score exactly the base formula's.
     """
     proposals: list[dict] | None = None
     propose_fn = getattr(backend, "propose_options", None) if backend is not None else None
@@ -144,8 +233,15 @@ def build_recovery_options(
         proposals = _template_proposals(exception_type)
 
     options: list[RecoveryOption] = []
+    reliability_applied = False
     for i, proposal in enumerate(proposals):
         eta, cost, sla, score = score_option(proposal["kind"], delay_hours, severity)
+        adjustment = reliability_adjustment(
+            proposal["kind"], carrier_scorecard, fleet_baseline
+        )
+        if adjustment:
+            reliability_applied = True
+            score = round(max(score + adjustment, 0.0), 2)
         options.append(
             RecoveryOption(
                 option_id=f"OPT-{i + 1}",
@@ -156,8 +252,11 @@ def build_recovery_options(
                 added_cost_units=cost,
                 sla_score=sla,
                 score=score,
+                carrier_reliability_adjustment=adjustment,
             )
         )
+    if reliability_applied and notes is not None and carrier_scorecard and fleet_baseline:
+        notes.append(reliability_note(carrier_scorecard, fleet_baseline))
     if options:
         best = max(range(len(options)), key=lambda i: (options[i].score, -i))
         options[best].recommended = True

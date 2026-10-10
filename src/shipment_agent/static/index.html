@@ -310,8 +310,11 @@ function renderDiagnosis(d) {
 function renderOptions(options, recommendedId) {
   const wrap = $('options');
   if (!options || !options.length) { wrap.innerHTML = ''; return; }
-  const rows = options.map(o =>
-    `<tr><td>${o.title}${o.option_id === recommendedId ? ' <span class="badge">recommended</span>' : ''}<br><small>${o.description}</small></td><td>${o.kind.replaceAll('_', ' ')}</td><td>+${o.eta_improvement_hours}h</td><td>${o.added_cost_units} units</td><td>${o.sla_score}</td><td><strong>${o.score}</strong></td></tr>`).join('');
+  const rows = options.map(o => {
+    const adj = o.carrier_reliability_adjustment || 0;
+    const adjText = adj ? `<br><small>carrier reliability ${adj > 0 ? '+' : ''}${adj}</small>` : '';
+    return `<tr><td>${o.title}${o.option_id === recommendedId ? ' <span class="badge">recommended</span>' : ''}<br><small>${o.description}</small></td><td>${o.kind.replaceAll('_', ' ')}</td><td>+${o.eta_improvement_hours}h</td><td>${o.added_cost_units} units</td><td>${o.sla_score}</td><td><strong>${o.score}</strong>${adjText}</td></tr>`;
+  }).join('');
   wrap.innerHTML = `<p style="font-size:14px; margin:16px 0 6px"><strong>Recovery options — proposed, then scored by deterministic code</strong></p>
     <table><thead><tr><th>Option</th><th>Kind</th><th>ETA improvement</th><th>Added cost</th><th>SLA score</th><th>Score</th></tr></thead><tbody>${rows}</tbody></table>
     <p class="note">The draft below grounds on the recommended option. Scores are computed in code from the delay and severity — never by the model.</p>`;

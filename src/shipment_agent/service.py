@@ -46,6 +46,9 @@ from .insights import (
 from .insights import (
     carrier_scorecard as _carrier_scorecard,
 )
+from .insights import (
+    fleet_baseline as _fleet_baseline,
+)
 from .model_backends import ModelBackend, get_backend
 from .object_store import get_object_store
 from .ports import Checkpointer, EventSink, ObjectStore
@@ -482,14 +485,24 @@ class ShipmentService:
         # Carrier scorecard: the carrier's whole stored track record
         # (exception mix, damage rate, human approval rate) joins the
         # evidence too, even when the consignee/lane memory is empty —
-        # a carrier's history is a decision input on its own.
+        # a carrier's history is a decision input on its own. The
+        # fleet baseline rides along: it is what the card's rates are
+        # compared against when option scoring applies its carrier
+        # reliability term (options.reliability_adjustment). Both are
+        # computed over the priors only (this shipment excluded).
+        records = self._get_store().records()
         card = _carrier_scorecard(
-            self._get_store().records(),
+            records,
             model.carrier,
             exclude_shipment_id=model.shipment_id,
         )
         if card is not None:
             history = {**(history or {}), "carrier_scorecard": card}
+            baseline = _fleet_baseline(
+                [r for r in records if r.result.shipment_id != model.shipment_id]
+            )
+            if baseline is not None:
+                history = {**history, "fleet_baseline": baseline}
         result = run_shipment(
             model,
             backend=backend,

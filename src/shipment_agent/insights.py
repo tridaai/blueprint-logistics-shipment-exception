@@ -18,6 +18,10 @@ by the model):
   its diagnosis evidence (see ``diagnosis.memory_evidence_lines``),
   so the approver sees the carrier's track record, not just this
   one case — memory as a decision input, not only counts.
+- **Fleet baseline** — the shipment-weighted exception / damage
+  rates across all carriers: the comparison point that turns a
+  carrier's rates into a reliability signal for option scoring
+  (see ``options.reliability_adjustment``).
 """
 
 from __future__ import annotations
@@ -176,6 +180,39 @@ def all_carrier_scorecards(records: list[ApprovalRecord]) -> list[dict]:
         (card for card in cards if card is not None),
         key=lambda card: (-card["shipments"], card["carrier"]),
     )
+
+
+def fleet_baseline(records: list[ApprovalRecord]) -> dict | None:
+    """The fleet-wide rates every carrier is compared against.
+
+    Shipment-weighted (total exceptions / total shipments, total
+    damage / total shipments) over every stored record with a
+    history entry — the baseline a carrier's own rates are read
+    against by the scorecard-aware option scorer (``options.py``).
+    ``None`` when the store holds no history at all.
+    """
+    shipments = 0
+    exceptions = 0
+    damage = 0
+    carriers = set()
+    for record in records:
+        entry = history_entry(record)
+        if entry is None:
+            continue
+        shipments += 1
+        carriers.add(entry["carrier"])
+        if entry["exception_type"] != "none":
+            exceptions += 1
+            if entry["exception_type"] == "damage":
+                damage += 1
+    if not shipments:
+        return None
+    return {
+        "shipments": shipments,
+        "carriers": len(carriers),
+        "exception_rate": round(exceptions / shipments, 3),
+        "damage_rate": round(damage / shipments, 3),
+    }
 
 
 def format_carrier_scorecard_line(card: dict) -> str:
