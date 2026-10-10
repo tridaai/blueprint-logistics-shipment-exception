@@ -1,6 +1,6 @@
 {
   "dataset": "golden.jsonl (synthetic)",
-  "generated_at": "2026-10-10T14:05:11+00:00",
+  "generated_at": "2026-10-10T19:39:02+00:00",
   "total_cases": 32,
   "type_correct": 32,
   "type_accuracy": 1.0,

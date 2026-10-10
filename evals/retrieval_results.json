@@ -1485,5 +1485,5 @@
   "keyword_threshold": 0.85,
   "passed": true,
   "framing": "Labelled relevance set used as a regression gate for retrieval ranking. Offline hybrid numbers use stand-in embeddings and measure the merge, not embedding quality.",
-  "generated_at": "2026-10-10T16:18:44+00:00"
+  "generated_at": "2026-10-10T19:39:03+00:00"
 }

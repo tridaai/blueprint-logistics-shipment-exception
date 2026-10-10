@@ -774,12 +774,17 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml exec ollama oll
 docker compose -f docker-compose.yml -f docker-compose.local.yml exec ollama ollama pull nomic-embed-text
 ```
 
-Honest status: this stack is reviewed carefully against the Dockerfile
-and the services' documented configuration, but it is **not
-build-verified** — the environment this blueprint was developed in has
-no Docker daemon. Its first `docker compose up --build` on a developer
-machine is its first full exercise; the Python suite, including the
-Postgres/pgvector integration tests, is verified.
+Honest status: `docker compose build` is now verified — the `api`
+image builds cleanly against the Dockerfile and locked dependency
+set. A full `docker compose up` (the whole stack: api + Postgres +
+MinIO) has not been exercised end to end in CI or on a developer
+machine, most recently because the `minio/minio` image pull was
+rejected by the registry (an external policy change, not a stack
+misconfiguration) — if that recurs, point `MINIO_ROOT_*`/the `minio`
+service image at a registry you can pull, or skip Docker and run the
+plain `uv run uvicorn` server against the same `.env`. The Python
+suite, including the Postgres/pgvector integration tests, is
+verified.
 
 ## Architecture
 
@@ -835,10 +840,11 @@ text, in the graph's query shape — with the policies that should land
 in the top-3 the diagnosis cites, and reports **recall@3** per ranking.
 It includes the customer-simulation case: a customer's own operational
 SOP must rank first for the damage case it describes. Current
-measurement: **keyword 98.8%, hybrid 97.6%** (gate: keyword ≥ 85%) —
-the one known partial is RQ-22 at 0.5, whose query is the damage
-policy's own sentence and whose claim-packet expectation shares only
-trailer vocabulary with it.
+measurement: **keyword 98.8%, hybrid 100.0%** (gate: keyword ≥ 85%) —
+the one known partial is RQ-22 under keyword-only retrieval, at 0.5,
+whose query is the damage policy's own sentence and whose
+claim-packet expectation shares only trailer vocabulary with it; the
+hybrid merge resolves it.
 Offline, the hybrid number runs over a labelled stand-in embedder
 (hashed bag-of-words) and measures the RRF merge, not embedding
 quality; `--real` measures the configured embeddings instead.
