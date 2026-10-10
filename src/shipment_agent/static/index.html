@@ -534,7 +534,7 @@ async function loadQueue() {
       if (item.sla_breach) tr.className = 'sla-breach';
       const flags = queueFlagLabels(item.flags);
       const slaText = item.sla_escalated
-        ? '⛔⛔ ESCALATED +' + formatAge(item.sla_escalation_overdue_seconds) + ' past ' + (item.sla_escalation_hours ?? '—') + 'h (budget ' + item.sla_hours + 'h)'
+        ? '⛔⛔ ESCALATED +' + formatAge(item.sla_escalation_overdue_seconds) + ' past ' + (item.sla_escalation_hours ?? '—') + 'h (' + (item.sla_escalation_factor ?? '—') + '× the ' + item.sla_hours + 'h budget)'
         : item.sla_breach
           ? '⛔ breach +' + formatAge(item.sla_overdue_seconds) + ' (budget ' + item.sla_hours + 'h)'
           : 'within ' + (item.sla_hours ?? '—') + 'h budget';

@@ -462,6 +462,7 @@ def approval_queue(
     from .insights import (
         queue_summary,
         sla_escalation_factor_from_env,
+        sla_escalation_factors_from_env,
         sla_thresholds_from_env,
     )
 
@@ -472,6 +473,7 @@ def approval_queue(
         "summary": queue_summary(queue_items),
         "sla_hours": sla_thresholds_from_env(),
         "sla_escalation_factor": sla_escalation_factor_from_env(),
+        "sla_escalation_factors": sla_escalation_factors_from_env(),
     }
 
 

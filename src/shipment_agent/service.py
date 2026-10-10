@@ -474,6 +474,7 @@ def build_sla_escalation_payload(
         "lane": queue_item["lane"],
         "sla_hours": queue_item["sla_hours"],
         "escalation_threshold_hours": queue_item["sla_escalation_hours"],
+        "escalation_factor": queue_item.get("sla_escalation_factor"),
         "age_seconds": queue_item["age_seconds"],
         "wait_seconds": queue_item["age_seconds"],
         "overdue_seconds": queue_item["sla_escalation_overdue_seconds"],
@@ -1501,18 +1502,18 @@ class ShipmentService:
         then oldest, each with the flags an approver scans for, its
         age bucket, and its SLA view under the configured budgets
         (``QUEUE_SLA_HOURS_<SEVERITY>`` and the escalation ladder's
-        ``QUEUE_SLA_ESCALATION_FACTOR``, see ``insights``). Scoped to
-        the resolved tenant's partition — a tenant's approvers work
-        their own queue."""
+        per-severity factors ``QUEUE_SLA_ESCALATION_FACTOR_<SEVERITY>``,
+        see ``insights``). Scoped to the resolved tenant's partition
+        — a tenant's approvers work their own queue."""
         from .insights import (
-            sla_escalation_factor_from_env,
+            sla_escalation_factors_from_env,
             sla_thresholds_from_env,
         )
 
         return _approval_queue(
             self._get_store().records(tenant_id=resolve_tenant_id(tenant_id)),
             sla_hours=sla_thresholds_from_env(),
-            escalation_factor=sla_escalation_factor_from_env(),
+            escalation_factor=sla_escalation_factors_from_env(),
         )
 
     def approval_queue_summary(self, tenant_id: str | None = None) -> dict:
@@ -1578,7 +1579,7 @@ class ShipmentService:
 
         from .insights import approval_queue as _queue_projection
         from .insights import (
-            sla_escalation_factor_from_env,
+            sla_escalation_factors_from_env,
             sla_thresholds_from_env,
         )
 
@@ -1600,7 +1601,7 @@ class ShipmentService:
         for record in records:
             partitions.setdefault(record.tenant_id, []).append(record)
         thresholds = sla_thresholds_from_env()
-        factor = sla_escalation_factor_from_env()
+        factor = sla_escalation_factors_from_env()
         enabled = sla_breach_webhook_enabled()
         entries: list[dict] = []
         for partition_tenant, partition_records in partitions.items():

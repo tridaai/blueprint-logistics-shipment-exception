@@ -103,6 +103,29 @@ def sla_escalation_factor_from_env() -> float:
     )
 
 
+def sla_escalation_factors_from_env() -> dict[str, float]:
+    """The escalation multiples by severity.
+
+    ``QUEUE_SLA_ESCALATION_FACTOR_<SEVERITY>`` overrides the global
+    ``QUEUE_SLA_ESCALATION_FACTOR`` for that severity — a critical
+    case should escalate faster than a low one (critical 1.5×, low
+    3×, say), because the ladder's patience is a per-severity
+    operations choice like the budgets themselves. Every value
+    clamps to at least 1.0, the same discipline as the global
+    factor: an escalation can land at the budget, never before the
+    breach it escalates."""
+    global_factor = sla_escalation_factor_from_env()
+    return {
+        severity: max(
+            1.0,
+            env_float(
+                f"QUEUE_SLA_ESCALATION_FACTOR_{severity.upper()}", global_factor
+            ),
+        )
+        for severity in DEFAULT_SLA_HOURS
+    }
+
+
 def _parse_iso(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -116,7 +139,7 @@ def _queue_item(
     record: ApprovalRecord,
     now: datetime,
     sla_hours: dict,
-    escalation_factor: float = DEFAULT_ESCALATION_FACTOR,
+    escalation_factor: float | dict = DEFAULT_ESCALATION_FACTOR,
 ) -> dict:
     result = record.result
     entry = history_entry(record) or {}
@@ -143,6 +166,14 @@ def _queue_item(
         round((now - created).total_seconds(), 1) if created else None
     )
     severity = result.classification.severity.value
+    # The ladder's factor for THIS item: a per-severity map (the
+    # service passes sla_escalation_factors_from_env) resolves to
+    # the item's own severity; a bare float applies uniformly.
+    item_factor = (
+        escalation_factor.get(severity, DEFAULT_ESCALATION_FACTOR)
+        if isinstance(escalation_factor, dict)
+        else escalation_factor
+    )
     budget_hours = sla_hours.get(severity)
     budget_seconds = budget_hours * 3600.0 if budget_hours is not None else None
     overdue = (
@@ -150,13 +181,13 @@ def _queue_item(
         if age_seconds is not None and budget_seconds is not None
         else 0.0
     )
-    # The ladder's second rung: past escalation_factor × the budget
+    # The ladder's second rung: past the item's factor × the budget
     # the breach is no longer fresh — it has been waiting, unacted
     # on, for a whole second budget. The stage names where the item
     # stands so the queue, the summary, and the sweep all read the
     # same ladder.
     escalation_budget_hours = (
-        budget_hours * escalation_factor if budget_hours is not None else None
+        budget_hours * item_factor if budget_hours is not None else None
     )
     escalation_budget_seconds = (
         escalation_budget_hours * 3600.0
@@ -188,9 +219,10 @@ def _queue_item(
         "sla_breach": overdue > 0,
         "sla_overdue_seconds": round(overdue, 1),
         # The escalation ladder: the second threshold (factor × the
-        # budget), whether the wait has blown that too, and the
-        # stage the item stands on — within_budget | breach |
-        # escalated.
+        # budget), the factor that applied to this item's severity,
+        # whether the wait has blown that too, and the stage the
+        # item stands on — within_budget | breach | escalated.
+        "sla_escalation_factor": item_factor,
         "sla_escalation_hours": (
             round(escalation_budget_hours, 3)
             if escalation_budget_hours is not None
@@ -210,7 +242,7 @@ def approval_queue(
     records: list[ApprovalRecord],
     now: datetime | None = None,
     sla_hours: dict | None = None,
-    escalation_factor: float | None = None,
+    escalation_factor: float | dict | None = None,
 ) -> list[dict]:
     """Shipments awaiting a decision, severity first, then oldest.
 
@@ -222,8 +254,9 @@ def approval_queue(
     :data:`DEFAULT_SLA_HOURS`; the service passes the env-configured
     thresholds (:func:`sla_thresholds_from_env`).
     ``escalation_factor`` (the ladder's second-rung multiple of the
-    budget) defaults to :data:`DEFAULT_ESCALATION_FACTOR`; the
-    service passes :func:`sla_escalation_factor_from_env`.
+    budget) is a float applied uniformly or a severity → factor map
+    (:func:`sla_escalation_factors_from_env`); it defaults to
+    :data:`DEFAULT_ESCALATION_FACTOR`.
     """
     thresholds = sla_hours if sla_hours is not None else DEFAULT_SLA_HOURS
     factor = (
