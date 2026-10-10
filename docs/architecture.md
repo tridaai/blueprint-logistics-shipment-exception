@@ -188,7 +188,10 @@ named honestly: no cross-encoder ships in this repo. Semantic search
 runs on **pgvector** in the application's PostgreSQL when
 `DATABASE_URL` is set — embeddings persisted in a `policy_embeddings`
 table keyed by (policy, model) with a content hash, so an edited
-corpus re-embeds and an unchanged one costs one SELECT per query. A
+corpus re-embeds and an unchanged one costs one SELECT per query. The
+table also carries the corpus's tenant axis (migration `0005`): rows
+are shared (tenant NULL) or one tenant's, and the query filters on it,
+matching the scoping every retriever applies in memory (§5). A
 **Chroma store** (the `vectordb` extra — a server via `CHROMA_HOST`,
 or an embedded directory) is the supported alternative; corpus
 indexed on first use under a content-fingerprinted collection name,
@@ -391,13 +394,21 @@ selects the SQLite double; neither variable → in-memory, nothing
 persists — stated plainly wherever that mode is mentioned). Setting
 `API_KEY` turns on a shared-key check (`X-API-Key` header) for all data
 endpoints; unset, the API is open and documented as a local-dev default.
+Configuring per-tenant keys (`TENANT_API_KEYS`, or `API_KEY_<TENANT>`
+per tenant) switches the check to the per-tenant model: the presented
+key must be the claimed tenant's own — another tenant's key is a 403,
+a missing or unknown key a 401, and the shared key keeps working for
+the default tenant only (see §5).
 Approve and reject take one decision-maker field, `actor` (legacy
 `approver`/`reviewer` accepted), and the result returns `decided_by`.
 Records carry `created_at` / `decided_at` timestamps (stamped by the
 service), which the audit export (`GET /audit/export`, JSON or CSV)
 projects together with the decider and their reason; `GET /metrics`
 renders the store's aggregates (runs, decisions, guardrail failures,
-latency, tokens, estimated cost) as Prometheus text.
+latency, tokens, estimated cost) as Prometheus text — plus the worker
+families projected from the store's worker-status rows (migration
+`0006`: the retry worker's and SLA sweep's recorded run summaries),
+so the background processes share the API's scrape.
 Shipment documents live behind the same kind of seam: the
 `ObjectStore` port (`object_store.py`) — S3-compatible in production
 (`S3_BUCKET`, MinIO in the compose stack) — with key-only intake
@@ -592,6 +603,20 @@ reads are the operator sweeps (dispatch retries, SLA breaches),
 which iterate records across tenants but act on each within its
 own partition.
 
+Two more surfaces are tenant-scoped. **Retrieval**: the policy
+corpus is tagged — shared documents carry no tenant, each tenant's
+own SOPs carry theirs (`policies_data.TENANT_POLICIES`) — and each
+run resolves its retriever's `for_tenant` view, so the corpus a run
+retrieves from is the shared corpus plus its own tenant's documents;
+another tenant's documents are absent, not filtered from results.
+The pgvector table carries the same axis (migration `0005`), and
+`GET /policies` lists the caller's corpus. **Authentication**: with
+per-tenant keys configured, the tenant a request claims is bound to
+its credential (see §4) — the header is an authenticated partition
+claim, not a trusted one. Without per-tenant keys, the shared-key
+model leaves the header trusted: that is the single-client shape,
+and the docs say so wherever the model is described.
+
 ### Intake contract and normalisation
 
 `ShipmentInput` fields (the README carries the same table):
@@ -660,11 +685,11 @@ always means "compared and agreed".
   variable.
 - All sample data is synthetic; the repo must never contain real shipment,
   customer, or carrier data.
-- API authentication is optional and coarse: set `API_KEY` and every
+- API authentication is optional and key-based: set `API_KEY` and every
   data endpoint requires the `X-API-Key` header; unset, the API is open
-  by design for local development (the console says so). A shared key
-  is not per-user identity — production needs real auth and per-client
-  tenancy on top.
+  by design for local development (the console says so). Per-tenant
+  keys bind a key to one tenant partition (§5); neither model is
+  per-user identity — production needs real identity on top.
 - Approval records persist in PostgreSQL when `DATABASE_URL` is set
   (see §4); treat it like any operational data store in a deployment
   (backups, access). The signed webhook (`ACTION_WEBHOOK_SECRET`)
@@ -748,7 +773,11 @@ Ordered by value when adapting this blueprint to your own operation:
    signed `sla_breach` webhook event per newly-breaching shipment —
    opt-in, ledgered on the record's own SLA ledger, deduped by its
    `sla_breach_event_at` marker — so a stranded case pages someone
-   instead of waiting to be noticed. Production grows the panel into a full review
+   instead of waiting to be noticed. The ladder's second rung ships
+   too: a breach reported below the escalation threshold
+   (`QUEUE_SLA_ESCALATION_FACTOR` × the budget) that keeps aging past
+   it re-fires as a signed `sla_escalation` event with the wait
+   duration, on its own ledger and marker. Production grows the panel into a full review
    UX: side-by-side evidence (classification signals, source
    documents, policy text), one-click edit/approve/reject.
 4. **Action layer:** the shipped approval webhook is the first adapter,
@@ -765,7 +794,12 @@ Ordered by value when adapting this blueprint to your own operation:
 5. **Observability:** the shipped baseline is structured JSON logs
    with request IDs, per-run telemetry on every result, and
    `GET /metrics` (runs, decisions, guardrail failures, latency,
-   tokens, cost) for Prometheus scraping. Production adds distributed
+   tokens, cost) for Prometheus scraping. The background workers are
+   on the same scrape: the retry worker and the SLA sweep record a
+   run summary per sweep in the store's worker-status rows
+   (migration `0006`), rendered as worker families (last sweep time,
+   sweep counts, outcomes per tenant) — a silent worker reads as a
+   stale heartbeat, not as health. Production adds distributed
    tracing (e.g. Langfuse / OpenTelemetry) across the customer's
    systems and classification drift dashboards.
 6. **Evals as a regression gate:** the golden dataset grows from real
@@ -775,11 +809,13 @@ Ordered by value when adapting this blueprint to your own operation:
 7. **Access control & tenancy:** data isolation ships — the store is
    partitioned by `tenant_id` and every read (records, queue,
    scorecards, memory, audit, metrics) is scoped to the caller's
-   partition (§5). What production still adds: per-user identity on
-   top of the shipped optional API key, binding the tenant to the
-   caller's credentials (the `X-Tenant-ID` header is trusted, not
-   authenticated), per-client policy corpora, and PII handling per
-   the client's policy.
+   partition (§5), the retrieval corpus is scoped the same way
+   (shared documents plus the tenant's own SOPs), and per-tenant
+   keys bind the partition to the caller's credential, so under
+   that configuration the `X-Tenant-ID` header is authenticated,
+   not trusted. What production still adds: per-user identity on
+   top of the shipped keys (a key is a tenant's shared secret, not
+   a person), and PII handling per the client's policy.
 
 ## 10. Limitations of this prototype
 
@@ -792,9 +828,10 @@ Ordered by value when adapting this blueprint to your own operation:
 - The LLM-judge eval pack is a model judging a model — a groundedness
   regression signal, not a human evaluation, and it only runs with a
   real provider configured.
-- API auth is a single optional shared key — a real deployment needs
-  per-user identity and tenancy on top of the shipped Postgres
-  persistence.
+- API auth is optional keys — one shared key, or per-tenant keys
+  that bind each partition to its own credential. Neither is
+  per-user identity: a real deployment puts real identity (and
+  per-approver audit) on top of the shipped Postgres persistence.
 - Extraction consumes document text; there is no OCR engine and no
   photo/VLM damage assessment.
 - Default-mode self-verification is a deterministic checklist (citations,

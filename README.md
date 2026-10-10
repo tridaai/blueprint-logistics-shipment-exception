@@ -37,7 +37,7 @@ the offline smoke-test backend. The primary workflow is
 ```bash
 uv sync --extra dev              # 1 · install the locked set (uv.lock)
 uv run shipment-agent-demo       # 2 · one shipment, end to end, with a trace
-uv run pytest -q                 # 3 · the full test suite (477 tests)
+uv run pytest -q                 # 3 · the full test suite (517 tests)
 ```
 
 No uv? Create a virtual environment and use pip. The direct dependencies
@@ -249,7 +249,16 @@ event the first time it observes a breach — opt-in
 the approval webhook URL and signed with the same secret, ledgered
 on the record's own SLA ledger, and deduped by a marker on the
 record so a stranded critical case pages someone once, not on
-every sweep.
+every sweep. The ladder climbs: a breach reported while its wait
+was still below the escalation threshold
+(`QUEUE_SLA_ESCALATION_FACTOR` × the budget, default 2×) that
+keeps aging past it re-fires on a later sweep as a signed
+`sla_escalation` event carrying the wait duration — its own
+ledger, its own dedupe marker, one rung per record per sweep —
+because a breach nobody acted on is a worse problem than a fresh
+one. Queue items carry their ladder stage (`sla_stage`:
+within_budget / breach / escalated) and the summary counts
+escalations beside breaches.
 **Idempotency** closes the integration loop: send an
 `Idempotency-Key` header with `POST /shipments/analyze` (or the
 streaming variant) and a retry of the same submission returns the
@@ -271,7 +280,22 @@ caller's partition, so one tenant's `SYN-1001` is a 404 in
 another's. The gate's checkpoint threads are tenant-namespaced for
 the same reason; the dispatch-retry and SLA sweeps are the
 operators' cross-tenant views, resolving each record's own tenant
-as they work.
+as they work. Two round-6 closures: **per-tenant API keys**
+(`TENANT_API_KEYS` pairs, or `API_KEY_<TENANT>` per tenant) bind
+the partition to a credential — once any is configured, a key opens
+only its own tenant (another tenant's key is a `403`, a missing or
+unknown key a `401`) and the shared `API_KEY` keeps working for the
+default tenant only; with none configured, the shared-key model
+applies and the header remains a trusted claim, as the limitations
+below state plainly. And **per-tenant policy corpora**: the corpus
+is tagged — shared documents plus each tenant's own SOPs
+(`TENANT_POLICIES`) — and every retriever scopes by tenant, so a
+tenant's runs cite the shared corpus plus its own SOPs while
+another tenant's documents are absent from its corpus entirely
+(the pgvector table carries the same axis, migration `0005`).
+`GET /policies` lists the caller's corpus; `python -m
+shipment_agent demo --tenant-demo` shows one case citing acme's
+SOP only when analysed as acme.
 
 **The classification resolution policy** (implemented in
 `crosscheck.py`, shown in the result and the trace): rules are
@@ -498,7 +522,7 @@ API, CLI, and traced demo — read the same variables.**
 | `CHECKPOINT_DB_PATH` | `<repo>/.data/checkpoints.db` | SQLite **test-double** checkpointer location, used when `DATABASE_URL` is unset (graph state only — the store above remains the record of decisions). With `DATABASE_URL`, the official LangGraph Postgres saver holds graph state in the same database |
 | `ACTION_WEBHOOK_SECRET` | — (unset) | When set, approval-webhook deliveries are signed: `X-Trida-Signature: sha256=<HMAC-SHA256 of the body>` so the receiver can verify the packet before acting on it |
 | `LOG_LEVEL` | `INFO` | Verbosity of the API's structured JSON logs (one JSON object per line, with `X-Request-ID` per request) |
-| `API_KEY` | — (unset) | When set, data endpoints require the `X-API-Key` header; when unset the API is open (local dev) |
+| `API_KEY` | — (unset) | The shared key: when set (and no per-tenant keys are configured), data endpoints require the `X-API-Key` header; when unset the API is open (local dev). Under the per-tenant model it keeps working for the `default` tenant only |
 | `LLM_JUDGE_MODEL` | backend's model | Judge model for the opt-in LLM eval pack |
 | `LLM_TIMEOUT_SECONDS` | `60` | Request timeout for provider API calls. SDK retries are disabled (`max_retries=0`), so a dead endpoint fails within this timeout instead of stalling on silent retries |
 | `NODE_TIMEOUT_SECONDS` | `180` | Resilience ceiling per provider call at a pipeline node; a call that exceeds it becomes a clean provider error and the idempotent language steps retry once (see `resilience.py`) |
@@ -513,9 +537,11 @@ API, CLI, and traced demo — read the same variables.**
 | `ACTION_WEBHOOK_MAX_ATTEMPTS` | `3` | Total webhook delivery attempts per approval (first try + retries); every attempt is recorded on the record's delivery ledger |
 | `ACTION_WEBHOOK_RETRY_BASE_SECONDS` | `30` | Backoff base between delivery retries; the delay doubles per failed attempt and the next due time is recorded on the ledger |
 | `QUEUE_SLA_HOURS_CRITICAL` / `_HIGH` / `_MEDIUM` / `_LOW` | `4` / `24` / `48` / `96` | Approval-queue SLA budgets: hours a case of that severity may await a decision before `GET /queue` flags it `sla_breach` |
-| `SLA_BREACH_WEBHOOK` | — (unset, off) | SLA breach events: `on` makes the sweep (`shipment-agent sla-sweep` / `POST /queue/sla-sweep`) fire one signed `sla_breach` webhook event per newly-breaching shipment, deduped per record |
+| `QUEUE_SLA_ESCALATION_FACTOR` | `2` | The SLA ladder's second rung, as a multiple of the budget: a breach reported below this multiple that ages past it re-fires as a signed `sla_escalation` event with the wait duration, deduped per rung |
+| `SLA_BREACH_WEBHOOK` | — (unset, off) | SLA breach events: `on` makes the sweep (`shipment-agent sla-sweep` / `POST /queue/sla-sweep`) fire one signed `sla_breach` webhook event per newly-breaching shipment — and the `sla_escalation` second rung past the escalation factor — deduped per rung per record |
 | `SLA_BREACH_WEBHOOK_URL` | `ACTION_WEBHOOK_URL` | Where SLA breach events are delivered when set; falls back to the approval webhook URL |
 | `TENANT_ID` | `default` | The tenant partition this process serves when a request carries no `X-Tenant-ID` header; every record and read is tenant-scoped (migration `0004`) |
+| `TENANT_API_KEYS` | — (unset) | Per-tenant API keys as comma-separated `tenant:key` pairs (or one `API_KEY_<TENANT>` variable per tenant). Once any per-tenant key is configured, a key opens only its own tenant: another tenant's key is a `403`, a missing/unknown key a `401`, and the shared `API_KEY` works for the `default` tenant only. Unset = the shared-key model, where `X-Tenant-ID` is a trusted claim |
 
 To run the demo against a real model (Anthropic shown; OpenAI is the
 same shape, and Ollama needs no key at all):
@@ -581,7 +607,13 @@ Notes that matter:
   dispatch-retries`** runs the retry worker against the configured
   store — `--once` for the cron shape, looping (SIGINT/SIGTERM to
   stop) for the sidecar shape — sweeping due retries on their
-  recorded backoff without an operator pressing the button. Unset
+  recorded backoff without an operator pressing the button. Both
+  workers **report themselves**: every sweep (the retry worker's
+  and the SLA sweep's) folds its outcome into a status row in the
+  store — last sweep time, sweep count, cumulative outcomes per
+  tenant — and `/metrics` renders the rows as worker families, so
+  a worker that stopped sweeping shows a stale heartbeat instead
+  of looking like a healthy one with nothing to do. Unset
   (the default), approval performs no external action at all and the
   ledger stays empty. Decisions take
   one name everywhere: approve and reject both accept `actor` (the
@@ -717,7 +749,7 @@ the verified facts (invented ETAs and prohibited promises fail the pack),
 with per-case tokens, latency, and estimated cost. It fails loudly
 without a real provider and is never part of the default gate or CI.
 
-Test suite: **477 tests** (`pytest -q`: 472 passing, 5 Postgres
+Test suite: **517 tests** (`pytest -q`: 512 passing, 5 Postgres
 integration tests gated on `DATABASE_URL`) — classifier, tools,
 retriever (keyword, semantic, hybrid + rerank, Chroma path with a faked
 client, pgvector SQL formatting + a gated live round-trip), the retrieval query built from shipment content, intake
@@ -757,7 +789,16 @@ both hermetic stores, cross-tenant reads finding nothing, the
 pre-tenancy SQLite rebuild, queue/scorecard/memory/idempotency
 scoping, the `X-Tenant-ID` API contract), SLA breach events (one
 signed event per breach, its own ledger, dedupe, the opt-in
-discipline, per-tenant and cross-tenant sweeps), decision
+discipline, per-tenant and cross-tenant sweeps), per-tenant API
+keys (the key–tenant binding, 401 vs 403, the shared key's
+default-tenant-only home, the unchanged legacy models),
+per-tenant policy corpora (corpus slicing, retriever scoping in
+all three modes, the pgvector tenant filter over a fake
+connection, the tenant SOP end to end), the SLA escalation ladder
+(stages and thresholds in the projection, rung order, per-rung
+dedupe, the first-observed-late case), worker observability
+(the status-row store contract, sweep folding, per-tenant
+outcomes, the /metrics worker families), decision
 idempotency (replay without re-dispatch or duplicated feedback,
 the spent-key conflict, the surviving 422s), and lane-conditioned
 reliability (lane dominance, the thin-lane fallback to the
@@ -804,19 +845,22 @@ src/shipment_agent/   agent graph (11 traced steps + evidence fan-out
                       trace, CLI, service layer (incl. concurrent batch),
                       bundled samples (data/)
 migrations/           numbered SQL schema (approvals, pgvector
-                      embeddings), applied at startup by db.py
+                      embeddings with the tenant axis, worker
+                      status), applied at startup by db.py
 docs/architecture.md  full architecture and productionisation notes
 data/sample/          synthetic shipments (14) + policy corpus mirror
 evals/                golden dataset (32 cases) + run_evals.py +
                       run_llm_evals.py (opt-in LLM-judge pack) +
                       retrieval relevance set (15 labelled cases) +
                       run_retrieval_evals.py
-tests/                477 pytest tests: unit, integration, API, UI,
+tests/                517 pytest tests: unit, integration, API, UI,
                       negation, persistence, auth, LLM backends and
                       eval pack (mocked SDKs), config, retrieval,
                       object storage, observability, signed webhooks,
                       delivery ledger/retries, queue, scorecards,
-                      tenancy, SLA breach events, decision
+                      tenancy, tenant keys, tenant corpora, SLA
+                      breach events, SLA escalation, worker
+                      observability, decision
                       idempotency, lane reliability, metrics/audit
                       (Postgres integration tests are gated on
                       DATABASE_URL and skip without one)
@@ -830,16 +874,18 @@ Makefile              make demo · make test · make evals · make retrieval-eva
 Shipped in this blueprint already: PostgreSQL-persisted approvals
 (store + LangGraph checkpointer + pgvector in one database, schema
 owned by numbered migrations), documents in S3-compatible object
-storage, optional API-key auth, a one-command production-shaped
+storage, optional API-key auth (a shared key, or per-tenant keys
+that bind each tenant partition to its own credential), a one-command production-shaped
 stack, structured JSON logs with request IDs, `/health` +
-`/readiness` probes, a `/metrics` endpoint and an audit-trail export
+`/readiness` probes, a `/metrics` endpoint (record aggregates plus
+the background workers' recorded run summaries) and an audit-trail export
 (`GET /audit/export`), multi-tenant data partitioning (records,
-reads, queue, and scorecards scoped by `tenant_id`, migration
-`0004`), and the opt-in approval webhook — now
+reads, queue, scorecards, and the retrieval corpus scoped by
+`tenant_id`, migrations `0004`–`0005`), and the opt-in approval webhook — now
 HMAC-signed when `ACTION_WEBHOOK_SECRET` is set — as the first
 output-routing adapter. A production build must still add: per-user
-identity (the shipped auth is one shared key; tenancy scopes data,
-it does not authenticate people); TMS/carrier event integrations and a real OCR pipeline feeding
+identity (the shipped auth is keys — shared or per-tenant; tenancy
+scopes data, keys gate partitions, neither is a person); TMS/carrier event integrations and a real OCR pipeline feeding
 extraction; a full post-approval action layer
 (messaging, claim filing) with idempotency and rate limits — the
 webhook's delivery ledger and bounded retries ship, and are the
@@ -870,12 +916,15 @@ each in detail.
 - Memory is counts and recent exception types from this store only —
   a team's real history lives in their TMS; the store is the seam, not
   a warehouse.
-- API auth is a single optional shared key — enough to gate a small
-  deployment, not a substitute for per-user identity. Tenancy scopes
-  which partition a request reads, but the `X-Tenant-ID` header is
-  trusted, not authenticated: a real deployment binds the tenant to
-  the caller's credentials (per-tenant keys or claims), which is an
-  identity-layer job this prototype deliberately leaves open.
+- API auth is key-based, not per-user identity. Per-tenant keys
+  (`TENANT_API_KEYS` / `API_KEY_<TENANT>`) bind a key to its tenant
+  partition — the model a multi-client deployment needs — but a key
+  is still a shared secret per tenant, not a person: per-user
+  identity (OIDC claims, per-approver audit identity) remains an
+  identity-layer job for a real deployment. And with **no**
+  per-tenant keys configured, the shared-key model leaves
+  `X-Tenant-ID` a trusted claim — fine on a trusted network
+  segment for a single client, stated here rather than implied.
 - The LLM-judge eval pack is a model judging a model: a useful
   regression signal for groundedness, not a human evaluation.
 - The Docker local stack is reviewed but not build-verified (no Docker
