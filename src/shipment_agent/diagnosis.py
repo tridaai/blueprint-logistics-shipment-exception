@@ -5,9 +5,11 @@ document mismatches, extraction cross-check discrepancies, the
 classification's own signals, and the retrieved policies — and cites
 them. The evidence list is assembled deterministically in BOTH modes,
 so the citations an approver sees are always the real inputs. In
-provider mode the LLM composes the root-cause prose from those facts;
-in the default mode a deterministic template composes it from the same
-evidence structure. An unusable LLM reply falls back to the template.
+provider mode the LLM composes the root-cause prose from those facts —
+agenticly, through a bounded tool loop when the graph supplies a
+toolbox (``tools_agent.py``); in the default mode a deterministic
+template composes it from the same evidence structure. An unusable
+LLM reply falls back to the template.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from __future__ import annotations
 from .extractor import extraction_discrepancies
 from .model_backends import DraftContext
 from .schemas import Diagnosis, DocumentExtraction, ShipmentInput
+from .tools_agent import TOOL_SPECS, DiagnosisToolBox, diagnosis_max_tool_calls
 
 
 def memory_evidence_lines(history: dict | None) -> list[str]:
@@ -113,8 +116,17 @@ def build_diagnosis(
     policies: list[dict],
     backend,
     history: dict | None = None,
+    toolbox: DiagnosisToolBox | None = None,
 ) -> Diagnosis:
-    """Compose the diagnosis: LLM prose in provider mode, template otherwise."""
+    """Compose the diagnosis: LLM prose in provider mode, template otherwise.
+
+    In provider mode with a ``toolbox`` (the graph passes one), the LLM
+    diagnosis is agentic: a bounded tool loop (``tools_agent.py``) lets
+    the model pull policy search results, history, and computed facts
+    before composing. Without a toolbox the single-call diagnosis runs,
+    exactly as before. Either path degrades to the template, with the
+    reason recorded in ``note``.
+    """
     evidence = build_evidence(
         classification=classification,
         delay_hours=delay_hours,
@@ -158,6 +170,31 @@ def build_diagnosis(
         condition_notes=shipment.condition_notes,
         policy_details=policies,
     )
+    tools_fn = getattr(backend, "diagnose_with_tools", None)
+    if tools_fn is not None and toolbox is not None:
+        try:
+            llm = tools_fn(
+                context, TOOL_SPECS, toolbox.dispatch, diagnosis_max_tool_calls()
+            )
+        except Exception as exc:  # the diagnosis never fails the run
+            llm = None
+            template.note = (
+                f"LLM agentic diagnosis failed ({exc}) — template diagnosis used"
+            )
+        if llm:
+            return Diagnosis(
+                root_cause=llm["root_cause"],
+                summary=llm["summary"],
+                evidence=evidence,
+                citations=citations,
+                source="llm",
+                tool_calls=llm.get("tool_calls", []),
+            )
+        if not template.note:
+            template.note = (
+                "LLM agentic diagnosis reply was unusable — template diagnosis used"
+            )
+        return template
     try:
         llm = diagnose_fn(context)
     except Exception as exc:  # the diagnosis never fails the run

@@ -92,6 +92,30 @@ Governing policies:
 Diagnose the root cause now, as JSON only.
 """
 
+DIAGNOSE_TOOLS_SYSTEM_PROMPT = """\
+You are a logistics operations analyst diagnosing the root cause of a
+shipment exception. You are given computed facts up front, and you may
+call tools to gather more before you answer:
+
+- search_policies(query): search the policy corpus again with your own
+  wording when the governing policies provided look incomplete.
+- lane_history(consignee, origin, destination): prior exceptions for
+  this consignee and this lane from the stored history.
+- shipment_facts(): the computed facts for this shipment (delay hours,
+  document mismatches, extraction discrepancies) — never guess these.
+- carrier_history(carrier): prior exception counts by type for the
+  carrier on this shipment.
+
+Use at most the tool calls you need; facts from tools outrank your
+assumptions. When you have enough, STOP calling tools and respond with
+a single JSON object and nothing else:
+{"root_cause": one or two sentences naming the most likely root cause,
+citing the specific facts (delay hours, mismatched fields, policy IDs),
+"summary": one sentence an approver can scan}.
+Do not invent events, times, carriers, or document contents that are
+not in the facts given or returned by a tool.
+"""
+
 OPTIONS_SYSTEM_PROMPT = """\
 You are a logistics operations planner proposing recovery options for
 a shipment exception. Propose 2 or 3 concrete options. Each option must

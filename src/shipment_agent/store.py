@@ -61,12 +61,45 @@ def history_entry(record: ApprovalRecord) -> dict | None:
     return {
         "shipment_id": record.result.shipment_id,
         "consignee": consignee,
+        "carrier": shipment.get("carrier", ""),
         "origin": shipment.get("origin", ""),
         "destination": shipment.get("destination", ""),
         "lane": f"{shipment.get('origin', '')} -> {shipment.get('destination', '')}",
         "exception_type": classification.exception_type.value,
         "severity": classification.severity.value,
     }
+
+
+def carrier_summary(entries: list[dict], carrier: str) -> dict:
+    """One carrier's history over prior-shipment entries.
+
+    Returns the total prior shipments with that carrier and the
+    exception counts by type (``none`` results are shipments, not
+    exceptions, so they count in the total only). Shared by the memory
+    evidence in ``diagnosis.py`` and the ``carrier_history`` agent tool
+    in ``tools_agent.py`` — one definition of the numbers, two surfaces.
+    """
+    type_counts: dict[str, int] = {}
+    total = 0
+    for entry in entries:
+        if not carrier or entry.get("carrier") != carrier:
+            continue
+        total += 1
+        exception = entry.get("exception_type")
+        if exception and exception != "none":
+            type_counts[exception] = type_counts.get(exception, 0) + 1
+    return {
+        "carrier": carrier,
+        "carrier_count": total,
+        "carrier_exception_count": sum(type_counts.values()),
+        "carrier_type_counts": type_counts,
+    }
+
+
+def format_type_counts(type_counts: dict[str, int]) -> str:
+    """``{"damage": 2, "delay": 1}`` -> ``"damage×2, delay×1"`` (count desc)."""
+    ordered = sorted(type_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return ", ".join(f"{name}×{count}" for name, count in ordered)
 
 
 class ApprovalStore(Protocol):

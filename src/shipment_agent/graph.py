@@ -21,7 +21,11 @@ from .autonomy import compute_autonomy
 from .classifier import classify_shipment
 from .crosscheck import resolve_classification
 from .diagnosis import build_diagnosis
-from .extractor import discrepancies_from_dicts, extract_documents
+from .extractor import (
+    discrepancies_from_dicts,
+    extract_documents,
+    extraction_discrepancies,
+)
 from .guardrails import validate_draft
 from .model_backends import DraftContext, ModelBackend, MockModelBackend
 from .options import build_recovery_options
@@ -38,6 +42,7 @@ from .schemas import (
     VerificationResult,
 )
 from .tools import compare_documents, compute_delay_hours, document_pair_warning
+from .tools_agent import DiagnosisToolBox
 from .verify import verify_draft
 
 # Sentinel distinguishing "no LLM backend configured" (default mode — no
@@ -237,6 +242,18 @@ def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
                 f"root cause: {final['diagnosis']['root_cause']}",
                 f"composition: {'LLM over the computed evidence' if final['diagnosis']['source'] == 'llm' else 'deterministic template over the computed evidence'}",
             ]
+            + [
+                f"tool call: {t['name']} -> {t['summary']}"
+                for t in final["diagnosis"].get("tool_calls", [])
+            ]
+            + (
+                [
+                    "tool loop: provider-only — in the default mode the "
+                    "deterministic evidence above is used directly"
+                ]
+                if final["diagnosis"]["source"] != "llm"
+                else []
+            )
             + ([f"fallback: {final['diagnosis']['note']}"] if final["diagnosis"].get("note") else [])
             + [f"evidence: {e}" for e in final["diagnosis"]["evidence"]],
         ),
@@ -345,6 +362,7 @@ class AgentState(TypedDict, total=False):
     policies: list[dict]
     retrieval_info: dict
     history: dict | None
+    priors: list[dict]
     diagnosis: dict
     recovery_options: list[dict]
     options_notes: list[str]
@@ -486,17 +504,33 @@ def build_graph(
 
     def diagnose(state: AgentState) -> AgentState:
         shipment = ShipmentInput.model_validate(state["shipment"])
+        extractions = [
+            DocumentExtraction.model_validate(e) for e in state.get("extractions", [])
+        ]
+        # The toolbox is what makes the provider-mode diagnosis agentic:
+        # the model can pull policy search, history, and computed facts
+        # through it before composing. In the default mode nothing calls
+        # it — the deterministic diagnosis runs on the same evidence.
+        toolbox = DiagnosisToolBox(
+            shipment=shipment,
+            classification=state["classification"],
+            delay_hours=state.get("delay_hours"),
+            mismatches=state.get("document_mismatches", []),
+            discrepancies=extraction_discrepancies(extractions),
+            document_check_warning=state.get("document_check_warning"),
+            retriever=retriever,
+            priors=state.get("priors", []),
+        )
         diagnosis = build_diagnosis(
             shipment=shipment,
             classification=state["classification"],
             delay_hours=state.get("delay_hours"),
             mismatches=state.get("document_mismatches", []),
-            extractions=[
-                DocumentExtraction.model_validate(e) for e in state.get("extractions", [])
-            ],
+            extractions=extractions,
             policies=state.get("policies", []),
             backend=backend,
             history=state.get("history"),
+            toolbox=toolbox,
         )
         return {"diagnosis": diagnosis.model_dump()}
 
@@ -738,19 +772,26 @@ def run_shipment(
     backend: ModelBackend | None = None,
     retriever: Retriever | None = None,
     history: dict | None = None,
+    priors: list[dict] | None = None,
 ) -> AgentResult:
     """Run one shipment through the full graph and return the typed result.
 
     ``history`` is the memory summary for this shipment's consignee and
     lane (see ``service.ShipmentService.analyze``); it reaches the
-    diagnosis as evidence. Direct callers usually leave it None.
+    diagnosis as evidence. ``priors`` is the raw stored-history entries
+    behind that summary — the diagnosis tool loop reads them (lane and
+    carrier history tools). Direct callers usually leave both None.
     """
     shipment_model = (
         shipment if isinstance(shipment, ShipmentInput) else ShipmentInput.model_validate(shipment)
     )
     app = build_graph(backend=backend, retriever=retriever)
     final = app.invoke(
-        {"shipment": shipment_model.model_dump(mode="json"), "history": history}
+        {
+            "shipment": shipment_model.model_dump(mode="json"),
+            "history": history,
+            "priors": priors or [],
+        }
     )
     return AgentResult(
         shipment_id=shipment_model.shipment_id,

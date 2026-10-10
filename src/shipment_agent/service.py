@@ -92,16 +92,27 @@ class ShipmentService:
         )
         # Memory: what the store already knows about this consignee and
         # this lane becomes diagnosis evidence for the new analysis.
-        history = self._history_summary(model)
+        # The raw entries ride along too — the diagnosis tool loop
+        # (provider mode) reads lane / carrier history through them.
+        priors = self._get_store().prior_shipments(
+            exclude_shipment_id=model.shipment_id
+        )
+        history = self._history_summary(model, priors)
         result = run_shipment(
-            model, backend=backend, retriever=self.retriever, history=history
+            model,
+            backend=backend,
+            retriever=self.retriever,
+            history=history,
+            priors=priors,
         )
         self._get_store().save(
             ApprovalRecord(result=result, shipment=model.model_dump(mode="json"))
         )
         return result
 
-    def _history_summary(self, shipment: ShipmentInput) -> dict | None:
+    def _history_summary(
+        self, shipment: ShipmentInput, priors: list[dict] | None = None
+    ) -> dict | None:
         """Summarise prior analysed shipments for this consignee + lane.
 
         Counts only priors that themselves had an exception, with the
@@ -109,9 +120,10 @@ class ShipmentService:
         evidence ("2 prior exceptions for this consignee in the stored
         history"). Returns None when there is nothing to remember.
         """
-        priors = self._get_store().prior_shipments(
-            exclude_shipment_id=shipment.shipment_id
-        )
+        if priors is None:
+            priors = self._get_store().prior_shipments(
+                exclude_shipment_id=shipment.shipment_id
+            )
         if not priors:
             return None
         consignee = shipment.customer_name or next(

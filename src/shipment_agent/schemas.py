@@ -238,6 +238,10 @@ class Diagnosis(BaseModel):
     citations: list[str] = Field(default_factory=list)
     source: str  # template | llm
     note: str = ""  # set when the LLM composition failed and the template was used
+    # Agentic diagnosis (provider mode): the tool calls the model made
+    # while diagnosing, each {"name", "summary"} — the trace shows them.
+    # Empty in the default mode, where no tool loop runs.
+    tool_calls: list[dict] = Field(default_factory=list)
 
 
 class RecoveryOption(BaseModel):

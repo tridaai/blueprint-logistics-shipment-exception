@@ -139,7 +139,15 @@ delay, document diffs, extraction discrepancies, classification signals,
 retrieved policy IDs — and produces a root-cause note over it: the LLM
 composes the prose in provider mode, a template composes from the same
 evidence structure in default mode, and a failed composition falls back
-to the template. An options node then proposes 2–3 recovery options
+to the template. In provider mode the diagnosis is **agentic**: before
+composing, the model runs a bounded tool loop (`tools_agent.py`) — it
+may call `search_policies` (the retriever, its own wording),
+`lane_history` (store history for the consignee/lane), `shipment_facts`
+(the computed facts), and `carrier_history` (exception counts by type
+for the carrier) — capped by `DIAGNOSIS_MAX_TOOL_CALLS` (default 4,
+hard cap 6). Every executed call lands in the trace with a one-line
+summary; a tool that fails degrades the diagnosis, never the run. The
+default mode runs no loop and says so in the trace. An options node then proposes 2–3 recovery options
 (template or LLM), but **every number is computed by code**: per-kind
 formulas turn delay hours and severity into ETA improvement, added cost,
 and an SLA score, combined as `0.6·SLA + 0.4·ETA − 0.25·cost`

@@ -187,8 +187,12 @@ Use these seams to adapt it — each is one file or one setting:
   no key, nothing leaves the machine). Every surface honours the same
   variables, and the provider runs the *whole* pipeline — extraction,
   classification cross-check, diagnosis, options, drafting — not a
-  single prompt. The deterministic mock remains only as the **offline
-  fallback**. Backend interface: `src/shipment_agent/model_backends.py`.
+  single prompt. The diagnosis is agentic in provider mode: a bounded
+  tool loop lets the model search policies, pull lane/carrier history,
+  and re-read the computed facts before composing (see
+  `src/shipment_agent/tools_agent.py`). The deterministic mock remains
+  only as the **offline fallback**. Backend interface:
+  `src/shipment_agent/model_backends.py`.
 - **Hybrid retrieval + local vectors** — `RETRIEVER=keyword|semantic|hybrid`.
   Hybrid merges keyword and semantic candidates and reranks them by
   reciprocal-rank fusion. With the `vectordb` extra installed, semantic
@@ -365,6 +369,7 @@ API, CLI, and traced demo — read the same variables.**
 | `API_KEY` | — (unset) | When set, data endpoints require the `X-API-Key` header; when unset the API is open (local dev) |
 | `LLM_JUDGE_MODEL` | backend's model | Judge model for the opt-in LLM eval pack |
 | `LLM_TIMEOUT_SECONDS` | `60` | Request timeout for provider API calls. SDK retries are disabled (`max_retries=0`), so a dead endpoint fails within this timeout instead of stalling on silent retries |
+| `DIAGNOSIS_MAX_TOOL_CALLS` | `4` | Agentic diagnosis (provider mode): cap on tool calls (`search_policies` / `lane_history` / `shipment_facts` / `carrier_history`) the diagnosis loop may make before composing. Hard cap 6 |
 | `GUARDRAIL_REPAIR` | `on` | Bounded repair loop on guardrail failure: `off`/`0`/`false`/`no` disables it |
 | `GUARDRAIL_REPAIR_MAX_ATTEMPTS` | `1` | Redraft attempts per run when repair is on (hard cap 3) |
 | `ACTION_WEBHOOK_URL` | — (unset) | Output routing: when set, a successful approval POSTs the approved packet JSON to this URL |

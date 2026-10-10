@@ -40,6 +40,7 @@ from .prompts import (
     CLASSIFY_SYSTEM_PROMPT,
     CLASSIFY_USER_TEMPLATE,
     DIAGNOSE_SYSTEM_PROMPT,
+    DIAGNOSE_TOOLS_SYSTEM_PROMPT,
     DIAGNOSE_USER_TEMPLATE,
     DRAFT_SYSTEM_PROMPT,
     DRAFT_USER_TEMPLATE,
@@ -385,14 +386,8 @@ class _BaseLLMBackend:
             for p in context.get("policy_details", [])
         ) or "none retrieved"
 
-    def diagnose(self, context: DraftContext) -> dict | None:
-        """LLM root-cause diagnosis over the computed facts (LLM only).
-
-        Returns ``{"root_cause": ..., "summary": ...}`` or ``None`` when
-        the reply is unusable — the pipeline then uses the deterministic
-        template diagnosis built from the same evidence.
-        """
-        user = DIAGNOSE_USER_TEMPLATE.format(
+    def _diagnose_user(self, context: DraftContext) -> str:
+        return DIAGNOSE_USER_TEMPLATE.format(
             shipment_id=context["shipment_id"],
             origin=context["origin"],
             destination=context["destination"],
@@ -407,7 +402,10 @@ class _BaseLLMBackend:
             condition_notes=context.get("condition_notes") or "none recorded",
             policies=self._policy_block(context),
         )
-        data = parse_json_object(self._complete(DIAGNOSE_SYSTEM_PROMPT, user, max_tokens=400))
+
+    @staticmethod
+    def _parse_diagnosis(text: str) -> dict | None:
+        data = parse_json_object(text)
         if data is None:
             return None
         root_cause = str(data.get("root_cause", "")).strip()
@@ -415,6 +413,63 @@ class _BaseLLMBackend:
         if not root_cause or not summary:
             return None
         return {"root_cause": root_cause[:600], "summary": summary[:300]}
+
+    def diagnose(self, context: DraftContext) -> dict | None:
+        """LLM root-cause diagnosis over the computed facts (LLM only).
+
+        Returns ``{"root_cause": ..., "summary": ...}`` or ``None`` when
+        the reply is unusable — the pipeline then uses the deterministic
+        template diagnosis built from the same evidence.
+        """
+        return self._parse_diagnosis(
+            self._complete(DIAGNOSE_SYSTEM_PROMPT, self._diagnose_user(context), max_tokens=400)
+        )
+
+    def _tool_loop(
+        self,
+        system: str,
+        user: str,
+        tool_specs: list[dict],
+        dispatch,
+        max_tool_calls: int,
+    ) -> tuple[str, list[dict]]:
+        """Run a bounded tool loop; return (final_text, tool_call_log).
+
+        Implemented per provider (the tool wire formats differ). The
+        log carries {name, summary} per executed call for the trace.
+        """
+        raise NotImplementedError
+
+    def diagnose_with_tools(
+        self,
+        context: DraftContext,
+        tool_specs: list[dict],
+        dispatch,
+        max_tool_calls: int,
+    ) -> dict | None:
+        """Agentic diagnosis (LLM only): a bounded tool loop, then compose.
+
+        The model may call the tools in ``tools_agent.TOOL_SPECS``
+        (policy search, lane history, shipment facts, carrier history)
+        through ``dispatch`` before composing. Same return contract as
+        :meth:`diagnose`, plus ``tool_calls`` — the executed calls with
+        one-line summaries, which the trace shows. ``None`` when the
+        final reply is unusable; the pipeline falls back as it does for
+        the single-call path. A tool that raises never fails the loop:
+        the loop feeds the error back and the model composes without it.
+        """
+        text, tool_log = self._tool_loop(
+            DIAGNOSE_TOOLS_SYSTEM_PROMPT,
+            self._diagnose_user(context),
+            tool_specs,
+            dispatch,
+            max_tool_calls,
+        )
+        data = self._parse_diagnosis(text)
+        if data is None:
+            return None
+        data["tool_calls"] = tool_log
+        return data
 
     def propose_options(self, context: DraftContext) -> list[dict] | None:
         """LLM recovery-option proposals (LLM only) — names, not numbers.
@@ -542,6 +597,93 @@ class OpenAIBackend(_BaseLLMBackend):
             )
         return response.choices[0].message.content or ""
 
+    def _create_chat(self, kwargs: dict):
+        """chat.completions.create, tolerating clients without tool support.
+
+        Some OpenAI-compatible clients reject the ``tools`` parameter
+        outright (TypeError); those get one retry without it and the
+        loop then composes from the up-front facts alone.
+        """
+        try:
+            return self._client.chat.completions.create(**kwargs)
+        except TypeError:
+            if "tools" not in kwargs:
+                raise
+            self._tools_unsupported = True
+            kwargs = {k: v for k, v in kwargs.items() if k != "tools"}
+            return self._client.chat.completions.create(**kwargs)
+
+    def _tool_loop(self, system, user, tool_specs, dispatch, max_tool_calls):
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": spec["name"],
+                    "description": spec["description"],
+                    "parameters": spec["parameters"],
+                },
+            }
+            for spec in tool_specs
+        ]
+        messages: list = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+        log: list[dict] = []
+        calls = 0
+        while True:
+            kwargs: dict = {"model": self._model, "max_tokens": 800, "messages": messages}
+            if calls < max_tool_calls and not getattr(self, "_tools_unsupported", False):
+                kwargs["tools"] = tools
+            try:
+                response = self._create_chat(kwargs)
+            except Exception as exc:
+                raise translate_provider_error(
+                    exc, backend=self.name, base_url=getattr(self, "base_url", None)
+                ) from exc
+            usage = getattr(response, "usage", None)
+            if usage is not None:
+                self._record_usage(
+                    {
+                        "input_tokens": getattr(usage, "prompt_tokens", 0),
+                        "output_tokens": getattr(usage, "completion_tokens", 0),
+                    }
+                )
+            message = response.choices[0].message
+            tool_calls = list(getattr(message, "tool_calls", None) or [])
+            if not tool_calls or calls >= max_tool_calls:
+                return message.content or "", log
+            messages.append(message)
+            for tool_call in tool_calls:
+                if calls >= max_tool_calls:
+                    # Still answer the call (the API requires it), but
+                    # do not execute it — the budget is spent.
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": "tool budget exhausted — compose the final answer from the facts you have",
+                        }
+                    )
+                    continue
+                calls += 1
+                name = tool_call.function.name
+                try:
+                    args = json.loads(tool_call.function.arguments or "{}")
+                    if not isinstance(args, dict):
+                        args = {}
+                except (json.JSONDecodeError, ValueError):
+                    args = {}
+                try:
+                    result_text, summary = dispatch(name, args)
+                except Exception as exc:  # a broken tool degrades, never fails
+                    result_text = f"tool error: {exc}"
+                    summary = f"{name} -> error: {exc}"
+                log.append({"name": name, "summary": summary})
+                messages.append(
+                    {"role": "tool", "tool_call_id": tool_call.id, "content": result_text}
+                )
+
 
 class AnthropicBackend(_BaseLLMBackend):
     name = "anthropic"
@@ -592,6 +734,90 @@ class AnthropicBackend(_BaseLLMBackend):
                 }
             )
         return "".join(block.text for block in message.content if block.type == "text")
+
+    def _create_message(self, kwargs: dict):
+        """messages.create, tolerating clients without tool support
+        (see the OpenAI backend's ``_create_chat``)."""
+        try:
+            return self._client.messages.create(**kwargs)
+        except TypeError:
+            if "tools" not in kwargs:
+                raise
+            self._tools_unsupported = True
+            kwargs = {k: v for k, v in kwargs.items() if k != "tools"}
+            return self._client.messages.create(**kwargs)
+
+    def _tool_loop(self, system, user, tool_specs, dispatch, max_tool_calls):
+        tools = [
+            {
+                "name": spec["name"],
+                "description": spec["description"],
+                "input_schema": spec["parameters"],
+            }
+            for spec in tool_specs
+        ]
+        messages: list = [{"role": "user", "content": user}]
+        log: list[dict] = []
+        calls = 0
+        while True:
+            kwargs: dict = {
+                "model": self._model,
+                "max_tokens": 800,
+                "system": system,
+                "messages": messages,
+            }
+            if calls < max_tool_calls and not getattr(self, "_tools_unsupported", False):
+                kwargs["tools"] = tools
+            try:
+                message = self._create_message(kwargs)
+            except Exception as exc:
+                raise translate_provider_error(
+                    exc, backend=self.name, base_url=getattr(self, "base_url", None)
+                ) from exc
+            usage = getattr(message, "usage", None)
+            if usage is not None:
+                self._record_usage(
+                    {
+                        "input_tokens": getattr(usage, "input_tokens", 0),
+                        "output_tokens": getattr(usage, "output_tokens", 0),
+                    }
+                )
+            tool_uses = [
+                block for block in message.content if getattr(block, "type", None) == "tool_use"
+            ]
+            if not tool_uses or calls >= max_tool_calls:
+                return (
+                    "".join(
+                        block.text
+                        for block in message.content
+                        if getattr(block, "type", None) == "text"
+                    ),
+                    log,
+                )
+            messages.append({"role": "assistant", "content": message.content})
+            results = []
+            for block in tool_uses:
+                if calls >= max_tool_calls:
+                    results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": "tool budget exhausted — compose the final answer from the facts you have",
+                        }
+                    )
+                    continue
+                calls += 1
+                name = block.name
+                try:
+                    result_text, summary = dispatch(name, dict(block.input or {}))
+                except Exception as exc:  # a broken tool degrades, never fails
+                    result_text = f"tool error: {exc}"
+                    summary = f"{name} -> error: {exc}"
+                log.append({"name": name, "summary": summary})
+                results.append(
+                    {"type": "tool_result", "tool_use_id": block.id, "content": result_text}
+                )
+            messages.append({"role": "user", "content": results})
 
 
 class OllamaBackend(OpenAIBackend):
