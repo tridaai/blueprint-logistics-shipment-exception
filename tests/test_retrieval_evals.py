@@ -37,15 +37,35 @@ def _cases() -> list[dict]:
 
 def test_golden_set_is_labelled_and_grounded():
     cases = _cases()
-    assert len(cases) >= 12
+    assert len(cases) >= 40
     from shipment_agent.policies_data import POLICIES
 
-    known = {p["policy_id"] for p in POLICIES} | {"POL-OPS-77"}
+    known = {p["policy_id"] for p in POLICIES} | {
+        "POL-OPS-77",
+        "SOP-ACME-01",
+        "SOP-GLOBEX-01",
+    }
+    known |= {
+        case["document"]["policy_id"]
+        for case in cases
+        if case.get("corpus") == "stored"
+    }
     for case in cases:
         assert case["query"].strip()
-        assert case["expected"], case["case_id"]
+        # A case pins expected hits, forbidden hits, or both (a
+        # forbidden-only case scores on absence — see the runner).
+        assert case["expected"] or case.get("forbidden"), case["case_id"]
         assert set(case["expected"]) <= known, case["case_id"]
-        assert case.get("corpus", "standard") in ("standard", "ops_sop")
+        assert set(case.get("forbidden", [])) <= known, case["case_id"]
+        assert case.get("corpus", "standard") in (
+            "standard",
+            "ops_sop",
+            "tenant_acme",
+            "tenant_globex",
+            "stored",
+        ), case["case_id"]
+        if case.get("corpus") == "stored":
+            assert case["tenant"] and case["document"]["text"], case["case_id"]
 
 
 def test_both_rankings_clear_the_recall_gate():
@@ -69,3 +89,31 @@ def test_customer_sop_case_ranks_the_sop_first():
     for result in row["results"].values():
         assert result["retrieved"][0] == "POL-OPS-77"
         assert result["recall_at_3"] == 1.0
+
+
+def test_tenant_sop_cases_rank_for_their_tenant_and_never_leak():
+    runner = _load_runner()
+    report = runner.evaluate(_cases())
+    rows = {r["case_id"]: r for r in report["cases"]}
+    # Each tenant's SOP ranks in its own view…
+    for case_id, sop in (("RQ-37", "SOP-ACME-01"), ("RQ-39", "SOP-GLOBEX-01")):
+        for result in rows[case_id]["results"].values():
+            assert result["hits"] == [sop], case_id
+            assert result["recall_at_3"] == 1.0, case_id
+    # …and the same query in the OTHER tenant's view surfaces
+    # nothing of it: forbidden, absent, full score for the absence.
+    for case_id, sop in (("RQ-38", "SOP-ACME-01"), ("RQ-40", "SOP-GLOBEX-01")):
+        for result in rows[case_id]["results"].values():
+            assert sop not in result["retrieved"], case_id
+            assert result["forbidden_hits"] == [], case_id
+            assert result["recall_at_3"] == 1.0, case_id
+
+
+def test_stored_document_cases_hit_while_stored_and_vanish_after_delete():
+    runner = _load_runner()
+    report = runner.evaluate(_cases())
+    rows = {r["case_id"]: r for r in report["cases"]}
+    for case_id in ("RQ-41", "RQ-42"):
+        for result in rows[case_id]["results"].values():
+            assert result["recall_at_3"] == 1.0, case_id
+            assert result["after_delete_clear"] is True, case_id

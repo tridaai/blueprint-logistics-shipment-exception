@@ -116,6 +116,11 @@
       <thead><tr><th>Shipment</th><th>Severity</th><th>Exception</th><th>Lane</th><th>Age</th><th>SLA</th><th>Flags</th><th></th></tr></thead>
       <tbody id="queue-body"><tr><td colspan="8" class="note">Loading…</td></tr></tbody>
     </table>
+    <h3 style="margin-top:18px">Retrieval relevance — last measured run</h3>
+    <p class="note">Mean recall@3 per ranking over the labelled relevance set
+    (<code>GET /evals/retrieval-results</code>, refreshed by <code>make retrieval-evals</code>): whether the
+    governing policies actually land in the top-3 the diagnosis cites — an operator-visible number, not an assumption.</p>
+    <div id="retrieval-body"><p class="note">Loading…</p></div>
   </section>
 
   <section class="card">
@@ -580,6 +585,22 @@ async function loadQueue() {
 }
 $('queue-refresh').addEventListener('click', loadQueue);
 
+async function loadRetrieval() {
+  const body = $('retrieval-body');
+  try {
+    const res = await fetch('/evals/retrieval-results', {headers: apiHeaders()});
+    if (!res.ok) throw new Error('absent');
+    const r = await res.json();
+    const rows = Object.entries(r.summary || {}).map(([mode, v]) =>
+      `<tr><td>${mode}</td><td>${v.cases}</td><td>${(v.mean_recall_at_3 * 100).toFixed(1)}%</td></tr>`).join('');
+    body.innerHTML = `
+      <table><thead><tr><th>Ranking</th><th>Cases</th><th>Mean recall@3</th></tr></thead><tbody>${rows}</tbody></table>
+      <p class="note" style="margin-top:8px">Last run: ${r.generated_at || '—'} · embeddings: ${r.embeddings} · keyword gate ${((r.keyword_threshold || 0) * 100).toFixed(0)}% · ${r.passed ? 'PASS' : 'FAIL'}</p>`;
+  } catch (e) {
+    body.innerHTML = '<p class="note">No retrieval eval results yet — run <code>make retrieval-evals</code>, then reload.</p>';
+  }
+}
+
 async function loadCorpus() {
   const list = $('corpus-list');
   try {
@@ -654,6 +675,7 @@ $('tenant').addEventListener('change', () => { loadQueue(); loadCorpus(); });
 loadSamples();
 loadEvals();
 loadQueue();
+loadRetrieval();
 loadCorpus();
 </script>
 </body>

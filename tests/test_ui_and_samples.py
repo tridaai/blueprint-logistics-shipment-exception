@@ -101,6 +101,20 @@ def test_evals_results_endpoint():
     assert set(results["per_type"]) >= {"delay", "damage", "document_mismatch"}
 
 
+def test_retrieval_results_endpoint_serves_the_last_run():
+    response = client.get("/evals/retrieval-results")
+    assert response.status_code == 200
+    results = response.json()
+    assert results["passed"] is True
+    assert results["summary"]["keyword"]["cases"] >= 40
+    assert results["summary"]["keyword"]["mean_recall_at_3"] >= 0.85
+    assert any(name.startswith("hybrid") for name in results["summary"])
+    # The console renders the scoreboard beside the queue.
+    html = client.get("/").text
+    assert 'id="retrieval-body"' in html
+    assert "loadRetrieval" in html
+
+
 def test_samples_endpoint_lists_at_least_ten():
     response = client.get("/samples")
     assert response.status_code == 200

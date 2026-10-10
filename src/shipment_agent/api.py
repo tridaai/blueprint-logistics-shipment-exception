@@ -298,6 +298,27 @@ def eval_results() -> dict:
     )
 
 
+@app.get("/evals/retrieval-results", dependencies=_AUTH)
+def retrieval_eval_results() -> dict:
+    """Latest retrieval-relevance summary, as emitted by
+    ``evals/run_retrieval_evals.py`` (per-mode mean recall@3 over the
+    labelled set). Same lookup discipline as ``/evals/results``;
+    refreshed by ``make retrieval-evals``. The console renders it
+    beside the queue — relevance as an operator-visible number."""
+    candidates = [
+        Path(__file__).parent / "data" / "retrieval_eval_results.json",
+        Path.cwd() / "evals" / "retrieval_results.json",
+        Path(__file__).resolve().parents[2] / "evals" / "retrieval_results.json",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return json.loads(candidate.read_text(encoding="utf-8"))
+    raise HTTPException(
+        status_code=404,
+        detail="No retrieval eval results yet. Run: make retrieval-evals",
+    )
+
+
 class ApproveRequest(BaseModel):
     # One name for the decision-maker across both endpoints: `actor`.
     # `approver` stays accepted as a legacy alias.

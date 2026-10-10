@@ -12,8 +12,30 @@ trailer), including the customer-simulation case (RQ-04): a
 customer's own operational SOP, written in operational vocabulary,
 must rank for the case it describes.
 
-Metric: recall@3 per case (|retrieved ∩ expected| / |expected|),
-averaged. Two rankings are reported:
+Cases may also carry ``forbidden`` ids — documents that must NOT
+surface (another tenant's SOP in this tenant's ranking). A
+forbidden hit zeroes the case's score whatever the expected recall
+was: surfacing the wrong tenant's SOP is not a partial success.
+Cases with an empty ``expected`` and only ``forbidden`` ids score
+1.0 exactly when nothing forbidden surfaces.
+
+Three corpora shapes are measured:
+
+- ``standard`` / ``ops_sop`` — the bundled shared corpus (plus the
+  customer-SOP case's extra document).
+- ``tenant_acme`` / ``tenant_globex`` — one tenant's view of the
+  corpus (shared + that tenant's bundled SOPs), built by
+  ``policies_data.policies_for_tenant``: the acme reefer query
+  must rank SOP-ACME-01 for acme and must never surface it for
+  globex.
+- ``stored`` — a document supplied at runtime through the service's
+  corpus management (the POST /policies path), measured in two
+  phases: with the document stored it is the expected hit; after
+  it is removed (the DELETE path) it must vanish from the ranking.
+
+Metric: recall@3 per case (|retrieved ∩ expected| / |expected|,
+with the forbidden rule above), averaged. Two rankings are
+reported:
 
 - ``keyword`` — the deterministic default retriever. This is the
   gated number (threshold below): it runs offline, always.
@@ -43,7 +65,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from shipment_agent.policies_data import POLICIES  # noqa: E402
+from shipment_agent.policies_data import POLICIES, policies_for_tenant  # noqa: E402
 from shipment_agent.retriever import (  # noqa: E402
     HybridRetriever,
     KeywordRetriever,
@@ -73,6 +95,8 @@ OPS_SOP = {
 CORPORA = {
     "standard": POLICIES,
     "ops_sop": [*POLICIES, OPS_SOP],
+    "tenant_acme": policies_for_tenant("acme"),
+    "tenant_globex": policies_for_tenant("globex"),
 }
 
 
@@ -159,29 +183,98 @@ def build_retrievers(policies: list[dict], *, real: bool) -> dict:
     return retrievers
 
 
+def _score(retrieved: list[str], expected: list[str], forbidden: list[str]) -> dict:
+    """One ranking's result for one case: expected recall, the
+    forbidden hits, and the case score (a forbidden hit zeroes it —
+    see the module docstring)."""
+    hits = [pid for pid in expected if pid in retrieved]
+    forbidden_hits = [pid for pid in forbidden if pid in retrieved]
+    recall = len(hits) / len(expected) if expected else 1.0
+    return {
+        "retrieved": retrieved,
+        "hits": hits,
+        "expected_recall_at_3": round(recall, 4),
+        "forbidden_hits": forbidden_hits,
+        "recall_at_3": round(0.0 if forbidden_hits else recall, 4),
+    }
+
+
+def _evaluate_stored(case: dict, *, real: bool) -> dict:
+    """A stored-document case, in two phases through the real
+    service path (upsert → corpus → retrieve; remove → corpus →
+    retrieve). Phase 1: the stored document is the expected hit.
+    Phase 2: after removal it must be absent from the ranking —
+    a delete that leaves the document retrievable is a corpus
+    leak, scored 0 like any forbidden hit."""
+    from shipment_agent.model_backends import MockModelBackend
+    from shipment_agent.service import ShipmentService
+    from shipment_agent.store import InMemoryStore
+
+    document = case["document"]
+    tenant = case["tenant"]
+    service = ShipmentService(
+        backend=MockModelBackend(),
+        retriever=KeywordRetriever(POLICIES),
+        store=InMemoryStore(),
+        checkpointer=False,
+    )
+    service.upsert_tenant_policy(
+        tenant, document["policy_id"], document["title"], document["text"]
+    )
+    row: dict = {
+        "case_id": case["case_id"],
+        "expected": list(case["expected"]),
+        "results": {},
+    }
+    expected = list(case["expected"])
+    for name, retriever in build_retrievers(
+        service.corpus_policies(tenant), real=real
+    ).items():
+        retrieved = [
+            p.policy_id for p in retriever.retrieve(case["query"], top_k=TOP_K)
+        ]
+        row["results"][name] = _score(retrieved, expected, [])
+    service.remove_tenant_policy(tenant, document["policy_id"])
+    for name, retriever in build_retrievers(
+        service.corpus_policies(tenant), real=real
+    ).items():
+        retrieved_after = [
+            p.policy_id for p in retriever.retrieve(case["query"], top_k=TOP_K)
+        ]
+        result = row["results"][name]
+        result["after_delete_retrieved"] = retrieved_after
+        result["after_delete_clear"] = document["policy_id"] not in retrieved_after
+        if not result["after_delete_clear"]:
+            result["recall_at_3"] = 0.0
+    return row
+
+
 def evaluate(cases: list[dict], *, real: bool = False) -> dict:
     """Run every case against both rankings; return the report."""
     by_corpus: dict[str, dict] = {}
     for case in cases:
         corpus = case.get("corpus", "standard")
-        if corpus not in by_corpus:
-            by_corpus[corpus] = build_retrievers(CORPORA[corpus], real=real)
+        if corpus == "stored" or corpus in by_corpus:
+            continue
+        by_corpus[corpus] = build_retrievers(CORPORA[corpus], real=real)
     totals: dict[str, list[float]] = {}
     rows: list[dict] = []
     for case in cases:
-        retrievers = by_corpus[case.get("corpus", "standard")]
-        expected = list(case["expected"])
-        row: dict = {"case_id": case["case_id"], "expected": expected, "results": {}}
-        for name, retriever in retrievers.items():
-            retrieved = [p.policy_id for p in retriever.retrieve(case["query"], top_k=TOP_K)]
-            hits = [pid for pid in expected if pid in retrieved]
-            recall = len(hits) / len(expected) if expected else 0.0
-            row["results"][name] = {
-                "retrieved": retrieved,
-                "hits": hits,
-                "recall_at_3": round(recall, 4),
-            }
-            totals.setdefault(name, []).append(recall)
+        if case.get("corpus") == "stored":
+            row = _evaluate_stored(case, real=real)
+        else:
+            retrievers = by_corpus[case.get("corpus", "standard")]
+            expected = list(case["expected"])
+            forbidden = list(case.get("forbidden", []))
+            row = {"case_id": case["case_id"], "expected": expected, "results": {}}
+            for name, retriever in retrievers.items():
+                retrieved = [
+                    p.policy_id
+                    for p in retriever.retrieve(case["query"], top_k=TOP_K)
+                ]
+                row["results"][name] = _score(retrieved, expected, forbidden)
+        for name, result in row["results"].items():
+            totals.setdefault(name, []).append(result["recall_at_3"])
         rows.append(row)
     summary = {
         name: {
@@ -249,9 +342,17 @@ def main() -> int:
         for name, result in row["results"].items():
             if result["recall_at_3"] < 1.0:
                 missing = [p for p in row["expected"] if p not in result["hits"]]
+                detail = f"missed {missing}; retrieved {result['retrieved']}"
+                if result.get("forbidden_hits"):
+                    detail += f"; FORBIDDEN hit {result['forbidden_hits']}"
+                if result.get("after_delete_clear") is False:
+                    detail += (
+                        f"; still retrieved after delete: "
+                        f"{result['after_delete_retrieved']}"
+                    )
                 print(
                     f"  {row['case_id']} [{name}]: recall {result['recall_at_3']:.2f} "
-                    f"— missed {missing}; retrieved {result['retrieved']}"
+                    f"— {detail}"
                 )
     print(
         "PASS" if report["passed"] else f"FAIL (keyword threshold {KEYWORD_THRESHOLD:.0%})"

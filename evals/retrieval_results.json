@@ -4,12 +4,12 @@
   "embeddings": "stand-in (hashed bag-of-words)",
   "summary": {
     "keyword": {
-      "cases": 15,
-      "mean_recall_at_3": 1.0
+      "cases": 42,
+      "mean_recall_at_3": 0.9167
     },
     "hybrid (stand-in embeddings)": {
-      "cases": 15,
-      "mean_recall_at_3": 1.0
+      "cases": 42,
+      "mean_recall_at_3": 0.9286
     }
   },
   "cases": [
@@ -28,6 +28,8 @@
           "hits": [
             "POL-DELAY-01"
           ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
           "recall_at_3": 1.0
         },
         "hybrid (stand-in embeddings)": {
@@ -39,6 +41,8 @@
           "hits": [
             "POL-DELAY-01"
           ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
           "recall_at_3": 1.0
         }
       }
@@ -60,6 +64,8 @@
             "POL-DELAY-01",
             "POL-COMM-01"
           ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
           "recall_at_3": 1.0
         },
         "hybrid (stand-in embeddings)": {
@@ -72,6 +78,8 @@
             "POL-DELAY-01",
             "POL-COMM-01"
           ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
           "recall_at_3": 1.0
         }
       }
@@ -93,6 +101,8 @@
             "POL-DMG-01",
             "POL-CLAIM-01"
           ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
           "recall_at_3": 1.0
         },
         "hybrid (stand-in embeddings)": {
@@ -105,6 +115,8 @@
             "POL-DMG-01",
             "POL-CLAIM-01"
           ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
           "recall_at_3": 1.0
         }
       }
@@ -124,6 +136,8 @@
           "hits": [
             "POL-OPS-77"
           ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
           "recall_at_3": 1.0
         },
         "hybrid (stand-in embeddings)": {
@@ -135,6 +149,8 @@
           "hits": [
             "POL-OPS-77"
           ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
           "recall_at_3": 1.0
         }
       }
@@ -154,6 +170,8 @@
           "hits": [
             "POL-DOC-01"
           ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
           "recall_at_3": 1.0
         },
         "hybrid (stand-in embeddings)": {
@@ -165,6 +183,8 @@
           "hits": [
             "POL-DOC-01"
           ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
           "recall_at_3": 1.0
         }
       }
@@ -184,6 +204,8 @@
           "hits": [
             "POL-APPT-01"
           ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
           "recall_at_3": 1.0
         },
         "hybrid (stand-in embeddings)": {
@@ -195,6 +217,8 @@
           "hits": [
             "POL-APPT-01"
           ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
           "recall_at_3": 1.0
         }
       }
@@ -214,6 +238,8 @@
           "hits": [
             "POL-NONE-01"
           ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
           "recall_at_3": 1.0
         },
         "hybrid (stand-in embeddings)": {
@@ -225,6 +251,8 @@
           "hits": [
             "POL-NONE-01"
           ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
           "recall_at_3": 1.0
         }
       }
@@ -246,6 +274,8 @@
             "POL-ESC-01",
             "POL-DELAY-01"
           ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
           "recall_at_3": 1.0
         },
         "hybrid (stand-in embeddings)": {
@@ -258,6 +288,8 @@
             "POL-ESC-01",
             "POL-DELAY-01"
           ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
           "recall_at_3": 1.0
         }
       }
@@ -277,6 +309,8 @@
           "hits": [
             "POL-CLAIM-01"
           ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
           "recall_at_3": 1.0
         },
         "hybrid (stand-in embeddings)": {
@@ -288,6 +322,8 @@
           "hits": [
             "POL-CLAIM-01"
           ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
           "recall_at_3": 1.0
         }
       }
@@ -307,6 +343,8 @@
           "hits": [
             "POL-COMM-01"
           ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
           "recall_at_3": 1.0
         },
         "hybrid (stand-in embeddings)": {
@@ -318,6 +356,8 @@
           "hits": [
             "POL-COMM-01"
           ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
           "recall_at_3": 1.0
         }
       }
@@ -339,6 +379,8 @@
             "POL-ESC-01",
             "POL-DOC-01"
           ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
           "recall_at_3": 1.0
         },
         "hybrid (stand-in embeddings)": {
@@ -351,6 +393,8 @@
             "POL-ESC-01",
             "POL-DOC-01"
           ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
           "recall_at_3": 1.0
         }
       }
@@ -372,6 +416,8 @@
             "POL-DMG-01",
             "POL-CLAIM-01"
           ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
           "recall_at_3": 1.0
         },
         "hybrid (stand-in embeddings)": {
@@ -384,6 +430,8 @@
             "POL-DMG-01",
             "POL-CLAIM-01"
           ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
           "recall_at_3": 1.0
         }
       }
@@ -403,6 +451,8 @@
           "hits": [
             "POL-DMG-01"
           ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
           "recall_at_3": 1.0
         },
         "hybrid (stand-in embeddings)": {
@@ -414,6 +464,8 @@
           "hits": [
             "POL-DMG-01"
           ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
           "recall_at_3": 1.0
         }
       }
@@ -433,6 +485,8 @@
           "hits": [
             "POL-DELAY-01"
           ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
           "recall_at_3": 1.0
         },
         "hybrid (stand-in embeddings)": {
@@ -444,6 +498,8 @@
           "hits": [
             "POL-DELAY-01"
           ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
           "recall_at_3": 1.0
         }
       }
@@ -462,6 +518,8 @@
           "hits": [
             "POL-DOC-01"
           ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
           "recall_at_3": 1.0
         },
         "hybrid (stand-in embeddings)": {
@@ -473,7 +531,941 @@
           "hits": [
             "POL-DOC-01"
           ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
           "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-16",
+      "expected": [
+        "POL-DMG-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-CLAIM-01",
+            "POL-DMG-01",
+            "POL-COMM-01"
+          ],
+          "hits": [
+            "POL-DMG-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-CLAIM-01",
+            "POL-DMG-01",
+            "POL-COMM-01"
+          ],
+          "hits": [
+            "POL-DMG-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-17",
+      "expected": [
+        "POL-NONE-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-DMG-01",
+            "POL-CLAIM-01",
+            "POL-DELAY-01"
+          ],
+          "hits": [],
+          "expected_recall_at_3": 0.0,
+          "forbidden_hits": [],
+          "recall_at_3": 0.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-DMG-01",
+            "POL-CLAIM-01",
+            "POL-COMM-01"
+          ],
+          "hits": [],
+          "expected_recall_at_3": 0.0,
+          "forbidden_hits": [],
+          "recall_at_3": 0.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-18",
+      "expected": [
+        "POL-DELAY-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-COMM-01",
+            "POL-DELAY-01",
+            "POL-CLAIM-01"
+          ],
+          "hits": [
+            "POL-DELAY-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-COMM-01",
+            "POL-CLAIM-01",
+            "POL-DELAY-01"
+          ],
+          "hits": [
+            "POL-DELAY-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-19",
+      "expected": [
+        "POL-DELAY-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-COMM-01",
+            "POL-DELAY-01",
+            "POL-CLAIM-01"
+          ],
+          "hits": [
+            "POL-DELAY-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-COMM-01",
+            "POL-CLAIM-01",
+            "POL-DELAY-01"
+          ],
+          "hits": [
+            "POL-DELAY-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-20",
+      "expected": [
+        "POL-APPT-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-APPT-01",
+            "POL-COMM-01",
+            "POL-DELAY-01"
+          ],
+          "hits": [
+            "POL-APPT-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-APPT-01",
+            "POL-COMM-01",
+            "POL-CLAIM-01"
+          ],
+          "hits": [
+            "POL-APPT-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-21",
+      "expected": [
+        "POL-NONE-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-COMM-01",
+            "POL-DELAY-01",
+            "POL-CLAIM-01"
+          ],
+          "hits": [],
+          "expected_recall_at_3": 0.0,
+          "forbidden_hits": [],
+          "recall_at_3": 0.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-COMM-01",
+            "POL-CLAIM-01",
+            "POL-DELAY-01"
+          ],
+          "hits": [],
+          "expected_recall_at_3": 0.0,
+          "forbidden_hits": [],
+          "recall_at_3": 0.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-22",
+      "expected": [
+        "POL-DMG-01",
+        "POL-CLAIM-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-DMG-01",
+            "POL-ESC-01",
+            "POL-APPT-01"
+          ],
+          "hits": [
+            "POL-DMG-01"
+          ],
+          "expected_recall_at_3": 0.5,
+          "forbidden_hits": [],
+          "recall_at_3": 0.5
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-DMG-01",
+            "POL-ESC-01",
+            "POL-CLAIM-01"
+          ],
+          "hits": [
+            "POL-DMG-01",
+            "POL-CLAIM-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-23",
+      "expected": [
+        "POL-DOC-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-DOC-01",
+            "POL-DELAY-01",
+            "POL-COMM-01"
+          ],
+          "hits": [
+            "POL-DOC-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-DOC-01",
+            "POL-DELAY-01",
+            "POL-COMM-01"
+          ],
+          "hits": [
+            "POL-DOC-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-24",
+      "expected": [
+        "POL-APPT-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-APPT-01",
+            "POL-DMG-01",
+            "POL-COMM-01"
+          ],
+          "hits": [
+            "POL-APPT-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-APPT-01",
+            "POL-COMM-01",
+            "POL-DMG-01"
+          ],
+          "hits": [
+            "POL-APPT-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-25",
+      "expected": [
+        "POL-ESC-01",
+        "POL-DMG-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-ESC-01",
+            "POL-CLAIM-01",
+            "POL-DMG-01"
+          ],
+          "hits": [
+            "POL-ESC-01",
+            "POL-DMG-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-ESC-01",
+            "POL-CLAIM-01",
+            "POL-DMG-01"
+          ],
+          "hits": [
+            "POL-ESC-01",
+            "POL-DMG-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-26",
+      "expected": [
+        "POL-NONE-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-NONE-01",
+            "POL-DELAY-01",
+            "POL-COMM-01"
+          ],
+          "hits": [
+            "POL-NONE-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-NONE-01",
+            "POL-DELAY-01",
+            "POL-COMM-01"
+          ],
+          "hits": [
+            "POL-NONE-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-27",
+      "expected": [
+        "POL-DELAY-01",
+        "POL-COMM-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-DELAY-01",
+            "POL-COMM-01",
+            "POL-NONE-01"
+          ],
+          "hits": [
+            "POL-DELAY-01",
+            "POL-COMM-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-DELAY-01",
+            "POL-COMM-01",
+            "POL-NONE-01"
+          ],
+          "hits": [
+            "POL-DELAY-01",
+            "POL-COMM-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-28",
+      "expected": [
+        "POL-DMG-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-DMG-01",
+            "POL-CLAIM-01",
+            "POL-COMM-01"
+          ],
+          "hits": [
+            "POL-DMG-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-DMG-01",
+            "POL-CLAIM-01",
+            "POL-COMM-01"
+          ],
+          "hits": [
+            "POL-DMG-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-29",
+      "expected": [
+        "POL-DOC-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-DOC-01",
+            "POL-CLAIM-01",
+            "POL-ESC-01"
+          ],
+          "hits": [
+            "POL-DOC-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-DOC-01",
+            "POL-CLAIM-01",
+            "POL-ESC-01"
+          ],
+          "hits": [
+            "POL-DOC-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-30",
+      "expected": [
+        "POL-APPT-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-APPT-01",
+            "POL-COMM-01",
+            "POL-DELAY-01"
+          ],
+          "hits": [
+            "POL-APPT-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-APPT-01",
+            "POL-COMM-01",
+            "POL-DELAY-01"
+          ],
+          "hits": [
+            "POL-APPT-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-31",
+      "expected": [
+        "POL-COMM-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-COMM-01",
+            "POL-CLAIM-01",
+            "POL-DELAY-01"
+          ],
+          "hits": [
+            "POL-COMM-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-COMM-01",
+            "POL-CLAIM-01",
+            "POL-DELAY-01"
+          ],
+          "hits": [
+            "POL-COMM-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-32",
+      "expected": [
+        "POL-CLAIM-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-CLAIM-01",
+            "POL-DMG-01",
+            "POL-COMM-01"
+          ],
+          "hits": [
+            "POL-CLAIM-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-CLAIM-01",
+            "POL-DMG-01",
+            "POL-COMM-01"
+          ],
+          "hits": [
+            "POL-CLAIM-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-33",
+      "expected": [
+        "POL-ESC-01",
+        "POL-DELAY-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-ESC-01",
+            "POL-DELAY-01",
+            "POL-COMM-01"
+          ],
+          "hits": [
+            "POL-ESC-01",
+            "POL-DELAY-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-ESC-01",
+            "POL-DELAY-01",
+            "POL-COMM-01"
+          ],
+          "hits": [
+            "POL-ESC-01",
+            "POL-DELAY-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-34",
+      "expected": [
+        "POL-NONE-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-CLAIM-01",
+            "POL-COMM-01",
+            "POL-DMG-01"
+          ],
+          "hits": [],
+          "expected_recall_at_3": 0.0,
+          "forbidden_hits": [],
+          "recall_at_3": 0.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-CLAIM-01",
+            "POL-COMM-01",
+            "POL-DMG-01"
+          ],
+          "hits": [],
+          "expected_recall_at_3": 0.0,
+          "forbidden_hits": [],
+          "recall_at_3": 0.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-35",
+      "expected": [
+        "POL-DOC-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-CLAIM-01",
+            "POL-DOC-01",
+            "POL-COMM-01"
+          ],
+          "hits": [
+            "POL-DOC-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-CLAIM-01",
+            "POL-DOC-01",
+            "POL-COMM-01"
+          ],
+          "hits": [
+            "POL-DOC-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-36",
+      "expected": [
+        "POL-DMG-01",
+        "POL-CLAIM-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-DMG-01",
+            "POL-COMM-01",
+            "POL-CLAIM-01"
+          ],
+          "hits": [
+            "POL-DMG-01",
+            "POL-CLAIM-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-DMG-01",
+            "POL-CLAIM-01",
+            "POL-COMM-01"
+          ],
+          "hits": [
+            "POL-DMG-01",
+            "POL-CLAIM-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-37",
+      "expected": [
+        "SOP-ACME-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "SOP-ACME-01",
+            "POL-CLAIM-01",
+            "POL-DELAY-01"
+          ],
+          "hits": [
+            "SOP-ACME-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "SOP-ACME-01",
+            "POL-CLAIM-01",
+            "POL-DELAY-01"
+          ],
+          "hits": [
+            "SOP-ACME-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-38",
+      "expected": [],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-CLAIM-01",
+            "POL-DELAY-01",
+            "POL-DMG-01"
+          ],
+          "hits": [],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-CLAIM-01",
+            "POL-DELAY-01",
+            "POL-DMG-01"
+          ],
+          "hits": [],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-39",
+      "expected": [
+        "SOP-GLOBEX-01"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "SOP-GLOBEX-01",
+            "POL-CLAIM-01",
+            "POL-DMG-01"
+          ],
+          "hits": [
+            "SOP-GLOBEX-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "SOP-GLOBEX-01",
+            "POL-CLAIM-01",
+            "POL-DELAY-01"
+          ],
+          "hits": [
+            "SOP-GLOBEX-01"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-40",
+      "expected": [],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "POL-CLAIM-01",
+            "POL-DMG-01",
+            "POL-COMM-01"
+          ],
+          "hits": [],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "POL-CLAIM-01",
+            "POL-DELAY-01",
+            "POL-DMG-01"
+          ],
+          "hits": [],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0
+        }
+      }
+    },
+    {
+      "case_id": "RQ-41",
+      "expected": [
+        "SOP-ACME-77"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "SOP-ACME-77",
+            "POL-COMM-01",
+            "SOP-ACME-01"
+          ],
+          "hits": [
+            "SOP-ACME-77"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0,
+          "after_delete_retrieved": [
+            "POL-COMM-01",
+            "SOP-ACME-01",
+            "POL-DELAY-01"
+          ],
+          "after_delete_clear": true
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "SOP-ACME-77",
+            "POL-COMM-01",
+            "POL-CLAIM-01"
+          ],
+          "hits": [
+            "SOP-ACME-77"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0,
+          "after_delete_retrieved": [
+            "POL-COMM-01",
+            "POL-CLAIM-01",
+            "SOP-ACME-01"
+          ],
+          "after_delete_clear": true
+        }
+      }
+    },
+    {
+      "case_id": "RQ-42",
+      "expected": [
+        "PROC-GLOBEX-77"
+      ],
+      "results": {
+        "keyword": {
+          "retrieved": [
+            "PROC-GLOBEX-77",
+            "POL-CLAIM-01",
+            "POL-DMG-01"
+          ],
+          "hits": [
+            "PROC-GLOBEX-77"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0,
+          "after_delete_retrieved": [
+            "POL-CLAIM-01",
+            "POL-DMG-01",
+            "POL-COMM-01"
+          ],
+          "after_delete_clear": true
+        },
+        "hybrid (stand-in embeddings)": {
+          "retrieved": [
+            "PROC-GLOBEX-77",
+            "POL-CLAIM-01",
+            "POL-COMM-01"
+          ],
+          "hits": [
+            "PROC-GLOBEX-77"
+          ],
+          "expected_recall_at_3": 1.0,
+          "forbidden_hits": [],
+          "recall_at_3": 1.0,
+          "after_delete_retrieved": [
+            "POL-CLAIM-01",
+            "POL-COMM-01",
+            "POL-DMG-01"
+          ],
+          "after_delete_clear": true
         }
       }
     }
@@ -481,5 +1473,5 @@
   "keyword_threshold": 0.85,
   "passed": true,
   "framing": "Labelled relevance set used as a regression gate for retrieval ranking. Offline hybrid numbers use stand-in embeddings and measure the merge, not embedding quality.",
-  "generated_at": "2026-10-10T13:27:11+00:00"
+  "generated_at": "2026-10-10T15:24:25+00:00"
 }
