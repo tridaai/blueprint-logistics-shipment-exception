@@ -149,7 +149,12 @@ does language work and code does every number:
    **memory**: prior analysed shipments for the same consignee and the
    same lane, counted from the store ("2 prior exception(s) for this
    consignee in the stored history"), so a repeat problem is visible
-   as a repeat. The evidence also carries the **feedback loop**: when
+   as a repeat. It also carries the carrier's **scorecard** — the
+   carrier's whole stored track record (shipments, exception rate and
+   mix, damage rate, and the human approval rate over decided cases),
+   computed in code from the store (`insights.py`;
+   `GET /carriers/scorecards`) — so this case is read against the
+   carrier's history, including a clean one. The evidence also carries the **feedback loop**: when
    approvers gave reasons for earlier decisions on this consignee or
    lane, the last three surface verbatim ("reviewer feedback: last
    decision on this lane was reject — reason: 'draft promised a call
@@ -206,7 +211,13 @@ structured events** (CLI `--stream`, or `POST /shipments/analyze/stream`
 as Server-Sent Events) with per-node durations that also land on the
 trace; and the service layer analyses **batches concurrently**
 (`analyze_batch`, CLI `--all --concurrency N`), with one bad shipment
-captured in its own result instead of failing the batch.
+captured in its own result instead of failing the batch. The approver's
+worklist is a first-class surface too: **`GET /queue`** lists the
+shipments awaiting a decision — severity first, then oldest — each
+with the flags that change how a case is read (cross-check
+disagreement, guardrail repair, reviewer block, failing guardrails,
+information needed, auto-approval eligibility), and the demo console
+renders it as a queue panel with a Load action per item.
 
 **The classification resolution policy** (implemented in
 `crosscheck.py`, shown in the result and the trace): rules are
@@ -445,6 +456,8 @@ API, CLI, and traced demo — read the same variables.**
 | `RUN_TOKEN_BUDGET` | — (unset, off) | Per-run provider-token cap: once exceeded, remaining provider steps degrade to their deterministic paths (trace-noted, telemetry-reported); the run never fails for budget |
 | `ACTION_WEBHOOK_URL` | — (unset) | Output routing: when set, a successful approval POSTs the approved packet JSON to this URL |
 | `ACTION_WEBHOOK_TIMEOUT_SECONDS` | `5` | Timeout for the approval webhook dispatch |
+| `ACTION_WEBHOOK_MAX_ATTEMPTS` | `3` | Total webhook delivery attempts per approval (first try + retries); every attempt is recorded on the record's delivery ledger |
+| `ACTION_WEBHOOK_RETRY_BASE_SECONDS` | `30` | Backoff base between delivery retries; the delay doubles per failed attempt and the next due time is recorded on the ledger |
 
 To run the demo against a real model (Anthropic shown; OpenAI is the
 same shape, and Ollama needs no key at all):
@@ -496,8 +509,18 @@ Notes that matter:
   successful approval POSTs the approved packet JSON to that URL — the
   seam where a customer's TMS, ticket queue, or automation endpoint
   plugs in. `dispatch_status` on the result records `sent` (2xx) or
-  `failed`; a failed dispatch never undoes the approval. Unset (the
-  default), approval performs no external action at all. Decisions take
+  `failed`; a failed dispatch never undoes the approval. Every attempt
+  is also written to the record's **delivery ledger** — timestamp,
+  outcome, HTTP status, the signature id it carried, the error, and
+  when the next retry falls due under an exponential backoff
+  (`ACTION_WEBHOOK_RETRY_BASE_SECONDS`, doubling per attempt) —
+  readable at `GET /shipments/{id}/dispatch`. A failed delivery can be
+  retried (`POST /shipments/{id}/dispatch/retry`, or
+  `service.retry_dispatch`) up to `ACTION_WEBHOOK_MAX_ATTEMPTS` total
+  attempts; the backoff is enforced unless the operator forces the
+  retry, and `service.due_dispatch_retries()` lists what a scheduler
+  should retry now. Unset (the default), approval performs no external
+  action at all and the ledger stays empty. Decisions take
   one name everywhere: approve and reject both accept `actor` (the
   legacy `approver`/`reviewer` still work), and the result returns who
   decided as `decided_by`. Both also accept an optional `reason`: it
@@ -601,13 +624,27 @@ Golden dataset: 32 synthetic cases in
 | missed_appointment | 5/5 |
 | none | 5/5 |
 
-Scope: this eval covers classification only; it does not score retrieval
-or draft quality. The golden set is synthetic and covers the phrasings the
+Scope: this eval covers classification only. Retrieval ranking and
+draft quality have their own packs, below. The golden set is synthetic and covers the phrasings the
 rule classifier is designed for, so it functions as a **regression gate**
 (any change that breaks a known case fails the gate), not as a real-world
 accuracy claim. When a new phrasing is missed, add it as a case before
 changing the classifier; the case then guards the fix. Production accuracy
 would be measured on real, consented, anonymised exception data.
+
+**Retrieval relevance eval.** `uv run python evals/run_retrieval_evals.py`
+(or `make retrieval-evals`) scores ranking, not just mechanics: 15
+labelled cases in
+[evals/retrieval_golden.jsonl](evals/retrieval_golden.jsonl) pair a
+query — derived from the sample shipments' own event/condition/document
+text, in the graph's query shape — with the policies that should land
+in the top-3 the diagnosis cites, and reports **recall@3** per ranking.
+It includes the customer-simulation case: a customer's own operational
+SOP must rank first for the damage case it describes. Current
+measurement: **keyword 100%, hybrid 100%** (gate: keyword ≥ 85%).
+Offline, the hybrid number runs over a labelled stand-in embedder
+(hashed bag-of-words) and measures the RRF merge, not embedding
+quality; `--real` measures the configured embeddings instead.
 
 **LLM-judge eval pack (opt-in).** `uv run python evals/run_llm_evals.py`
 (or `make llm-evals`) runs the golden set through a configured provider
@@ -617,7 +654,7 @@ the verified facts (invented ETAs and prohibited promises fail the pack),
 with per-case tokens, latency, and estimated cost. It fails loudly
 without a real provider and is never part of the default gate or CI.
 
-Test suite: **368 tests** (`pytest -q`: 364 passing, 4 Postgres
+Test suite: **396 tests** (`pytest -q`: 392 passing, 4 Postgres
 integration tests gated on `DATABASE_URL`) — classifier, tools,
 retriever (keyword, semantic, hybrid + rerank, Chroma path with a faked
 client, pgvector SQL formatting + a gated live round-trip), the retrieval query built from shipment content, intake
@@ -639,7 +676,13 @@ repair loop (provider-mode repair, SYN-1013 on and off), memory across
 both stores (consignee, lane, and carrier history), the clarification
 request flow, run telemetry, the autonomy recommendation and each
 disqualifier, output
-routing against a local stub server, provider-error translation
+routing against a local stub server, the webhook delivery ledger and
+its bounded retries against a controllable fake sink (backoff
+bookkeeping, budget exhaustion, signature ids, store round-trip), the
+approval queue (severity/age ordering, flag projection) and carrier
+scorecards (mix, damage and approval rates, the scorecard line in the
+next same-carrier diagnosis), the retrieval relevance harness
+(labelled set, both rankings over the gate), provider-error translation
 (including client-construction failures) and
 recorded fallbacks, end-to-end graph, API approval/reject flow (including
 the unified `actor` field), store-contract persistence across instances
@@ -673,7 +716,10 @@ src/shipment_agent/   agent graph (11 traced steps + evidence fan-out
                       official Postgres checkpointer (SQLite doubles
                       for tests), S3 object store for documents,
                       JSON logs + request IDs, /metrics + audit export,
-                      FastAPI app + web UI (static/), demo
+                      insights (approval queue + carrier scorecards),
+                      webhook delivery ledger with bounded retries,
+                      FastAPI app + web UI (static/, incl. the queue
+                      panel), demo
                       trace, CLI, service layer (incl. concurrent batch),
                       bundled samples (data/)
 migrations/           numbered SQL schema (approvals, pgvector
@@ -681,16 +727,19 @@ migrations/           numbered SQL schema (approvals, pgvector
 docs/architecture.md  full architecture and productionisation notes
 data/sample/          synthetic shipments (14) + policy corpus mirror
 evals/                golden dataset (32 cases) + run_evals.py +
-                      run_llm_evals.py (opt-in LLM-judge pack)
-tests/                368 pytest tests: unit, integration, API, UI,
+                      run_llm_evals.py (opt-in LLM-judge pack) +
+                      retrieval relevance set (15 labelled cases) +
+                      run_retrieval_evals.py
+tests/                396 pytest tests: unit, integration, API, UI,
                       negation, persistence, auth, LLM backends and
                       eval pack (mocked SDKs), config, retrieval,
                       object storage, observability, signed webhooks,
+                      delivery ledger/retries, queue, scorecards,
                       metrics/audit (Postgres integration tests are
                       gated on DATABASE_URL and skip without one)
 docker-compose.yml    production-shaped stack: api + Postgres/pgvector + MinIO
 docker-compose.local.yml  dev layer: published db/MinIO ports + local Ollama profile
-Makefile              make demo · make test · make evals · make llm-evals · make serve
+Makefile              make demo · make test · make evals · make retrieval-evals · make llm-evals · make serve
 ```
 
 ## Production hardening — what changes for a real deployment
@@ -706,9 +755,10 @@ HMAC-signed when `ACTION_WEBHOOK_SECRET` is set — as the first
 output-routing adapter. A production build must still add: per-client
 data isolation and per-user identity (the shipped auth is one shared
 key); TMS/carrier event integrations and a real OCR pipeline feeding
-extraction; an approval queue UI; a full post-approval action layer
+extraction; a full post-approval action layer
 (messaging, claim filing) with idempotency and rate limits — the
-webhook's `dispatch_status` is the seed of that bookkeeping;
+webhook's delivery ledger and bounded retries ship, and are the
+bookkeeping that layer builds on;
 distributed tracing beyond request IDs; and an eval set grown from
 real approver corrections. Section 9 of the architecture doc covers
 each in detail.

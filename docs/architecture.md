@@ -470,6 +470,25 @@ When `ACTION_WEBHOOK_SECRET` is set, the delivery is signed —
 receiver can verify the packet came from the agent before acting on
 it; unset, deliveries are unsigned, as before.
 
+Every attempt is also written to the record's **delivery ledger**
+(`ApprovalRecord.dispatch_attempts`, persisted with the record):
+attempt number, timestamp, outcome, HTTP status when the endpoint
+answered, the signature id the delivery carried, the error when it
+failed, and — for a failure with attempts remaining — the next
+retry's due time under an exponential backoff
+(`ACTION_WEBHOOK_RETRY_BASE_SECONDS`, default 30s, doubling per
+attempt). A failed delivery is therefore a *tracked* state, not a
+string: `GET /shipments/{id}/dispatch` serves the ledger,
+`service.due_dispatch_retries()` lists the deliveries a scheduler
+should retry now, and `retry_dispatch` (service, or
+`POST /shipments/{id}/dispatch/retry`) performs one bounded retry —
+refused when the shipment is not approved, no webhook is configured,
+the packet already landed, the attempt budget
+(`ACTION_WEBHOOK_MAX_ATTEMPTS`, default 3 total) is exhausted, or
+the backoff has not elapsed without an operator `force`. The retry
+re-sends the same approved packet; it never re-runs the pipeline
+or re-records the decision.
+
 **The gate is also a checkpoint.** With `CHECKPOINTS` on (the default),
 the graph carries a LangGraph checkpointer and the final
 `approval_gate` node pauses the run with `interrupt()`; the graph
@@ -597,7 +616,7 @@ always means "compared and agreed".
 | `RETRIEVER=semantic`/`hybrid` with no embeddings route | explicit RuntimeError at construction naming the RETRIEVER value set: embeddings need OpenAI(-compatible) or the Ollama backend |
 | Draft fails guardrails, repair on (default) | one bounded redraft with the failures fed back, re-verified + re-validated; result flags the attempt and preserves the original failure; if the redraft still fails, approval is blocked (SYN-1013 demonstrates the deterministic case) |
 | Draft fails guardrails, `GUARDRAIL_REPAIR=off` | no attempt: approval is blocked with the exact errors surfaced — the pre-repair behaviour, unchanged |
-| Approval webhook unreachable / non-2xx | `dispatch_status=failed` on the result; the approval itself stands |
+| Approval webhook unreachable / non-2xx | `dispatch_status=failed` on the result; the approval itself stands; the attempt is written to the delivery ledger and can be retried under the attempt budget/backoff |
 | Conflicting signals (damage + delay) | priority order resolves deterministically; rationale records the winning signal |
 | Independent reviewer blocks the draft | verdict + findings on the result, trace, and claim packet; `reviewer_blocked=True` flags the case and forces the autonomy recommendation to ineligible — the human still decides; a block never auto-rejects |
 | Reviewer call fails, or `REVIEWER=off` | failure degrades to the deterministic checklist review with the reason in a note; off records no review and the trace says the step was disabled |
@@ -688,17 +707,24 @@ Ordered by value when adapting this blueprint to your own operation:
    library (the `policy_embeddings` table grows with the corpus; at
    scale pin the embedding dimension and add an HNSW index), or
    LlamaIndex + a managed vector store over real SOPs,
-   carrier claim rules, and customer contracts; retrieval evaluated on
-   a labelled set.
-3. **Approval UX:** queue UI with side-by-side evidence (classification
-   signals, source documents, policy text), one-click edit/approve/reject.
-   The audit trail itself ships: `GET /audit/export` serves who
-   approved what, when, and why, from the store.
-4. **Action layer:** the shipped approval webhook is the first adapter;
-   production grows it into send-via-the-client's-messaging-system and
-   claim filing via carrier portals/APIs — behind feature flags, with
-   idempotency keys and rate limits, and `dispatch_status` grown into
-   full delivery bookkeeping.
+   carrier claim rules, and customer contracts. Retrieval ranking is
+   already measured, not assumed: `evals/run_retrieval_evals.py`
+   scores a labelled query→policy set (recall@3 for keyword and
+   hybrid); production grows that set from real approver corrections
+   and runs the hybrid number over the real embedding model.
+3. **Approval UX:** the queue ships — `GET /queue` (severity, then
+   age, with cross-check/repair/reviewer/guardrail flags) and a
+   console queue panel — as does the audit trail (`GET /audit/export`
+   serves who approved what, when, and why, from the store).
+   Production grows the panel into a full review UX: side-by-side
+   evidence (classification signals, source documents, policy text),
+   one-click edit/approve/reject.
+4. **Action layer:** the shipped approval webhook is the first adapter,
+   and its delivery bookkeeping ships with it — a per-record ledger
+   of every attempt with bounded, backoff-scheduled retries (§4).
+   Production grows the adapter set into send-via-the-client's-
+   messaging-system and claim filing via carrier portals/APIs —
+   behind feature flags, with idempotency keys and rate limits.
 5. **Observability:** the shipped baseline is structured JSON logs
    with request IDs, per-run telemetry on every result, and
    `GET /metrics` (runs, decisions, guardrail failures, latency,
