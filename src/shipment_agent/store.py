@@ -75,6 +75,18 @@ class ApprovalRecord:
     # which belongs to the approval packet's delivery alone.
     sla_breach_event_at: str | None = None
     sla_dispatch_attempts: list[dict] = field(default_factory=list)
+    # The wait (seconds) at the moment the breach event fired. The
+    # escalation ladder's second rung exists for breaches that were
+    # reported while still in rung-1 territory and then kept aging;
+    # the sweep compares this stamp against the escalation threshold
+    # to tell those apart from a breach first observed already past
+    # it (whose receiver was told the full wait in the first event).
+    sla_breach_age_seconds: float | None = None
+    # The escalation rung's own bookkeeping, mirroring the breach
+    # rung's: when the signed ``sla_escalation`` event first fired
+    # (the dedupe marker for that rung) and its delivery ledger.
+    sla_escalation_event_at: str | None = None
+    sla_escalation_attempts: list[dict] = field(default_factory=list)
     # The Idempotency-Key the human decision was submitted with,
     # when the caller sent one (see service.approve / reject). A
     # repeat decision under the same key returns the recorded
@@ -203,6 +215,9 @@ def _record_to_dict(record: ApprovalRecord) -> dict:
         "idempotency_key": record.idempotency_key,
         "sla_breach_event_at": record.sla_breach_event_at,
         "sla_dispatch_attempts": record.sla_dispatch_attempts,
+        "sla_breach_age_seconds": record.sla_breach_age_seconds,
+        "sla_escalation_event_at": record.sla_escalation_event_at,
+        "sla_escalation_attempts": record.sla_escalation_attempts,
         "decision_idempotency_key": record.decision_idempotency_key,
         "created_at": record.created_at,
         "decided_at": record.decided_at,
@@ -224,6 +239,9 @@ def _record_from_dict(data: dict) -> ApprovalRecord:
         idempotency_key=data.get("idempotency_key"),
         sla_breach_event_at=data.get("sla_breach_event_at"),
         sla_dispatch_attempts=data.get("sla_dispatch_attempts") or [],
+        sla_breach_age_seconds=data.get("sla_breach_age_seconds"),
+        sla_escalation_event_at=data.get("sla_escalation_event_at"),
+        sla_escalation_attempts=data.get("sla_escalation_attempts") or [],
         decision_idempotency_key=data.get("decision_idempotency_key"),
         created_at=data.get("created_at", ""),
         decided_at=data.get("decided_at", ""),
@@ -339,7 +357,8 @@ class SQLiteStore:
         "approved, rejected_by, reject_reason, dispatch_status, "
         "approve_reason, created_at, decided_at, dispatch_attempts_json, "
         "idempotency_key, sla_breach_event_at, sla_dispatch_attempts_json, "
-        "decision_idempotency_key"
+        "decision_idempotency_key, sla_breach_age_seconds, "
+        "sla_escalation_event_at, sla_escalation_attempts_json"
     )
 
     def __init__(self, path: Path | str) -> None:
@@ -407,6 +426,18 @@ class SQLiteStore:
                 conn.execute(
                     "ALTER TABLE approvals ADD COLUMN decision_idempotency_key TEXT"
                 )
+            if "sla_breach_age_seconds" not in columns:
+                conn.execute(
+                    "ALTER TABLE approvals ADD COLUMN sla_breach_age_seconds REAL"
+                )
+            if "sla_escalation_event_at" not in columns:
+                conn.execute(
+                    "ALTER TABLE approvals ADD COLUMN sla_escalation_event_at TEXT"
+                )
+            if "sla_escalation_attempts_json" not in columns:
+                conn.execute(
+                    "ALTER TABLE approvals ADD COLUMN sla_escalation_attempts_json TEXT NOT NULL DEFAULT '[]'"
+                )
             # Tenancy changed the identity: a table created before it
             # keys rows by shipment_id alone, so two tenants' records
             # with the same id would shadow each other. Rebuild such a
@@ -439,6 +470,9 @@ class SQLiteStore:
                         sla_breach_event_at TEXT,
                         sla_dispatch_attempts_json TEXT NOT NULL DEFAULT '[]',
                         decision_idempotency_key TEXT,
+                        sla_breach_age_seconds REAL,
+                        sla_escalation_event_at TEXT,
+                        sla_escalation_attempts_json TEXT NOT NULL DEFAULT '[]',
                         PRIMARY KEY (tenant_id, shipment_id)
                     )
                     """
@@ -462,7 +496,7 @@ class SQLiteStore:
             conn.execute(
                 f"""
                 INSERT OR REPLACE INTO approvals ({self._COLUMNS})
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.tenant_id,
@@ -482,6 +516,9 @@ class SQLiteStore:
                     record.sla_breach_event_at,
                     json.dumps(record.sla_dispatch_attempts),
                     record.decision_idempotency_key,
+                    record.sla_breach_age_seconds,
+                    record.sla_escalation_event_at,
+                    json.dumps(record.sla_escalation_attempts),
                 ),
             )
 
@@ -505,6 +542,17 @@ class SQLiteStore:
                 sla_attempts = json.loads(row["sla_dispatch_attempts_json"]) or []
             except json.JSONDecodeError:
                 sla_attempts = []
+        escalation_attempts: list[dict] = []
+        if (
+            "sla_escalation_attempts_json" in keys
+            and row["sla_escalation_attempts_json"]
+        ):
+            try:
+                escalation_attempts = (
+                    json.loads(row["sla_escalation_attempts_json"]) or []
+                )
+            except json.JSONDecodeError:
+                escalation_attempts = []
         return ApprovalRecord(
             result=AgentResult.model_validate_json(row["result_json"]),
             tenant_id=(
@@ -525,6 +573,17 @@ class SQLiteStore:
                 row["sla_breach_event_at"] if "sla_breach_event_at" in keys else None
             ),
             sla_dispatch_attempts=sla_attempts,
+            sla_breach_age_seconds=(
+                row["sla_breach_age_seconds"]
+                if "sla_breach_age_seconds" in keys
+                else None
+            ),
+            sla_escalation_event_at=(
+                row["sla_escalation_event_at"]
+                if "sla_escalation_event_at" in keys
+                else None
+            ),
+            sla_escalation_attempts=escalation_attempts,
             decision_idempotency_key=(
                 row["decision_idempotency_key"]
                 if "decision_idempotency_key" in keys

@@ -499,7 +499,10 @@ async function loadQueue() {
     if (!res.ok) throw new Error('queue failed (' + res.status + ')');
     const data = await res.json();
     const breaches = (data.summary && data.summary.sla_breaches) || 0;
-    note.textContent = data.count + ' awaiting' + (breaches ? ' · ' + breaches + ' SLA breach' + (breaches === 1 ? '' : 'es') : '');
+    const escalations = (data.summary && data.summary.sla_escalations) || 0;
+    note.textContent = data.count + ' awaiting'
+      + (breaches ? ' · ' + breaches + ' SLA breach' + (breaches === 1 ? '' : 'es') : '')
+      + (escalations ? ' · ' + escalations + ' escalated' : '');
     if (!data.queue.length) {
       body.innerHTML = '<tr><td colspan="8" class="note">Queue is empty — analyze a shipment above and it will wait here for a decision.</td></tr>';
       return;
@@ -509,9 +512,11 @@ async function loadQueue() {
       const tr = document.createElement('tr');
       if (item.sla_breach) tr.className = 'sla-breach';
       const flags = queueFlagLabels(item.flags);
-      const slaText = item.sla_breach
-        ? '⛔ breach +' + formatAge(item.sla_overdue_seconds) + ' (budget ' + item.sla_hours + 'h)'
-        : 'within ' + (item.sla_hours ?? '—') + 'h budget';
+      const slaText = item.sla_escalated
+        ? '⛔⛔ ESCALATED +' + formatAge(item.sla_escalation_overdue_seconds) + ' past ' + (item.sla_escalation_hours ?? '—') + 'h (budget ' + item.sla_hours + 'h)'
+        : item.sla_breach
+          ? '⛔ breach +' + formatAge(item.sla_overdue_seconds) + ' (budget ' + item.sla_hours + 'h)'
+          : 'within ' + (item.sla_hours ?? '—') + 'h budget';
       const cells = [
         item.shipment_id,
         null,  // severity badge, built below

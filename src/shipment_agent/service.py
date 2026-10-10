@@ -45,9 +45,14 @@ is the documented observer that acts on the flag — the first time a
 sweep sees a breach, it fires one signed ``sla_breach`` webhook
 event (opt-in via ``SLA_BREACH_WEBHOOK``), ledgered on the record's
 own SLA ledger and deduped by its ``sla_breach_event_at`` marker.
-Operators run the sweep on a timer (``shipment-agent sla-sweep``,
-or ``POST /queue/sla-sweep`` for one tenant) next to the retry
-worker; no request path ever blocks on it.
+The ladder climbs: a breach reported below the escalation
+threshold (``QUEUE_SLA_ESCALATION_FACTOR`` × the budget) that keeps
+aging past it re-fires as a signed ``sla_escalation`` event with
+the wait duration, on its own ledger and marker (see
+:func:`escalation_pending`). Operators run the sweep on a timer
+(``shipment-agent sla-sweep``, or ``POST /queue/sla-sweep`` for one
+tenant) next to the retry worker; no request path ever blocks on
+it.
 """
 
 from __future__ import annotations
@@ -399,7 +404,11 @@ def attempt_sla_breach_dispatch(
 
 
 def record_sla_attempt(
-    record: ApprovalRecord, outcome: DispatchOutcome, *, at: str
+    record: ApprovalRecord,
+    outcome: DispatchOutcome,
+    *,
+    at: str,
+    age_seconds: float | None = None,
 ) -> dict:
     """Ledger one ``sla_breach`` delivery attempt on the record.
 
@@ -408,7 +417,10 @@ def record_sla_attempt(
     describe that delivery alone and are never touched here. The
     first attempt also stamps ``sla_breach_event_at`` — the marker
     the sweep dedupes on, so the event fires once per shipment per
-    analysis however often the sweep runs. Returns the entry.
+    analysis however often the sweep runs — and
+    ``sla_breach_age_seconds``: how long the shipment had waited
+    when the receiver was told, the stamp the escalation ladder
+    compares against its second threshold. Returns the entry.
     """
     entry = {
         "attempt": len(record.sla_dispatch_attempts) + 1,
@@ -421,7 +433,106 @@ def record_sla_attempt(
     record.sla_dispatch_attempts.append(entry)
     if record.sla_breach_event_at is None:
         record.sla_breach_event_at = at
+        record.sla_breach_age_seconds = age_seconds
     return entry
+
+
+def build_sla_escalation_payload(
+    record: ApprovalRecord, queue_item: dict, detected_at: str
+) -> dict:
+    """The ``sla_escalation`` event body: the ladder's second rung.
+
+    Fired when a breach that was already reported (in rung-1
+    territory) keeps aging past the escalation threshold — the
+    receiver is told the full wait, what the wait was when the
+    breach first fired, and both thresholds, so it can page louder
+    without calling back.
+    """
+    return {
+        "event": "sla_escalation",
+        "shipment_id": record.result.shipment_id,
+        "tenant_id": record.tenant_id,
+        "exception_type": queue_item["exception_type"],
+        "severity": queue_item["severity"],
+        "carrier": queue_item["carrier"],
+        "lane": queue_item["lane"],
+        "sla_hours": queue_item["sla_hours"],
+        "escalation_threshold_hours": queue_item["sla_escalation_hours"],
+        "age_seconds": queue_item["age_seconds"],
+        "wait_seconds": queue_item["age_seconds"],
+        "overdue_seconds": queue_item["sla_escalation_overdue_seconds"],
+        "breach_event_at": record.sla_breach_event_at,
+        "breach_age_seconds": record.sla_breach_age_seconds,
+        "created_at": record.created_at,
+        "detected_at": detected_at,
+    }
+
+
+def attempt_sla_escalation_dispatch(
+    record: ApprovalRecord, queue_item: dict, detected_at: str
+) -> DispatchOutcome | None:
+    """Make ONE ``sla_escalation`` delivery attempt.
+
+    Same channel, same signing, same None-when-unconfigured
+    contract as the breach rung (see
+    :func:`attempt_sla_breach_dispatch`)."""
+    url = sla_breach_webhook_url()
+    if not url:
+        return None
+    payload = build_sla_escalation_payload(record, queue_item, detected_at)
+    return _deliver_webhook_payload(payload, url)
+
+
+def record_sla_escalation_attempt(
+    record: ApprovalRecord, outcome: DispatchOutcome, *, at: str
+) -> dict:
+    """Ledger one ``sla_escalation`` delivery attempt on the record.
+
+    The rung keeps its own ledger (``sla_escalation_attempts``) and
+    its own dedupe marker (``sla_escalation_event_at``), exactly as
+    the breach rung does — each rung fires once per shipment per
+    analysis. Returns the entry.
+    """
+    entry = {
+        "attempt": len(record.sla_escalation_attempts) + 1,
+        "at": at,
+        "outcome": outcome.status,
+        "http_status": outcome.http_status,
+        "signature_id": outcome.signature_id,
+        "error": outcome.error,
+    }
+    record.sla_escalation_attempts.append(entry)
+    if record.sla_escalation_event_at is None:
+        record.sla_escalation_event_at = at
+    return entry
+
+
+def escalation_pending(record: ApprovalRecord, queue_item: dict) -> bool:
+    """Whether the ladder's second rung is owed for this record.
+
+    All of: the queue item stands escalated (its wait has blown the
+    escalation threshold); the breach rung already fired (the ladder
+    climbs in order — a record first observed past both thresholds
+    fires its breach event, whose payload carries the full wait,
+    and no second event follows); the breach was reported while the
+    wait was still below the escalation threshold (it has *kept*
+    aging since someone was told — the condition the rung exists
+    for); and the escalation rung has not fired yet. Breaches fired
+    before the ladder existed carry no age stamp and never pend an
+    escalation: their receivers were not promised one.
+    """
+    if not queue_item.get("sla_escalated"):
+        return False
+    if record.sla_escalation_event_at is not None:
+        return False
+    if record.sla_breach_event_at is None:
+        return False
+    if record.sla_breach_age_seconds is None:
+        return False
+    threshold_hours = queue_item.get("sla_escalation_hours")
+    if threshold_hours is None:
+        return False
+    return record.sla_breach_age_seconds < threshold_hours * 3600.0
 
 
 def record_dispatch_attempt(record: ApprovalRecord, outcome: DispatchOutcome) -> dict:
@@ -1266,14 +1377,19 @@ class ShipmentService:
         """The approval queue: awaiting shipments, severity first,
         then oldest, each with the flags an approver scans for, its
         age bucket, and its SLA view under the configured budgets
-        (``QUEUE_SLA_HOURS_<SEVERITY>``, see ``insights``). Scoped to
+        (``QUEUE_SLA_HOURS_<SEVERITY>`` and the escalation ladder's
+        ``QUEUE_SLA_ESCALATION_FACTOR``, see ``insights``). Scoped to
         the resolved tenant's partition — a tenant's approvers work
         their own queue."""
-        from .insights import sla_thresholds_from_env
+        from .insights import (
+            sla_escalation_factor_from_env,
+            sla_thresholds_from_env,
+        )
 
         return _approval_queue(
             self._get_store().records(tenant_id=resolve_tenant_id(tenant_id)),
             sla_hours=sla_thresholds_from_env(),
+            escalation_factor=sla_escalation_factor_from_env(),
         )
 
     def approval_queue_summary(self, tenant_id: str | None = None) -> dict:
@@ -1290,7 +1406,8 @@ class ShipmentService:
         event_sink: EventSink | None = None,
         tenant_id: str | None = None,
     ) -> list[dict]:
-        """Observe the queue; fire one ``sla_breach`` event per new breach.
+        """Observe the queue; fire the SLA ladder's events, one rung
+        per record per sweep.
 
         The sweep is the SLA story's actor, the way the retry worker
         is the delivery ledger's: the queue has always *flagged*
@@ -1304,9 +1421,21 @@ class ShipmentService:
         never re-fire — the event is "first observed", once per
         shipment per analysis.
 
+        **The ladder's second rung.** A breach that keeps aging is
+        a worse problem than a fresh one: when a breach was reported
+        while its wait was still below the escalation threshold
+        (``QUEUE_SLA_ESCALATION_FACTOR`` × the budget, default 2×)
+        and the wait has since blown that threshold, a later sweep
+        fires one signed ``sla_escalation`` event carrying the full
+        wait duration — ledgered on the record's escalation ledger,
+        deduped by ``sla_escalation_event_at``, one rung per record
+        per sweep (see :func:`escalation_pending`). A record first
+        observed already past both thresholds fires only its breach
+        event: that payload already carries the full wait.
+
         The feature is opt-in (``SLA_BREACH_WEBHOOK=on``): with it
         off, or with no webhook URL configured, the sweep still
-        *reports* the breaches it observed (``outcome``:
+        *reports* the rungs it observed (``outcome``:
         ``disabled`` / ``not_configured``) and marks nothing, so
         enabling the channel later fires for breaches still open.
         A failed delivery IS marked: the event fired once and its
@@ -1317,15 +1446,18 @@ class ShipmentService:
         Scope: with ``tenant_id`` the sweep covers that tenant's
         queue (the API passes the caller's tenant); without one it
         covers every tenant's queue — the operator shape the CLI
-        runs. A ``sla_breach`` stream event joins each firing when
-        an ``event_sink`` is given. Returns one entry per newly
-        observed breach: ``{"shipment_id", "tenant_id", "outcome",
-        ...}``.
+        runs. A stream event (``sla_breach`` / ``sla_escalation``)
+        joins each firing when an ``event_sink`` is given. Returns
+        one entry per newly observed rung: ``{"shipment_id",
+        "tenant_id", "rung", "outcome", ...}``.
         """
         from datetime import datetime, timezone
 
         from .insights import approval_queue as _queue_projection
-        from .insights import sla_thresholds_from_env
+        from .insights import (
+            sla_escalation_factor_from_env,
+            sla_thresholds_from_env,
+        )
 
         moment = now or datetime.now(timezone.utc)
         detected_at = moment.isoformat()
@@ -1345,47 +1477,86 @@ class ShipmentService:
         for record in records:
             partitions.setdefault(record.tenant_id, []).append(record)
         thresholds = sla_thresholds_from_env()
+        factor = sla_escalation_factor_from_env()
         enabled = sla_breach_webhook_enabled()
         entries: list[dict] = []
         for partition_tenant, partition_records in partitions.items():
             items = _queue_projection(
-                partition_records, now=moment, sla_hours=thresholds
+                partition_records,
+                now=moment,
+                sla_hours=thresholds,
+                escalation_factor=factor,
             )
             for item in items:
                 if not item["sla_breach"]:
                     continue
                 record = by_key.get((partition_tenant, item["shipment_id"]))
-                if record is None or record.sla_breach_event_at is not None:
-                    continue  # already fired for this analysis — dedupe
+                if record is None:
+                    continue
                 if record.result.approval_status != "awaiting_approval":
                     continue  # decided between projection and firing
+                # The ladder climbs one rung per record per sweep, in
+                # order: the breach event first (its payload carries
+                # the full wait however late it is first observed),
+                # then — for a breach reported in rung-1 territory
+                # that kept aging — the escalation (see
+                # escalation_pending for the exact conditions).
+                if record.sla_breach_event_at is None:
+                    rung = "breach"
+                elif escalation_pending(record, item):
+                    rung = "escalation"
+                else:
+                    continue  # fired, and no second rung is owed
                 base = {
                     "shipment_id": item["shipment_id"],
                     "tenant_id": partition_tenant,
                     "severity": item["severity"],
                     "sla_hours": item["sla_hours"],
-                    "overdue_seconds": item["sla_overdue_seconds"],
+                    "overdue_seconds": (
+                        item["sla_overdue_seconds"]
+                        if rung == "breach"
+                        else item["sla_escalation_overdue_seconds"]
+                    ),
+                    "rung": rung,
                 }
                 if not enabled:
                     entries.append({**base, "outcome": "disabled"})
                     continue
-                outcome = attempt_sla_breach_dispatch(record, item, detected_at)
+                if rung == "breach":
+                    outcome = attempt_sla_breach_dispatch(record, item, detected_at)
+                else:
+                    outcome = attempt_sla_escalation_dispatch(
+                        record, item, detected_at
+                    )
                 if outcome is None:
                     entries.append({**base, "outcome": "not_configured"})
                     continue
-                entry = record_sla_attempt(record, outcome, at=detected_at)
+                if rung == "breach":
+                    entry = record_sla_attempt(
+                        record,
+                        outcome,
+                        at=detected_at,
+                        age_seconds=item["age_seconds"],
+                    )
+                else:
+                    entry = record_sla_escalation_attempt(
+                        record, outcome, at=detected_at
+                    )
                 store.save(record)
                 if event_sink is not None:
                     event_sink.emit(
                         RunEvent(
-                            type="sla_breach",
+                            type=(
+                                "sla_breach" if rung == "breach" else "sla_escalation"
+                            ),
                             shipment_id=item["shipment_id"],
                             detail={
                                 "tenant_id": partition_tenant,
                                 "severity": item["severity"],
                                 "sla_hours": item["sla_hours"],
-                                "overdue_seconds": item["sla_overdue_seconds"],
+                                "overdue_seconds": base["overdue_seconds"],
                                 "outcome": outcome.status,
+                                "rung": rung,
                             },
                         )
                     )

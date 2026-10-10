@@ -364,8 +364,15 @@ def approval_queue(
     ``summary`` (depth, breaches, age/severity mix) and the active
     ``sla_hours`` budgets (``QUEUE_SLA_HOURS_<SEVERITY>``). The
     approver's worklist, computed from the caller's tenant partition
-    of the store (see ``insights.py``)."""
-    from .insights import queue_summary, sla_thresholds_from_env
+    of the store (see ``insights.py``). Each item also carries its
+    ladder stage (``sla_stage``: within_budget / breach / escalated,
+    against ``sla_escalation_factor`` × its budget), and the summary
+    counts escalations beside breaches."""
+    from .insights import (
+        queue_summary,
+        sla_escalation_factor_from_env,
+        sla_thresholds_from_env,
+    )
 
     queue_items = service.approval_queue(tenant_id=x_tenant_id)
     return {
@@ -373,6 +380,7 @@ def approval_queue(
         "queue": queue_items,
         "summary": queue_summary(queue_items),
         "sla_hours": sla_thresholds_from_env(),
+        "sla_escalation_factor": sla_escalation_factor_from_env(),
     }
 
 
@@ -387,14 +395,18 @@ def sla_breach_sweep(
     budget and which has not yet fired, it delivers one signed
     ``sla_breach`` webhook event (opt-in: ``SLA_BREACH_WEBHOOK=on``,
     to ``SLA_BREACH_WEBHOOK_URL`` or the approval webhook URL) and
-    ledgers the attempt on the record. Dedupe is per shipment per
-    analysis — a second sweep fires nothing for the same breach.
-    The response lists what this sweep observed: ``outcome`` is
-    ``sent`` / ``failed`` for fired events, ``disabled`` /
-    ``not_configured`` when the channel is off (observed, marked
-    nothing). Operators running the multi-tenant sweep use the CLI
-    (``shipment-agent sla-sweep``); this endpoint is the
-    single-tenant shape of the same sweep."""
+    ledgers the attempt on the record. The ladder climbs in order:
+    a breach reported in rung-1 territory that keeps aging past
+    ``QUEUE_SLA_ESCALATION_FACTOR`` × its budget re-fires on a later
+    sweep as a signed ``sla_escalation`` event with the wait
+    duration (each entry names its ``rung``). Dedupe is per rung
+    per shipment per analysis — a second sweep fires nothing for a
+    rung already fired. The response lists what this sweep
+    observed: ``outcome`` is ``sent`` / ``failed`` for fired
+    events, ``disabled`` / ``not_configured`` when the channel is
+    off (observed, marked nothing). Operators running the
+    multi-tenant sweep use the CLI (``shipment-agent sla-sweep``);
+    this endpoint is the single-tenant shape of the same sweep."""
     entries = service.sla_breach_sweep(tenant_id=x_tenant_id)
     return {"count": len(entries), "events": entries}
 

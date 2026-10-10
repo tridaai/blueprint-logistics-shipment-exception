@@ -16,6 +16,9 @@ by the model):
   has an age budget (configurable, see :func:`sla_thresholds_from_env`)
   and an item past its budget is flagged ``sla_breach`` with the
   overrun — the queue reports its own health, not just its contents.
+  Past a second threshold (the escalation ladder: a configurable
+  multiple of the budget) the item's stage reads ``escalated`` —
+  the state the sweep's ``sla_escalation`` event acts on.
 - **Carrier scorecards** — per-carrier aggregates over the whole
   stored history: shipment count, exception mix and rate, damage
   rate, and the human decision record (approvals / rejections /
@@ -82,6 +85,24 @@ def sla_thresholds_from_env() -> dict[str, float]:
     }
 
 
+# The escalation ladder's second rung: a breach that keeps aging is
+# a worse problem than a fresh one, so at this multiple of the
+# budget the wait escalates (see the queue item's sla_stage and the
+# sweep's sla_escalation event in service.py).
+DEFAULT_ESCALATION_FACTOR = 2.0
+
+
+def sla_escalation_factor_from_env() -> float:
+    """The escalation multiple of a severity's budget,
+    ``QUEUE_SLA_ESCALATION_FACTOR`` over :data:`DEFAULT_ESCALATION_FACTOR`.
+
+    Clamped to at least 1.0: an escalation can land at the budget,
+    never before the breach it escalates."""
+    return max(
+        1.0, env_float("QUEUE_SLA_ESCALATION_FACTOR", DEFAULT_ESCALATION_FACTOR)
+    )
+
+
 def _parse_iso(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -91,7 +112,12 @@ def _parse_iso(value: str | None) -> datetime | None:
         return None
 
 
-def _queue_item(record: ApprovalRecord, now: datetime, sla_hours: dict) -> dict:
+def _queue_item(
+    record: ApprovalRecord,
+    now: datetime,
+    sla_hours: dict,
+    escalation_factor: float = DEFAULT_ESCALATION_FACTOR,
+) -> dict:
     result = record.result
     entry = history_entry(record) or {}
     cross_check = result.cross_check
@@ -124,6 +150,25 @@ def _queue_item(record: ApprovalRecord, now: datetime, sla_hours: dict) -> dict:
         if age_seconds is not None and budget_seconds is not None
         else 0.0
     )
+    # The ladder's second rung: past escalation_factor × the budget
+    # the breach is no longer fresh — it has been waiting, unacted
+    # on, for a whole second budget. The stage names where the item
+    # stands so the queue, the summary, and the sweep all read the
+    # same ladder.
+    escalation_budget_hours = (
+        budget_hours * escalation_factor if budget_hours is not None else None
+    )
+    escalation_budget_seconds = (
+        escalation_budget_hours * 3600.0
+        if escalation_budget_hours is not None
+        else None
+    )
+    escalation_overdue = (
+        max(0.0, age_seconds - escalation_budget_seconds)
+        if age_seconds is not None and escalation_budget_seconds is not None
+        else 0.0
+    )
+    escalated = escalation_overdue > 0
     return {
         "shipment_id": result.shipment_id,
         "exception_type": result.classification.exception_type.value,
@@ -142,6 +187,20 @@ def _queue_item(record: ApprovalRecord, now: datetime, sla_hours: dict) -> dict:
         "sla_hours": budget_hours,
         "sla_breach": overdue > 0,
         "sla_overdue_seconds": round(overdue, 1),
+        # The escalation ladder: the second threshold (factor × the
+        # budget), whether the wait has blown that too, and the
+        # stage the item stands on — within_budget | breach |
+        # escalated.
+        "sla_escalation_hours": (
+            round(escalation_budget_hours, 3)
+            if escalation_budget_hours is not None
+            else None
+        ),
+        "sla_escalated": escalated,
+        "sla_escalation_overdue_seconds": round(escalation_overdue, 1),
+        "sla_stage": (
+            "escalated" if escalated else "breach" if overdue > 0 else "within_budget"
+        ),
         "delay_hours": result.delay_hours,
         "flags": flags,
     }
@@ -151,6 +210,7 @@ def approval_queue(
     records: list[ApprovalRecord],
     now: datetime | None = None,
     sla_hours: dict | None = None,
+    escalation_factor: float | None = None,
 ) -> list[dict]:
     """Shipments awaiting a decision, severity first, then oldest.
 
@@ -161,15 +221,23 @@ def approval_queue(
     ``sla_hours`` (severity → age budget in hours) defaults to
     :data:`DEFAULT_SLA_HOURS`; the service passes the env-configured
     thresholds (:func:`sla_thresholds_from_env`).
+    ``escalation_factor`` (the ladder's second-rung multiple of the
+    budget) defaults to :data:`DEFAULT_ESCALATION_FACTOR`; the
+    service passes :func:`sla_escalation_factor_from_env`.
     """
     thresholds = sla_hours if sla_hours is not None else DEFAULT_SLA_HOURS
+    factor = (
+        escalation_factor
+        if escalation_factor is not None
+        else DEFAULT_ESCALATION_FACTOR
+    )
     moment = now or datetime.now(timezone.utc)
     awaiting = [
         record
         for record in records
         if record.result.approval_status == "awaiting_approval"
     ]
-    items = [_queue_item(record, moment, thresholds) for record in awaiting]
+    items = [_queue_item(record, moment, thresholds, factor) for record in awaiting]
     items.sort(
         key=lambda item: (
             _SEVERITY_RANK.get(item["severity"], len(_SEVERITY_RANK)),
@@ -187,18 +255,22 @@ def queue_summary(items: list[dict]) -> dict:
     by_bucket = {bucket: 0 for bucket in AGE_BUCKETS}
     by_severity: Counter = Counter()
     breaches = 0
+    escalations = 0
     oldest: float | None = None
     for item in items:
         by_bucket[item["age_bucket"]] = by_bucket.get(item["age_bucket"], 0) + 1
         by_severity[item["severity"]] += 1
         if item["sla_breach"]:
             breaches += 1
+        if item.get("sla_escalated"):
+            escalations += 1
         age = item["age_seconds"]
         if age is not None and (oldest is None or age > oldest):
             oldest = age
     return {
         "total": len(items),
         "sla_breaches": breaches,
+        "sla_escalations": escalations,
         "by_bucket": by_bucket,
         "by_severity": dict(sorted(by_severity.items())),
         "oldest_age_seconds": oldest,
