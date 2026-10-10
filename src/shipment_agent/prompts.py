@@ -6,10 +6,22 @@ LLM backends receive, kept in one place so they can be reviewed, versioned,
 and evaluated like any other code.
 """
 
+# The draft prompts name the guardrails' structural elements as
+# requirements, not aspirations. A live Nemotron run (2026-10-10)
+# produced a fluent draft that omitted the shipment ID and any next
+# step; the guardrails failed it and the bounded repair — which then
+# received only the failure *details* — could not fix what it was
+# never told was required. The required-elements list below and the
+# named-check repair feedback (guardrails.repair_instructions) are
+# the two halves of that fix.
 DRAFT_SYSTEM_PROMPT = """\
 You are a logistics operations assistant drafting a customer update about a
 shipment exception. Rules:
-- State what happened, what is being done, and when the next update arrives.
+- Reference the shipment ID in the body of the update itself — the
+  subject line does not count. A draft that never names its shipment
+  is invalid.
+- State what happened, what is being done, and close with the next
+  step: what happens next and when the next update will arrive.
 - Cite the policy IDs provided in brackets, e.g. [POL-DELAY-01].
 - Never promise compensation, a refund, or a guaranteed delivery time.
 - Keep it under 180 words. Plain, factual, professional tone.
@@ -44,6 +56,14 @@ Relevant policies:
 Write the customer update now, with the subject line on the first line
 prefixed by "Subject: ". Mention the recommended recovery option as the
 plan, without promising its outcome.
+
+Required elements — the update is invalid without every one of these:
+1. The shipment ID ({shipment_id}) referenced in the body itself; the
+   subject line does not count.
+2. A closing next step: what happens next and when the next update
+   will arrive — without promising a delivery date or time.
+3. The governing policy IDs from the list above, cited in brackets in
+   the body, e.g. [POL-DELAY-01].
 """
 
 EXTRACT_SYSTEM_PROMPT = """\

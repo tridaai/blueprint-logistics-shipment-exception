@@ -40,7 +40,7 @@ from .extractor import (
     extract_documents,
     extraction_discrepancies,
 )
-from .guardrails import validate_draft
+from .guardrails import repair_instructions, validate_draft
 from .model_backends import DraftContext, ModelBackend, MockModelBackend, estimate_cost_usd
 from .tracing import node_span, run_span
 from .options import build_recovery_options
@@ -1037,6 +1037,19 @@ def build_graph(
         feedback_lines = ["Guardrail failures to fix:"] + [
             f"- {error}" for error in validation.errors
         ]
+        # Name the failed checks themselves — blocking and advisory
+        # alike — each with the element the redraft must contain.
+        # Failure details alone left a live model's repair guessing
+        # at the requirement (it re-failed on the shipment ID it was
+        # never told to include); the named checks close that gap.
+        instructions = repair_instructions(
+            validation.checks,
+            shipment_id=state["shipment"]["shipment_id"],
+            citations=draft.citations,
+        )
+        if instructions:
+            feedback_lines.append("Failed checks — the redraft must fix each one:")
+            feedback_lines += [f"- {line}" for line in instructions]
         if verification is not None and verification.issues:
             feedback_lines.append("Self-verification issues to address:")
             feedback_lines += [f"- {issue}" for issue in verification.issues]

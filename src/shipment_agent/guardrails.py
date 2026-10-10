@@ -184,6 +184,70 @@ def guardrail_checks(
     return checks
 
 
+# What a redraft must do about each failed check, phrased as the
+# missing element — the repair loop feeds these lines to the drafter
+# (see graph.validate). A failure *detail* ("Draft does not
+# reference the shipment ID") tells the model what is wrong; these
+# lines tell it what the corrected draft must contain. The live
+# Nemotron run of 2026-10-10 failed on exactly the first and last
+# of these: fluent prose, no shipment ID, no next step — and a
+# repair prompt carrying only details could not fix either.
+_REPAIR_FIXES = {
+    "references_shipment_id": (
+        "the body must reference the shipment ID {shipment_id} itself "
+        "— the subject line does not count"
+    ),
+    "no_prohibited_promises": (
+        "remove every promised outcome — never promise compensation, "
+        "a refund, or a guaranteed delivery/notification time"
+    ),
+    "no_pii_in_draft": (
+        "remove the personal identifier(s) the check names — do not "
+        "quote source text that carries them"
+    ),
+    "policy_citations_present": (
+        "cite the governing policies in brackets in the body "
+        "(available to cite: {citations})"
+    ),
+    "states_next_step": (
+        "the body must close with the next step — what happens next "
+        "and when the next update will arrive — without promising a "
+        "delivery date or time"
+    ),
+}
+
+
+def repair_instructions(
+    checks: list[GuardrailCheck],
+    *,
+    shipment_id: str,
+    citations: list[str],
+) -> list[str]:
+    """One repair line per FAILED check (blocking and advisory
+    alike): the check's name, its failure detail, and the element
+    the redraft must contain to pass it.
+
+    Advisory failures ride along deliberately: ``states_next_step``
+    never blocks approval on its own, but a draft missing its next
+    step is exactly the draft the repair loop exists to fix, and a
+    redraft triggered by a blocking failure should repair the
+    advisory ones in the same pass rather than return a draft that
+    still limps."""
+    available = ", ".join(f"[{c}]" for c in citations) or "none retrieved"
+    lines: list[str] = []
+    for check in checks:
+        if check.passed:
+            continue
+        fix = _REPAIR_FIXES.get(check.name, "").format(
+            shipment_id=shipment_id, citations=available
+        )
+        line = f"check `{check.name}` failed — {check.detail}"
+        if fix:
+            line += f" Fix: {fix}."
+        lines.append(line)
+    return lines
+
+
 def validate_draft(
     body: str,
     shipment_id: str,

@@ -345,7 +345,9 @@ class _BaseLLMBackend:
                 "\n\nCORRECTION REQUIRED — a previous draft of this update "
                 "failed validation. Rewrite it, fixing every problem "
                 "below, and introduce no claim the facts above do not "
-                f"support:\n{feedback}"
+                "support. The rewrite is re-validated against the same "
+                "named checks: a draft that still misses a required "
+                f"element fails again.\n{feedback}"
             )
         return prompt
 
