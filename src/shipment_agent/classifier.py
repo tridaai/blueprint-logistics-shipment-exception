@@ -136,6 +136,67 @@ def _active_hits(text: str, phrases: tuple[str, ...]) -> list[str]:
     return hits
 
 
+# ---------------------------------------------------------------------------
+# The signal vocabulary, as a public seam
+# ---------------------------------------------------------------------------
+#
+# The classifier's word/phrase lists above are the deployment's
+# definition of "exception vocabulary". Other components need the
+# same definition — the keyword retriever (retriever.py) scores a
+# query's *denied* signals differently from its affirmed ones, and
+# it must not grow a second, drifting copy of the vocabulary to do
+# it. These helpers expose the classifier's own negation/recovery
+# semantics over arbitrary text; the classifier itself is unchanged.
+
+#: Every exception signal phrase/word the classifier recognises,
+#: across the four exception families.
+SIGNAL_PHRASES: tuple[str, ...] = (
+    _DAMAGE_WORDS + _APPOINTMENT_PHRASES + _MISMATCH_PHRASES + _DELAY_WORDS
+)
+
+#: The delay family alone — the recovery rule applies to it only.
+DELAY_SIGNAL_PHRASES: tuple[str, ...] = _DELAY_WORDS
+
+
+def signal_phrase_states(
+    text: str, *, recovered_cancels_delay: bool = True
+) -> tuple[set[str], set[str]]:
+    """Split the signal phrases present in ``text`` by polarity.
+
+    Returns ``(active, inactive)``: a phrase is *active* when at
+    least one occurrence is not negated (the classifier's own rule
+    — a cue in the same clause, shortly before the occurrence, or
+    a "field: none" construction), and *inactive* when it occurs
+    but every occurrence is negated: the text mentions the signal
+    in order to deny it ("no damage reported", "damage: none").
+
+    With ``recovered_cancels_delay`` (the default), a recovery
+    phrase anywhere in the text ("back on schedule", "delay
+    cleared") also inactivates every delay phrase — the same
+    cancellation :func:`classify_shipment` applies to its keyword
+    delay signal. Callers describing a *document's* stance (what a
+    policy affirms) pass False: a document about recovery still
+    affirms the delay vocabulary it discusses.
+    """
+    lowered = text.lower()
+    recovered = recovered_cancels_delay and any(
+        phrase in lowered for phrase in _RECOVERY_PHRASES
+    )
+    active: set[str] = set()
+    inactive: set[str] = set()
+    for phrase in SIGNAL_PHRASES:
+        occurrences = [
+            match.start() for match in _phrase_pattern(phrase).finditer(lowered)
+        ]
+        if not occurrences:
+            continue
+        live = any(not _is_negated(lowered, start) for start in occurrences)
+        if live and recovered and phrase in DELAY_SIGNAL_PHRASES:
+            live = False
+        (active if live else inactive).add(phrase)
+    return active, inactive
+
+
 def _severity_for_delay(delay_hours: float | None) -> Severity:
     if delay_hours is None:
         return Severity.MEDIUM

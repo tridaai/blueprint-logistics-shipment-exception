@@ -5,11 +5,11 @@
   "summary": {
     "keyword": {
       "cases": 42,
-      "mean_recall_at_3": 0.9167
+      "mean_recall_at_3": 0.9881
     },
     "hybrid (stand-in embeddings)": {
       "cases": 42,
-      "mean_recall_at_3": 0.9286
+      "mean_recall_at_3": 0.9762
     }
   },
   "cases": [
@@ -579,25 +579,29 @@
       "results": {
         "keyword": {
           "retrieved": [
-            "POL-DMG-01",
-            "POL-CLAIM-01",
-            "POL-DELAY-01"
+            "POL-NONE-01",
+            "POL-DELAY-01",
+            "POL-COMM-01"
           ],
-          "hits": [],
-          "expected_recall_at_3": 0.0,
+          "hits": [
+            "POL-NONE-01"
+          ],
+          "expected_recall_at_3": 1.0,
           "forbidden_hits": [],
-          "recall_at_3": 0.0
+          "recall_at_3": 1.0
         },
         "hybrid (stand-in embeddings)": {
           "retrieved": [
             "POL-DMG-01",
-            "POL-CLAIM-01",
-            "POL-COMM-01"
+            "POL-NONE-01",
+            "POL-DELAY-01"
           ],
-          "hits": [],
-          "expected_recall_at_3": 0.0,
+          "hits": [
+            "POL-NONE-01"
+          ],
+          "expected_recall_at_3": 1.0,
           "forbidden_hits": [],
-          "recall_at_3": 0.0
+          "recall_at_3": 1.0
         }
       }
     },
@@ -711,25 +715,29 @@
       "results": {
         "keyword": {
           "retrieved": [
-            "POL-COMM-01",
-            "POL-DELAY-01",
-            "POL-CLAIM-01"
+            "POL-NONE-01",
+            "POL-CLAIM-01",
+            "POL-DMG-01"
           ],
-          "hits": [],
-          "expected_recall_at_3": 0.0,
+          "hits": [
+            "POL-NONE-01"
+          ],
+          "expected_recall_at_3": 1.0,
           "forbidden_hits": [],
-          "recall_at_3": 0.0
+          "recall_at_3": 1.0
         },
         "hybrid (stand-in embeddings)": {
           "retrieved": [
-            "POL-COMM-01",
             "POL-CLAIM-01",
-            "POL-DELAY-01"
+            "POL-COMM-01",
+            "POL-NONE-01"
           ],
-          "hits": [],
-          "expected_recall_at_3": 0.0,
+          "hits": [
+            "POL-NONE-01"
+          ],
+          "expected_recall_at_3": 1.0,
           "forbidden_hits": [],
-          "recall_at_3": 0.0
+          "recall_at_3": 1.0
         }
       }
     },
@@ -1160,14 +1168,16 @@
       "results": {
         "keyword": {
           "retrieved": [
-            "POL-CLAIM-01",
             "POL-COMM-01",
-            "POL-DMG-01"
+            "POL-NONE-01",
+            "POL-CLAIM-01"
           ],
-          "hits": [],
-          "expected_recall_at_3": 0.0,
+          "hits": [
+            "POL-NONE-01"
+          ],
+          "expected_recall_at_3": 1.0,
           "forbidden_hits": [],
-          "recall_at_3": 0.0
+          "recall_at_3": 1.0
         },
         "hybrid (stand-in embeddings)": {
           "retrieved": [
@@ -1473,5 +1483,5 @@
   "keyword_threshold": 0.85,
   "passed": true,
   "framing": "Labelled relevance set used as a regression gate for retrieval ranking. Offline hybrid numbers use stand-in embeddings and measure the merge, not embedding quality.",
-  "generated_at": "2026-10-10T15:24:25+00:00"
+  "generated_at": "2026-10-10T15:44:53+00:00"
 }

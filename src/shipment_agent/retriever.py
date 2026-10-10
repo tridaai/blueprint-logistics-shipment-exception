@@ -103,6 +103,71 @@ def _tokens(text: str) -> list[str]:
     return [t for t in re.findall(r"[a-z0-9]+", text.lower()) if t not in _STOPWORDS]
 
 
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def _cue_view(query: str) -> str:
+    """The query with a leading exception-type label blanked out.
+
+    The graph composes its retrieval query as ``<exception type>
+    <shipment content> <standing trailer>`` — the first token is
+    the classifier's verdict, not shipment content. As content it
+    may stay (it is one more matching token), but it must never act
+    as a *negation cue*: the label ``none`` is itself a cue word,
+    and left in place it would negate the shipment's own first
+    clause ("none Delivered on time…" reading "on time" as denied).
+    Blanking (same length, so offsets hold) removes the label from
+    cue duty only.
+    """
+    from .schemas import ExceptionType
+
+    match = _TOKEN_RE.match(query.lower())
+    if match and match.group(0) in {t.value for t in ExceptionType}:
+        return " " * match.end() + query[match.end():]
+    return query
+
+
+def _affirmed_tokens(text: str, cue_view: str) -> set[str]:
+    """The tokens a text *affirms*: occurrences no negation cue
+    governs (the classifier's rule, read over ``cue_view``)."""
+    from .classifier import _is_negated
+
+    affirmed: set[str] = set()
+    for match in _TOKEN_RE.finditer(text.lower()):
+        token = match.group(0)
+        if token in _STOPWORDS:
+            continue
+        if not _is_negated(cue_view.lower(), match.start()):
+            affirmed.add(token)
+    return affirmed
+
+
+def _query_analysis(query: str) -> tuple[set[str], set[str]]:
+    """What a retrieval query affirms, and which signals it denies.
+
+    Returns ``(base_tokens, denied_signals)``:
+
+    - ``base_tokens`` — the query's affirmed tokens (see
+      :func:`_affirmed_tokens`), minus the tokens of any denied
+      signal phrase: a denied signal is not evidence *for* the
+      documents about that signal.
+    - ``denied_signals`` — the classifier's signal phrases the
+      query mentions only to deny or report recovered (see
+      ``classifier.signal_phrase_states``): "no damage reported",
+      "delay cleared — back on schedule". Denial is itself
+      evidence — of absence — and :meth:`KeywordRetriever.retrieve`
+      scores it as such.
+    """
+    from .classifier import signal_phrase_states
+
+    cue_view = _cue_view(query)
+    _, denied = signal_phrase_states(cue_view)
+    base = _affirmed_tokens(query, cue_view)
+    for phrase in denied:
+        base -= set(_tokens(phrase))
+    return base, denied
+
+
 # The Retriever protocol is declared in ports.py (the seam registry);
 # it is re-exported here so existing imports keep working.
 from .ports import Retriever  # noqa: E402,F401
@@ -112,7 +177,27 @@ class KeywordRetriever:
     """Transparent keyword-overlap retriever over the policy corpus.
 
     Deliberately simple and deterministic so evals and tests are stable
-    offline. Score = shared tokens normalised by policy length.
+    offline. Score = shared tokens normalised by policy length —
+    with one refinement the labelled relevance set (RQ-17/21/34)
+    forced: **negation awareness**, using the classifier's own
+    negation and recovery rules (``classifier.signal_phrase_states``),
+    never a second vocabulary:
+
+    - A query token inside a negation span ("no damage reported")
+      does not count as overlap for the documents that affirm it —
+      the query is denying that signal, not reporting it.
+    - A document that *affirms* a signal the query denies loses a
+      point per denied signal (a conflict): the damage policy is
+      the wrong citation for a shipment whose text says there is
+      no damage.
+    - A denied signal is positive evidence for the documents that
+      affirm *no* exception signal at all — in this corpus the
+      routine-update policy: denial is evidence of absence, and
+      absence is what those documents govern. Each denied signal
+      adds a point there (the absence credit).
+
+    A query that denies nothing scores exactly as the plain overlap
+    always did.
 
     With no ``policies`` argument the corpus is the deployment's
     tagged corpus (shared + every tenant's documents), scoped to
@@ -146,8 +231,22 @@ class KeywordRetriever:
             self._explicit = False
             self._corpus = full_corpus()
             self._policies = corpus_for_tenant(self._corpus, tenant_id)
+        from .classifier import signal_phrase_states
+
+        # The index carries, beside the token set, each document's
+        # affirmed signal phrases — what the document is *about*, in
+        # the classifier's vocabulary. A document's stance is read
+        # without the recovery cancellation: a policy discussing how
+        # a recovered delay is handled still affirms delay.
         self._index = [
-            (p, set(_tokens(f"{p['title']} {p['text']}"))) for p in self._policies
+            (
+                p,
+                set(_tokens(f"{p['title']} {p['text']}")),
+                signal_phrase_states(
+                    f"{p['title']} {p['text']}", recovered_cancels_delay=False
+                )[0],
+            )
+            for p in self._policies
         ]
 
     @property
@@ -180,15 +279,23 @@ class KeywordRetriever:
         )
 
     def retrieve(self, query: str, top_k: int = 3) -> list[RetrievedPolicy]:
-        query_tokens = set(_tokens(query))
-        if not query_tokens:
+        query_tokens, denied_signals = _query_analysis(query)
+        if not query_tokens and not denied_signals:
             return []
         scored: list[RetrievedPolicy] = []
-        for policy, tokens in self._index:
+        for policy, tokens, signals in self._index:
             overlap = len(query_tokens & tokens)
-            if overlap == 0:
+            conflicts = len(denied_signals & signals)
+            # The absence credit: a document affirming no exception
+            # signal at all is what governs a shipment whose signals
+            # are all denied — each denial is a point of evidence
+            # for it, exactly as an affirmed signal is for its own
+            # document. Documents affirming any signal earn none.
+            absence = len(denied_signals) if denied_signals and not signals else 0
+            net = overlap - conflicts + absence
+            if net <= 0:
                 continue
-            score = round(overlap / math.sqrt(len(tokens)), 4)
+            score = round(net / math.sqrt(len(tokens)), 4)
             scored.append(
                 RetrievedPolicy(
                     policy_id=policy["policy_id"],
