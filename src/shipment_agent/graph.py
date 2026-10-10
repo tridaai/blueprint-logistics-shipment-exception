@@ -62,6 +62,7 @@ from .schemas import (
 )
 from .events import RunEvent
 from .ports import Checkpointer, EventSink
+from .resilience import ResilientBackend
 from .tools import compare_documents, compute_delay_hours, document_pair_warning
 from .tools_agent import DiagnosisToolBox
 from .verify import verify_draft
@@ -226,12 +227,15 @@ def _build_trace(
     shipment: ShipmentInput,
     final: dict,
     durations: dict[str, float] | None = None,
+    retry_notes: list[dict] | None = None,
 ) -> list[TraceStep]:
     """Assemble the inspectable per-step trace from the final graph state.
 
     ``durations`` maps node name → wall-clock milliseconds, measured by
     the node wrappers in :func:`build_graph` (the same measurement the
     run-event stream reports); each step carries its node's duration.
+    ``retry_notes`` are the resilience wrapper's retry records — each
+    lands on its node's step ("attempt 2 after provider error").
     """
     classification = final["classification"]
     rule_classification = final.get("rule_classification") or classification
@@ -538,6 +542,14 @@ def _build_trace(
         for step in steps:
             if step.name in durations:
                 step.duration_ms = durations[step.name]
+    if retry_notes:
+        for note in retry_notes:
+            for step in steps:
+                if step.name == note["node"]:
+                    step.details.append(
+                        f"retry: attempt {note['attempt']} after provider "
+                        f"error ({note['error']})"
+                    )
     budget = final.get("token_budget")
     if budget:
         degraded = budget.get("degraded_nodes", [])
@@ -644,6 +656,14 @@ def build_graph(
     budget_guard = _BudgetGuard(backend, budget_limit) if budget_limit else None
     if budget_guard is not None:
         backend = budget_guard
+    # Resilience policy (resilience.py): per-call timeout for every
+    # provider call, one retry for the idempotent language steps.
+    # Wrapped OUTSIDE the budget guard, so each retry attempt
+    # re-checks the budget before spending.
+    resilient = ResilientBackend(backend)
+    backend = resilient
+    if run_context is not None:
+        run_context["retry_log"] = resilient.retry_log
 
     def extract(state: AgentState) -> AgentState:
         shipment = ShipmentInput.model_validate(state["shipment"])
@@ -1382,7 +1402,12 @@ def run_shipment(
         needs_information=bool(final.get("needs_information")),
         information_request=final.get("information_request"),
         telemetry=telemetry,
-        trace=_build_trace(shipment_model, final, durations=run_context.get("durations")),
+        trace=_build_trace(
+            shipment_model,
+            final,
+            durations=run_context.get("durations"),
+            retry_notes=run_context.get("retry_log"),
+        ),
         approval_status=final.get("approval_status", "awaiting_approval"),
         external_action_taken=False,
     )
