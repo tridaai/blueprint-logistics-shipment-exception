@@ -320,6 +320,10 @@ function render(result) {
     facts.push(`Document mismatch — <strong>${m.field}</strong>: BOL=${m.bol_value} vs invoice=${m.invoice_value}`));
   if (result.document_check_warning)
     facts.push(`⚠️ ${result.document_check_warning}`);
+  if (result.injection_flags && result.injection_flags.length) {
+    facts.push(`🛡️ <strong>Injection screen: ${result.injection_flags.length} flag(s)</strong> on untrusted input — instruction-like content was flagged at ingest and kept out of the draft: `
+      + result.injection_flags.map(f => `${f.field} · ${f.pattern}`).join('; '));
+  }
   if (result.verification) {
     const v = result.verification;
     facts.push(`Self-verification: <strong>${v.grounded ? 'grounded' : 'NOT GROUNDED'}</strong> (${v.source === 'llm' ? 'LLM critique' : 'deterministic checklist'})`

@@ -34,6 +34,7 @@ from .model_backends import DraftContext, ModelBackend, MockModelBackend, estima
 from .options import build_recovery_options
 from .retriever import KeywordRetriever, Retriever
 from .reviewer import review_draft
+from .screening import sanitized_event_notes, screen_shipment
 from .config import env_int, env_str, load_dotenv
 from .schemas import (
     AgentResult,
@@ -198,6 +199,18 @@ def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
     pair_warning = final.get("document_check_warning")
     if pair_warning:
         ingest_details.append(f"warning: {pair_warning}")
+    injection_flags = final.get("injection_flags", [])
+    if injection_flags:
+        for flag in injection_flags:
+            ingest_details.append(
+                f"injection screen: FLAG in {flag['field']} — pattern "
+                f"'{flag['pattern']}': \"{flag['excerpt']}\" (flagged sentences "
+                "are kept out of drafts and prompts)"
+            )
+    else:
+        ingest_details.append(
+            "injection screen: no instruction-like content found in the untrusted fields"
+        )
     for m in mismatches:
         ingest_details.append(
             f"mismatch — {m['field']}: BOL={m.get('bol_value')} vs invoice={m.get('invoice_value')}"
@@ -406,6 +419,7 @@ def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
 class AgentState(TypedDict, total=False):
     shipment: dict
     extractions: list[dict]
+    injection_flags: list[dict]
     delay_hours: float | None
     document_mismatches: list[dict]
     document_check_warning: str | None
@@ -461,6 +475,13 @@ def build_graph(
                 m.model_dump() for m in compare_documents(shipment.documents)
             ],
             "document_check_warning": document_pair_warning(shipment.documents),
+            # Prompt-injection screen over the untrusted fields. The
+            # flags are evidence for the approver; the flagged sentences
+            # are kept out of drafts and prompts by the sanitisation at
+            # the construction sites (screening.py).
+            "injection_flags": [
+                flag.model_dump() for flag in screen_shipment(shipment)
+            ],
         }
 
     def classify(state: AgentState) -> AgentState:
@@ -508,14 +529,15 @@ def build_graph(
         classify_fn = getattr(backend, "classify_with_llm", None)
         if classify_fn is None:
             return _NO_LLM_BACKEND, None
+        event_text, notes_text = sanitized_event_notes(shipment)
         context = DraftContext(
             shipment_id=shipment.shipment_id,
             origin=shipment.origin,
             destination=shipment.destination,
             carrier=shipment.carrier,
             status=shipment.status,
-            latest_event=shipment.latest_event,
-            condition_notes=shipment.condition_notes,
+            latest_event=event_text,
+            condition_notes=notes_text,
             delay_hours=state.get("delay_hours"),
             mismatches=state.get("document_mismatches", []),
         )
@@ -632,6 +654,7 @@ def build_graph(
         recommended = next(
             (o for o in state.get("recovery_options", []) if o["recommended"]), None
         )
+        event_text, notes_text = sanitized_event_notes(shipment)
         context = DraftContext(
             shipment_id=shipment.shipment_id,
             customer_name=shipment.customer_name,
@@ -642,8 +665,8 @@ def build_graph(
             severity=classification["severity"],
             rationale=classification["rationale"],
             signals=classification["signals"],
-            latest_event=shipment.latest_event,
-            condition_notes=shipment.condition_notes,
+            latest_event=event_text,
+            condition_notes=notes_text,
             delay_hours=state.get("delay_hours"),
             mismatches=state.get("document_mismatches", []),
             citations=citations,
@@ -856,6 +879,13 @@ def build_graph(
             **draft.claim_packet,
             "autonomy_recommendation": autonomy.model_dump(),
         }
+        if state.get("injection_flags"):
+            # The approver sees that the input tried something — the
+            # flags ride in the packet next to the draft they protect.
+            draft.claim_packet = {
+                **draft.claim_packet,
+                "injection_flags": state["injection_flags"],
+            }
         if info_request is not None:
             draft.claim_packet = {
                 **draft.claim_packet,
@@ -940,6 +970,7 @@ def run_shipment(
         llm_suggestion=final.get("classification_suggestion"),
         cross_check=final.get("cross_check"),
         extractions=final.get("extractions", []),
+        injection_flags=final.get("injection_flags", []),
         diagnosis=final.get("diagnosis"),
         recovery_options=final.get("recovery_options", []),
         recommended_option_id=final.get("recommended_option_id"),

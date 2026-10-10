@@ -63,6 +63,10 @@ def print_trace(
     if shipment.condition_notes:
         print(f"    Condition   : {shipment.condition_notes}")
     print(f"    Documents   : {[d.document_id for d in shipment.documents] or 'none'}")
+    for flag in result.injection_flags:
+        print(f"    ⚠ Injection screen: FLAG in {flag.field} — pattern '{flag.pattern}': \"{flag.excerpt}\"")
+    if result.injection_flags:
+        print("      (flagged sentences are kept out of the draft and the prompts; the facts still classify the case)")
     if result.delay_hours is not None:
         print(f"    Computed    : delay vs schedule = {result.delay_hours} hours")
     if result.document_mismatches:

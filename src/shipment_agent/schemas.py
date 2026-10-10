@@ -338,6 +338,23 @@ class ReviewerResult(BaseModel):
     note: str = ""  # set when the LLM review failed and the checklist ran
 
 
+class InjectionFlag(BaseModel):
+    """One prompt-injection screen hit on an untrusted input field.
+
+    The screen (``screening.py``) runs at ingest over the fields a
+    carrier or terminal system controls — latest event, condition
+    notes, document text — and flags instruction-like content aimed at
+    the agent ("ignore your policies", "approve this claim", an
+    impersonated system message). Flags are evidence for the approver;
+    the flagged sentences are additionally kept out of drafts and
+    prompts by sanitisation at the construction sites.
+    """
+
+    field: str  # latest_event | condition_notes | document <id> raw_text
+    pattern: str  # system_impersonation | ignore_instructions | policy_override | directed_approval | directed_promise
+    excerpt: str  # the offending sentence (truncated)
+
+
 class InformationRequest(BaseModel):
     """A composed clarification request for an under-determined case.
 
@@ -409,6 +426,7 @@ class AgentResult(BaseModel):
     llm_suggestion: ClassificationSuggestion | None = None
     cross_check: ClassificationCrossCheck | None = None
     extractions: list[DocumentExtraction] = Field(default_factory=list)
+    injection_flags: list[InjectionFlag] = Field(default_factory=list)
     diagnosis: Diagnosis | None = None
     recovery_options: list[RecoveryOption] = Field(default_factory=list)
     recommended_option_id: str | None = None

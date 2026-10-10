@@ -17,6 +17,7 @@ from __future__ import annotations
 from .extractor import extraction_discrepancies
 from .model_backends import DraftContext
 from .schemas import Diagnosis, DocumentExtraction, ShipmentInput
+from .screening import sanitized_event_notes
 from .store import format_type_counts
 from .tools_agent import TOOL_SPECS, DiagnosisToolBox, diagnosis_max_tool_calls
 
@@ -135,6 +136,14 @@ def build_diagnosis(
     exactly as before. Either path degrades to the template, with the
     reason recorded in ``note``.
     """
+    # The diagnosis quotes the carrier's text (template path) and feeds
+    # it to the model (provider path): both see the screened version —
+    # sentences the injection screen flagged never reach either.
+    event_text, notes_text = sanitized_event_notes(shipment)
+    if (event_text, notes_text) != (shipment.latest_event, shipment.condition_notes):
+        shipment = shipment.model_copy(
+            update={"latest_event": event_text, "condition_notes": notes_text}
+        )
     evidence = build_evidence(
         classification=classification,
         delay_hours=delay_hours,
