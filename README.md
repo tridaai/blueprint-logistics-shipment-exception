@@ -787,7 +787,7 @@ the verified facts (invented ETAs and prohibited promises fail the pack),
 with per-case tokens, latency, and estimated cost. It fails loudly
 without a real provider and is never part of the default gate or CI.
 
-Test suite: **553 tests** (`pytest -q`: 548 passing, 5 Postgres
+Test suite: **557 tests** (`pytest -q`: 552 passing, 5 Postgres
 integration tests gated on `DATABASE_URL`) — classifier, tools,
 retriever (keyword, semantic, hybrid + rerank, Chroma path with a faked
 client, pgvector SQL formatting + a gated live round-trip), the retrieval query built from shipment content, intake
