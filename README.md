@@ -37,7 +37,7 @@ the offline smoke-test backend. The primary workflow is
 ```bash
 uv sync --extra dev              # 1 · install the locked set (uv.lock)
 uv run shipment-agent-demo       # 2 · one shipment, end to end, with a trace
-uv run pytest -q                 # 3 · the full test suite (589 tests)
+uv run pytest -q                 # 3 · the full test suite (614 tests)
 ```
 
 No uv? Create a virtual environment and use pip. The direct dependencies
@@ -323,6 +323,36 @@ the tenant's own bundled SOP (removing the override resurfaces
 the original), while redefining a shared document is refused.
 The console carries a panel for the caller's corpus.
 
+Round 9 closes the loops those surfaces opened. **Corpus change
+events + document history**: every add / replace / remove of a
+stored document lands an append-only ledger entry beside it
+(migration `0009`) — action, the actor's key id (never the
+secret), and the SHA-256 of the text before and after, hashes
+only — served at `GET /policies/{id}/history` and fired as a
+signed `corpus_changed` webhook, the fifth event family, on the
+SLA channel under its opt-in. **Key-rotation completion
+assist**: `/auth/rotation`, `/metrics`, and the escalation
+digest now name when a grace window is *ready to close* — the
+previous key quiet for `TENANT_KEY_QUIET_HOURS` (default 24)
+inside its window, with the last recorded use as evidence.
+Readiness never retires the key; unsetting it stays a human's
+config change. **Per-tenant worker watches**: worker status rows
+stamp each tenant's last recorded outcome, staleness is judged
+per tenant under the worker's own threshold, `GET /workers`
+serves the whole worker picture as JSON (rows, verdicts, open
+episodes, the per-tenant split), and the digest's stale-workers
+section names each stale worker's stale tenants. And
+**negation-aware retrieval**: the keyword ranker now reads
+negation with the classifier's own rules — a denied signal
+("no damage reported") no longer scores for the damage policy,
+a document affirming a denied signal loses a point per denial,
+and a document affirming no exception signal gains one per
+denial, because denial is evidence of absence and absence is
+what the routine-update policy governs. The three labelled
+cases that named the weakness (RQ-17/21/34) go from recall 0 to
+1.0, and keyword mean recall@3 on the 42-case set rises from
+91.7% to 98.8% with no case regressed.
+
 **The classification resolution policy** (implemented in
 `crosscheck.py`, shown in the result and the trace): rules are
 authoritative on disagreement — **except** when the rules land on
@@ -546,7 +576,7 @@ API, CLI, and traced demo — read the same variables.**
 | `STATE_DB_PATH` | — (unset) | SQLite **test-double** store for analyses + approval decisions (a file path, or `:memory:`). Only used when `DATABASE_URL` is unset |
 | `CHECKPOINTS` | `on` | Checkpointed approval gate: runs pause in the graph at the gate and approve/reject resume the thread. `off`/`0`/`false`/`no` = the store-only flow |
 | `CHECKPOINT_DB_PATH` | `<repo>/.data/checkpoints.db` | SQLite **test-double** checkpointer location, used when `DATABASE_URL` is unset (graph state only — the store above remains the record of decisions). With `DATABASE_URL`, the official LangGraph Postgres saver holds graph state in the same database |
-| `ACTION_WEBHOOK_SECRET` | — (unset) | When set, approval-webhook deliveries are signed: `X-Trida-Signature: sha256=<HMAC-SHA256 of the body>` so the receiver can verify the packet before acting on it. The receiver's half ships too: `docs/webhook-receiver.py` (a runnable reference receiver for all four event families) and `shipment-agent verify-webhook` for checking a captured payload |
+| `ACTION_WEBHOOK_SECRET` | — (unset) | When set, approval-webhook deliveries are signed: `X-Trida-Signature: sha256=<HMAC-SHA256 of the body>` so the receiver can verify the packet before acting on it. The receiver's half ships too: `docs/webhook-receiver.py` (a runnable reference receiver for all five event families) and `shipment-agent verify-webhook` for checking a captured payload |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — (unset, off) | When set (with the `otel` extra installed), graph runs export OpenTelemetry spans — one per graph node, one per provider call, ids-and-counts attributes only — to this OTLP/HTTP endpoint |
 | `OTEL_SERVICE_NAME` | `shipment-agent` | The service name on exported traces |
 | `LOG_LEVEL` | `INFO` | Verbosity of the API's structured JSON logs (one JSON object per line, with `X-Request-ID` per request) |
@@ -575,6 +605,7 @@ API, CLI, and traced demo — read the same variables.**
 | `TENANT_PREVIOUS_API_KEYS` | — (unset) | A tenant's outgoing key during rotation, as `tenant:key` pairs (or one `API_KEY_PREVIOUS_<TENANT>` per tenant): accepted beside the current key until the grace deadline, then a precise `401` |
 | `TENANT_KEY_ROTATED_AT` | — (unset) | When each tenant's key last rotated, as `tenant:<ISO-8601>` pairs (or `TENANT_KEY_ROTATED_AT_<TENANT>`). No timestamp = no grace window: the previous key never validates |
 | `TENANT_KEY_GRACE_HOURS` | `72` | How long the previous key keeps working after rotation (per-tenant `TENANT_KEY_GRACE_HOURS_<TENANT>` wins). `GET /auth/rotation` shows the window and the old key's recorded use |
+| `TENANT_KEY_QUIET_HOURS` | `24` | How long the previous key must record no use before its window is reported ready to close (`ready_to_close` on `GET /auth/rotation`, the `shipment_agent_tenant_key_rotation_closing` metric, the digest's open-windows section; per-tenant `TENANT_KEY_QUIET_HOURS_<TENANT>` wins). Readiness only — retiring the key stays a manual config change |
 
 To run the demo against a real model (Anthropic shown; OpenAI is the
 same shape, and Ollama needs no key at all):
@@ -768,7 +799,7 @@ changing the classifier; the case then guards the fix. Production accuracy
 would be measured on real, consented, anonymised exception data.
 
 **Retrieval relevance eval.** `uv run python evals/run_retrieval_evals.py`
-(or `make retrieval-evals`) scores ranking, not just mechanics: 15
+(or `make retrieval-evals`) scores ranking, not just mechanics: 42
 labelled cases in
 [evals/retrieval_golden.jsonl](evals/retrieval_golden.jsonl) pair a
 query — derived from the sample shipments' own event/condition/document
@@ -776,7 +807,10 @@ text, in the graph's query shape — with the policies that should land
 in the top-3 the diagnosis cites, and reports **recall@3** per ranking.
 It includes the customer-simulation case: a customer's own operational
 SOP must rank first for the damage case it describes. Current
-measurement: **keyword 100%, hybrid 100%** (gate: keyword ≥ 85%).
+measurement: **keyword 98.8%, hybrid 97.6%** (gate: keyword ≥ 85%) —
+the one known partial is RQ-22 at 0.5, whose query is the damage
+policy's own sentence and whose claim-packet expectation shares only
+trailer vocabulary with it.
 Offline, the hybrid number runs over a labelled stand-in embedder
 (hashed bag-of-words) and measures the RRF merge, not embedding
 quality; `--real` measures the configured embeddings instead.
@@ -789,7 +823,7 @@ the verified facts (invented ETAs and prohibited promises fail the pack),
 with per-case tokens, latency, and estimated cost. It fails loudly
 without a real provider and is never part of the default gate or CI.
 
-Test suite: **589 tests** (`pytest -q`: 584 passing, 5 Postgres
+Test suite: **614 tests** (`pytest -q`: 609 passing, 5 Postgres
 integration tests gated on `DATABASE_URL`) — classifier, tools,
 retriever (keyword, semantic, hybrid + rerank, Chroma path with a faked
 client, pgvector SQL formatting + a gated live round-trip), the retrieval query built from shipment content, intake
@@ -854,8 +888,19 @@ counts, the 24h firing window naming the per-severity factors,
 oldest waiters per severity per tenant, stale workers and open
 rotation windows, the sweep storing the row the endpoint pulls),
 the signed-webhook receiver path (verification round-trips for
-all four families, the reference receiver served for real,
+all five families, the reference receiver served for real,
 dedupe across receiver restarts, the verify-webhook CLI),
+negation-aware retrieval (denied signals split from affirmed by
+the classifier's own rules, the conflict and absence-credit
+arithmetic on synthetic corpora, the leading label never acting
+as a cue), the corpus change ledger (add / replace / remove with
+text hashes on both hermetic stores, the bundled prior on an
+override, the history endpoint's tenant partitioning, the signed
+corpus_changed event and its recorded outcomes), rotation
+readiness (the quiet-hours precedence, the readiness truth table,
+the closing metric and the digest naming it), per-tenant worker
+watches (the activity stamp, the split projection, the /workers
+view, the digest's stale tenants),
 OpenTelemetry trace export (the span tree against an in-memory
 exporter — run span, node spans, provider spans parented to
 their node — ids-and-counts attributes only, off by default),
@@ -918,7 +963,7 @@ evals/                golden dataset (32 cases) + run_evals.py +
                       run_llm_evals.py (opt-in LLM-judge pack) +
                       retrieval relevance set (42 labelled cases) +
                       run_retrieval_evals.py
-tests/                589 pytest tests: unit, integration, API, UI,
+tests/                614 pytest tests: unit, integration, API, UI,
                       negation, persistence, auth, LLM backends and
                       eval pack (mocked SDKs), config, retrieval,
                       object storage, observability, signed webhooks,

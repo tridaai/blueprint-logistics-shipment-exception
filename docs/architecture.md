@@ -178,7 +178,13 @@ invents a plausible-looking cost is a production incident, not a quirk.
 
 **Retrieval behind an interface, hybrid with an explicit rerank.** The
 agent depends on a `Retriever` protocol, selected with `RETRIEVER`:
-`KeywordRetriever` (transparent token overlap, deterministic),
+`KeywordRetriever` (transparent token overlap, deterministic — and
+negation-aware: it reads the query's denied signals with the
+classifier's own negation/recovery rules, so "no damage reported"
+stops scoring for the damage policy; a document affirming a denied
+signal loses a point per denial, and a document affirming no
+exception signal at all gains one per denial, denial being evidence
+of the absence those documents govern),
 `SemanticRetriever` (embedding cosine, same return shape), and
 `HybridRetriever`. Hybrid retrieves a candidate pool from both (2×
 top-k each), deduplicates by policy ID, and **reranks by reciprocal-rank
@@ -484,13 +490,21 @@ When `ACTION_WEBHOOK_SECRET` is set, the delivery is signed —
 receiver can verify the packet came from the agent before acting on
 it; unset, deliveries are unsigned, as before. The receiver's half
 of the contract ships as code, not prose: `webhooks.py` names all
-four event families (approval, sla_breach, sla_escalation,
-worker_stale) through one detection path and derives the dedupe
-event id from the raw signed body, `docs/webhook-receiver.py` is a
-runnable stdlib-only reference receiver (verify over the raw bytes,
-dedupe on the event id, ack duplicates like originals), and
-`shipment-agent verify-webhook` runs the same checks over a
-captured payload.
+five event families (approval, sla_breach, sla_escalation,
+worker_stale, corpus_changed) through one detection path and
+derives the dedupe event id from the raw signed body,
+`docs/webhook-receiver.py` is a runnable stdlib-only reference
+receiver (verify over the raw bytes, dedupe on the event id, ack
+duplicates like originals), and `shipment-agent verify-webhook`
+runs the same checks over a captured payload. The fifth family is
+the corpus's own: a tenant operator's add / replace / remove of a
+stored policy document fires a signed `corpus_changed` event on
+the SLA channel (hashes and ids, never document text), and the
+change itself is ledgered in an append-only `tenant_policy_history`
+table (migration `0009`) — actor key id, timestamps, and the
+SHA-256 of the text before and after — served at
+`GET /policies/{id}/history`, so the knowledge base has the same
+audit trail as the deliveries it informs.
 
 Every attempt is also written to the record's **delivery ledger**
 (`ApprovalRecord.dispatch_attempts`, persisted with the record):
@@ -816,7 +830,18 @@ Ordered by value when adapting this blueprint to your own operation:
    never swept — into a stale flag on `/readiness` and `/metrics`,
    and the SLA sweep fires one signed `worker_stale` event per
    staleness episode, ledgered on the worker's own row until a
-   fresh sweep closes the episode. Distributed tracing ships
+   fresh sweep closes the episode. Staleness also splits by
+   tenant: the rows stamp each tenant's last recorded outcome, a
+   watched worker is judged per tenant under its own threshold
+   (globally alive, stale for one tenant's retries, is a real and
+   now visible state), `GET /workers` serves the whole picture as
+   JSON, and the digest's stale-workers section names each stale
+   worker's stale tenants. The rotation windows in the digest
+   likewise carry their completion evidence: `ready_to_close`
+   when the outgoing key has been quiet for
+   `TENANT_KEY_QUIET_HOURS` inside its window — readiness only;
+   retiring a key stays a human's configuration change.
+   Distributed tracing ships
    in-process: behind `OTEL_EXPORTER_OTLP_ENDPOINT` (and the
    `otel` extra), every run exports an OpenTelemetry span tree —
    `shipment.run` over one span per graph node over one span per
