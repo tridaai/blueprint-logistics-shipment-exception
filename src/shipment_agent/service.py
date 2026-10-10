@@ -120,10 +120,11 @@ def webhook_retry_delay(attempt_number: int) -> float:
 
     Exponential backoff on ``ACTION_WEBHOOK_RETRY_BASE_SECONDS``
     (default 30): attempt 1 → base, attempt 2 → 2×base, and so on.
-    The schedule is bookkeeping, recorded on the ledger entry as
-    ``next_retry_at``; who acts on it (an operator pressing retry,
-    a scheduler polling :meth:`ShipmentService.due_dispatch_retries`)
-    is the deployment's choice.
+    The schedule is recorded on the ledger entry as
+    ``next_retry_at``; the shipped worker loop
+    (:meth:`ShipmentService.dispatch_retry_worker`, CLI
+    ``dispatch-retries``) acts on it, and an operator can still
+    retry by hand through the API.
     """
     load_dotenv()
     base = env_float("ACTION_WEBHOOK_RETRY_BASE_SECONDS", 30.0)
@@ -822,6 +823,77 @@ class ShipmentService:
             if due_at is None or moment >= due_at:
                 due.append(record.result.shipment_id)
         return due
+
+    def run_dispatch_retries_once(self, now=None) -> list[dict]:
+        """Perform every due dispatch retry, one bounded attempt each.
+
+        Returns one entry per due shipment: ``{"shipment_id",
+        "outcome"}`` with the new dispatch status (``sent`` /
+        ``failed``), or ``{"shipment_id", "error"}`` when a retry was
+        refused between the due-scan and the attempt (the budget ran
+        out, the record changed state) — a refusal is reported in the
+        sweep's results, never raised: one bad record must not stop
+        a sweep from reaching the rest of the queue.
+        """
+        from datetime import datetime, timezone
+
+        moment = now or datetime.now(timezone.utc)
+        outcomes: list[dict] = []
+        for shipment_id in self.due_dispatch_retries(now=moment):
+            try:
+                result = self.retry_dispatch(shipment_id, now=moment)
+            except (KeyError, ValueError) as exc:
+                outcomes.append({"shipment_id": shipment_id, "error": str(exc)})
+                continue
+            outcomes.append(
+                {"shipment_id": shipment_id, "outcome": result.dispatch_status}
+            )
+        return outcomes
+
+    def dispatch_retry_worker(
+        self,
+        stop_event: threading.Event,
+        *,
+        interval_seconds: float = 60.0,
+        now_fn=None,
+        max_sweeps: int | None = None,
+    ) -> dict:
+        """The scheduler contract made real: loop the retry sweep.
+
+        Sweeps :meth:`run_dispatch_retries_once`, waits
+        ``interval_seconds``, and repeats until ``stop_event`` is set
+        (or ``max_sweeps`` sweeps have run — the bound one-shot and
+        cron-style invocations use). The wait is
+        ``stop_event.wait``, so a stop request lands immediately
+        rather than at the end of an interval; ``now_fn`` injects the
+        clock the due-checks read (tests drive a fake one), defaulting
+        to real UTC now. Returns the run's totals:
+        ``{"sweeps", "attempted", "sent", "failed"}`` (a refused
+        retry counts as attempted, under neither sent nor failed).
+
+        Run it as its own process (``shipment-agent dispatch-retries``)
+        next to the API — a sidecar, a systemd unit, or a cron-invoked
+        ``--once`` — never inside the request path: an approval must
+        not wait on a downstream endpoint's backoff schedule.
+        """
+        from datetime import datetime, timezone
+
+        clock = now_fn or (lambda: datetime.now(timezone.utc))
+        totals = {"sweeps": 0, "attempted": 0, "sent": 0, "failed": 0}
+        while not stop_event.is_set():
+            if max_sweeps is not None and totals["sweeps"] >= max_sweeps:
+                break
+            for entry in self.run_dispatch_retries_once(now=clock()):
+                totals["attempted"] += 1
+                if entry.get("outcome") == "sent":
+                    totals["sent"] += 1
+                elif entry.get("outcome") == "failed":
+                    totals["failed"] += 1
+            totals["sweeps"] += 1
+            if max_sweeps is not None and totals["sweeps"] >= max_sweeps:
+                break
+            stop_event.wait(interval_seconds)
+        return totals
 
     def approval_queue(self) -> list[dict]:
         """The approval queue: awaiting shipments, severity first,

@@ -7,6 +7,8 @@ Usage:
     shipment-agent --index 2             # a specific bundled sample
     shipment-agent --file data/sample/sample_shipments.json --all
     shipment-agent --all --concurrency 4 # the batch, four at a time
+    shipment-agent dispatch-retries [--once] [--interval SECONDS]
+                                     # the webhook retry worker loop
 
 The default data source is the sample set bundled inside the package, so
 this works identically from a source checkout and a pip install.
@@ -16,11 +18,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
-from .config import silence_langchain_deprecation_warnings
+from .config import env_str, load_dotenv, silence_langchain_deprecation_warnings
 
 # Must precede the graph import: the warning fires while langgraph loads.
 silence_langchain_deprecation_warnings()
@@ -144,7 +148,91 @@ def _print_batch_summary(items: list[BatchItem], concurrency: int, wall_clock: f
             )
 
 
+def _run_dispatch_retries(argv: list[str]) -> int:
+    """The retry worker as a process: ``shipment-agent dispatch-retries``.
+
+    Runs :meth:`ShipmentService.dispatch_retry_worker` against the
+    environment-configured service (the real store — DATABASE_URL /
+    STATE_DB_PATH), so failed approval-webhook deliveries are retried
+    on their recorded backoff schedule without an operator pressing
+    the button. ``--once`` performs a single sweep (the cron shape);
+    without it the loop runs until SIGINT/SIGTERM, which set the stop
+    event the worker waits on — shutdown is prompt and clean.
+
+    Exit codes: 0 on a clean stop; 2 when there is nothing for a
+    worker to act on (no webhook configured, or the store is the
+    in-memory test double, whose records die with this process).
+    """
+    parser = argparse.ArgumentParser(
+        prog="shipment-agent dispatch-retries",
+        description="Retry due approval-webhook deliveries on their backoff schedule",
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Perform a single sweep and exit (cron shape) instead of looping",
+    )
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=60.0,
+        help="Seconds between sweeps when looping (default 60)",
+    )
+    parser.add_argument(
+        "--max-sweeps",
+        type=int,
+        default=None,
+        help="Stop after this many sweeps (default: run until signalled)",
+    )
+    args = parser.parse_args(argv)
+
+    load_dotenv()
+    if not env_str("ACTION_WEBHOOK_URL"):
+        print(
+            "dispatch-retries: ACTION_WEBHOOK_URL is not configured — "
+            "no delivery exists to retry.",
+            file=sys.stderr,
+        )
+        return 2
+    service = build_service_from_env()
+    if type(service._get_store()).__name__ == "InMemoryStore":
+        print(
+            "dispatch-retries: the store is the in-memory test double "
+            "(no DATABASE_URL / STATE_DB_PATH) — its records do not "
+            "survive this process, so there is nothing to retry.",
+            file=sys.stderr,
+        )
+        return 2
+
+    stop = threading.Event()
+
+    def _stop(signum, frame):  # noqa: ARG001 - signal handler shape
+        stop.set()
+
+    signal.signal(signal.SIGINT, _stop)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, _stop)
+
+    max_sweeps = 1 if args.once else args.max_sweeps
+    print(
+        "dispatch-retries: sweeping for due retries "
+        f"({'once' if args.once else f'every {args.interval:g}s'}) — Ctrl-C to stop"
+    )
+    totals = service.dispatch_retry_worker(
+        stop, interval_seconds=args.interval, max_sweeps=max_sweeps
+    )
+    print(
+        "dispatch-retries: stopped — "
+        f"{totals['sweeps']} sweep(s), {totals['attempted']} attempted, "
+        f"{totals['sent']} sent, {totals['failed']} failed"
+    )
+    return 0
+
+
 def main() -> None:
+    argv = sys.argv[1:]
+    if argv and argv[0] == "dispatch-retries":
+        raise SystemExit(_run_dispatch_retries(argv[1:]))
     parser = argparse.ArgumentParser(description="Shipment Exception Agent CLI (offline, synthetic data)")
     parser.add_argument("--file", type=Path, default=None, help="Path to a shipments JSON file (default: bundled samples)")
     parser.add_argument("--index", type=int, default=0, help="Which sample shipment to run")
