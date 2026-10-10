@@ -487,7 +487,14 @@ the packet already landed, the attempt budget
 (`ACTION_WEBHOOK_MAX_ATTEMPTS`, default 3 total) is exhausted, or
 the backoff has not elapsed without an operator `force`. The retry
 re-sends the same approved packet; it never re-runs the pipeline
-or re-records the decision.
+or re-records the decision. The scheduler that schedule implies
+ships as a worker: `service.dispatch_retry_worker` sweeps
+`due_dispatch_retries` on an interval (one bounded attempt per due
+record, refusals reported in the sweep rather than raised) until a
+stop event is set, and the CLI's `dispatch-retries` command runs it
+as its own process — `--once` for the cron shape, looping for the
+sidecar shape — deliberately outside the request path, so an
+approval never waits on a downstream endpoint's backoff.
 
 **The gate is also a checkpoint.** With `CHECKPOINTS` on (the default),
 the graph carries a LangGraph checkpointer and the final
@@ -713,18 +720,21 @@ Ordered by value when adapting this blueprint to your own operation:
    hybrid); production grows that set from real approver corrections
    and runs the hybrid number over the real embedding model.
 3. **Approval UX:** the queue ships — `GET /queue` (severity, then
-   age, with cross-check/repair/reviewer/guardrail flags) and a
-   console queue panel — as does the audit trail (`GET /audit/export`
-   serves who approved what, when, and why, from the store).
-   Production grows the panel into a full review UX: side-by-side
-   evidence (classification signals, source documents, policy text),
-   one-click edit/approve/reject.
+   age, with cross-check/repair/reviewer/guardrail flags, age
+   buckets, and a per-severity SLA view that flags waits past their
+   budget) and a console queue panel — as does the audit trail
+   (`GET /audit/export` serves who approved what, when, and why,
+   from the store). Production grows the panel into a full review
+   UX: side-by-side evidence (classification signals, source
+   documents, policy text), one-click edit/approve/reject.
 4. **Action layer:** the shipped approval webhook is the first adapter,
    and its delivery bookkeeping ships with it — a per-record ledger
-   of every attempt with bounded, backoff-scheduled retries (§4).
-   Production grows the adapter set into send-via-the-client's-
-   messaging-system and claim filing via carrier portals/APIs —
-   behind feature flags, with idempotency keys and rate limits.
+   of every attempt with bounded, backoff-scheduled retries (§4),
+   plus the retry worker (`dispatch-retries`) that acts on the
+   schedule. Intake is retry-safe the same way: `Idempotency-Key`
+   on analyze dedupes at the store. Production grows the adapter
+   set into send-via-the-client's-messaging-system and claim filing
+   via carrier portals/APIs — behind feature flags, with rate limits.
 5. **Observability:** the shipped baseline is structured JSON logs
    with request IDs, per-run telemetry on every result, and
    `GET /metrics` (runs, decisions, guardrail failures, latency,

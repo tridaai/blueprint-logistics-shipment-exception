@@ -163,7 +163,18 @@ does language work and code does every number:
    correct the documents, …) and **scores them in deterministic code**
    from the delay and severity — ETA improvement, added cost, SLA
    impact. The model never does this arithmetic; the highest score is
-   the recommendation the draft grounds on.
+   the recommendation the draft grounds on. One more computed term
+   sits on the base score: the **carrier reliability adjustment**. A
+   carrier whose stored track record (its scorecard, step 5) runs
+   worse than the fleet baseline — more damage, more exceptions per
+   shipment — makes the options that reduce reliance on it (reroute,
+   partial reship, expedite) gain up to 6 points, and waiting with
+   the same carrier lose them; damage excess counts double, and a
+   carrier needs at least 3 prior shipments before the term applies.
+   The adjustment is printed on every option it touches
+   (`carrier_reliability_adjustment`), its workings land in the run's
+   option notes, and the console shows it in the score cell — memory
+   feeding the decision, never hiding inside it.
 7. **Drafts** a customer update and a claim packet, with policy
    citations, the diagnosis, and the scored options.
 8. **Verifies its own draft** against the verified facts and cited
@@ -217,7 +228,21 @@ shipments awaiting a decision — severity first, then oldest — each
 with the flags that change how a case is read (cross-check
 disagreement, guardrail repair, reviewer block, failing guardrails,
 information needed, auto-approval eligibility), and the demo console
-renders it as a queue panel with a Load action per item.
+renders it as a queue panel with a Load action per item. The queue
+also watches its own health: every item carries an **age bucket**
+(`<1h` / `1-4h` / `4-24h` / `1-3d` / `>3d`) and an **SLA view** — an
+age budget per severity (critical 4h, high 24h, medium 48h, low 96h;
+`QUEUE_SLA_HOURS_<SEVERITY>` tunes each) and an `sla_breach` flag
+with the overrun when the wait has blown the budget, because a case
+that waits too long is itself an exception. The response adds a
+queue `summary` (depth, breaches, age/severity mix), and the console
+flags breaches in the queue headline and the SLA column.
+**Idempotency** closes the integration loop: send an
+`Idempotency-Key` header with `POST /shipments/analyze` (or the
+streaming variant) and a retry of the same submission returns the
+stored run — flagged `idempotent_replay`, carrying the original
+run's telemetry — instead of running the pipeline and spending
+model calls a second time.
 
 **The classification resolution policy** (implemented in
 `crosscheck.py`, shown in the result and the trace): rules are
@@ -458,6 +483,7 @@ API, CLI, and traced demo — read the same variables.**
 | `ACTION_WEBHOOK_TIMEOUT_SECONDS` | `5` | Timeout for the approval webhook dispatch |
 | `ACTION_WEBHOOK_MAX_ATTEMPTS` | `3` | Total webhook delivery attempts per approval (first try + retries); every attempt is recorded on the record's delivery ledger |
 | `ACTION_WEBHOOK_RETRY_BASE_SECONDS` | `30` | Backoff base between delivery retries; the delay doubles per failed attempt and the next due time is recorded on the ledger |
+| `QUEUE_SLA_HOURS_CRITICAL` / `_HIGH` / `_MEDIUM` / `_LOW` | `4` / `24` / `48` / `96` | Approval-queue SLA budgets: hours a case of that severity may await a decision before `GET /queue` flags it `sla_breach` |
 
 To run the demo against a real model (Anthropic shown; OpenAI is the
 same shape, and Ollama needs no key at all):
@@ -518,9 +544,14 @@ Notes that matter:
   retried (`POST /shipments/{id}/dispatch/retry`, or
   `service.retry_dispatch`) up to `ACTION_WEBHOOK_MAX_ATTEMPTS` total
   attempts; the backoff is enforced unless the operator forces the
-  retry, and `service.due_dispatch_retries()` lists what a scheduler
-  should retry now. Unset (the default), approval performs no external
-  action at all and the ledger stays empty. Decisions take
+  retry, and `service.due_dispatch_retries()` lists what is due now.
+  The actor for that schedule ships too: **`shipment-agent
+  dispatch-retries`** runs the retry worker against the configured
+  store — `--once` for the cron shape, looping (SIGINT/SIGTERM to
+  stop) for the sidecar shape — sweeping due retries on their
+  recorded backoff without an operator pressing the button. Unset
+  (the default), approval performs no external action at all and the
+  ledger stays empty. Decisions take
   one name everywhere: approve and reject both accept `actor` (the
   legacy `approver`/`reviewer` still work), and the result returns who
   decided as `decided_by`. Both also accept an optional `reason`: it
@@ -679,9 +710,16 @@ disqualifier, output
 routing against a local stub server, the webhook delivery ledger and
 its bounded retries against a controllable fake sink (backoff
 bookkeeping, budget exhaustion, signature ids, store round-trip), the
+retry worker loop (fake-clock due sweeps, max-sweeps and stop-event
+bounds, the CLI's `--once` shape), idempotency keys on analyze (a
+repeat returns the stored run — the backend's call counter proves no
+second spend — across both stores and both analyze endpoints), the
 approval queue (severity/age ordering, flag projection) and carrier
 scorecards (mix, damage and approval rates, the scorecard line in the
-next same-carrier diagnosis), the retrieval relevance harness
+next same-carrier diagnosis), scorecard-aware option scoring (the
+reliability term's arithmetic and gates, the one case close enough
+for it to flip the recommendation), the queue's SLA views (bucket
+boundaries, per-severity budgets, env overrides, the summary), the retrieval relevance harness
 (labelled set, both rankings over the gate), provider-error translation
 (including client-construction failures) and
 recorded fallbacks, end-to-end graph, API approval/reject flow (including
