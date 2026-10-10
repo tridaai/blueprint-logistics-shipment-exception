@@ -8,10 +8,12 @@ Docs: http://localhost:8000/docs
 from __future__ import annotations
 
 import json
+import queue
+import threading
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -21,6 +23,7 @@ from .config import env_str, load_dotenv, silence_langchain_deprecation_warnings
 silence_langchain_deprecation_warnings()
 
 from .errors import ProviderError
+from .events import CallbackSink, RunEvent
 from .policies_data import POLICIES
 from .samples import load_sample_shipments
 from .schemas import AgentResult, ShipmentInput
@@ -154,6 +157,73 @@ def list_samples() -> list[dict]:
 @app.post("/shipments/analyze", response_model=AgentResult, dependencies=_AUTH)
 def analyze(shipment: ShipmentInput) -> AgentResult:
     return service.analyze(shipment)
+
+
+def _sse(payload: dict) -> str:
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+@app.post("/shipments/analyze/stream", dependencies=_AUTH)
+def analyze_stream(shipment: ShipmentInput) -> StreamingResponse:
+    """The same analysis as ``POST /shipments/analyze``, streamed.
+
+    The run executes on a worker thread; its structured events (see
+    ``events.py``) are forwarded as Server-Sent Events as they happen.
+    The final event is ``run_completed`` and carries the full result
+    JSON under ``result`` — the same payload the non-stream endpoint
+    returns. A failed run ends the stream with a ``run_failed`` event
+    carrying the clean, translated error message (no stack dump).
+    """
+    events_queue: queue.Queue = queue.Queue()
+    sink = CallbackSink(events_queue.put)
+    outcome: dict = {}
+
+    def work() -> None:
+        try:
+            outcome["result"] = service.analyze(shipment, event_sink=sink)
+        except Exception as exc:  # surfaced as the run_failed event below
+            outcome["error"] = exc
+        finally:
+            events_queue.put(None)  # sentinel: the run is over
+
+    threading.Thread(target=work, daemon=True).start()
+
+    def generate():
+        completed: RunEvent | None = None
+        while True:
+            event = events_queue.get()
+            if event is None:
+                break
+            if event.type == "run_completed":
+                completed = event  # held back: it goes out last, with the result
+                continue
+            yield _sse(event.to_dict())
+        if "error" in outcome:
+            yield _sse(
+                {
+                    "type": "run_failed",
+                    "shipment_id": shipment.shipment_id,
+                    "node": None,
+                    "duration_ms": None,
+                    "detail": {"error": str(outcome["error"])},
+                }
+            )
+            return
+        final = (
+            completed.to_dict()
+            if completed is not None
+            else {
+                "type": "run_completed",
+                "shipment_id": shipment.shipment_id,
+                "node": None,
+                "duration_ms": None,
+                "detail": {"status": outcome["result"].approval_status},
+            }
+        )
+        final["result"] = outcome["result"].model_dump(mode="json")
+        yield _sse(final)
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 @app.get("/shipments/{shipment_id}", response_model=AgentResult, dependencies=_AUTH)

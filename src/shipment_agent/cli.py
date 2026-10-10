@@ -25,6 +25,7 @@ from .config import silence_langchain_deprecation_warnings
 # Must precede the graph import: the warning fires while langgraph loads.
 silence_langchain_deprecation_warnings()
 
+from .events import PrintingSink
 from .graph import run_shipment
 from .ports import ModelBackend, Retriever
 from .samples import load_sample_shipments
@@ -154,6 +155,11 @@ def main() -> None:
         default=1,
         help="With --all: analyse N shipments concurrently (default 1 = sequential, unchanged)",
     )
+    parser.add_argument(
+        "--stream",
+        action="store_true",
+        help="Print the run's structured events live as it executes (sequential path; the rendered result follows as usual)",
+    )
     args = parser.parse_args()
 
     # Backend + retriever come from the environment (.env loaded by the
@@ -171,8 +177,11 @@ def main() -> None:
             items = _run_batch(selected, args.concurrency)
         else:
             items = []
+            sink = PrintingSink() if args.stream else None
             for shipment in selected:
-                result = run_shipment(shipment, backend=backend, retriever=retriever)
+                result = run_shipment(
+                    shipment, backend=backend, retriever=retriever, event_sink=sink
+                )
                 _render_result(shipment, result)
                 items.append(
                     BatchItem(shipment_id=shipment.shipment_id, result=result)

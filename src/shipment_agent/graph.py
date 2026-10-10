@@ -49,6 +49,8 @@ from .schemas import (
     ValidationResult,
     VerificationResult,
 )
+from .events import RunEvent
+from .ports import EventSink
 from .tools import compare_documents, compute_delay_hours, document_pair_warning
 from .tools_agent import DiagnosisToolBox
 from .verify import verify_draft
@@ -209,8 +211,17 @@ class _BudgetGuard:
         return self._backend.draft_customer_update(context)
 
 
-def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
-    """Assemble the inspectable per-step trace from the final graph state."""
+def _build_trace(
+    shipment: ShipmentInput,
+    final: dict,
+    durations: dict[str, float] | None = None,
+) -> list[TraceStep]:
+    """Assemble the inspectable per-step trace from the final graph state.
+
+    ``durations`` maps node name → wall-clock milliseconds, measured by
+    the node wrappers in :func:`build_graph` (the same measurement the
+    run-event stream reports); each step carries its node's duration.
+    """
     classification = final["classification"]
     rule_classification = final.get("rule_classification") or classification
     cross_check = final.get("cross_check")
@@ -512,6 +523,10 @@ def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
             ),
         ),
     ]
+    if durations:
+        for step in steps:
+            if step.name in durations:
+                step.duration_ms = durations[step.name]
     budget = final.get("token_budget")
     if budget:
         degraded = budget.get("degraded_nodes", [])
@@ -574,8 +589,18 @@ class AgentState(TypedDict, total=False):
 def build_graph(
     backend: ModelBackend | None = None,
     retriever: Retriever | None = None,
+    event_sink: EventSink | None = None,
+    run_context: dict | None = None,
 ):
-    """Compile the LangGraph pipeline with injectable backend + retriever."""
+    """Compile the LangGraph pipeline with injectable backend + retriever.
+
+    ``event_sink`` (a ports.EventSink) receives the structured run
+    events the node wrappers emit — node start/finish with durations,
+    plus the semantic events derived from node updates (tool calls,
+    the guardrail verdict, repair attempts). ``run_context``, when
+    given, is filled with the run's measurements (``durations``:
+    node name → milliseconds) for the caller to fold into the trace.
+    """
     backend = backend or MockModelBackend()
     retriever = retriever or KeywordRetriever()
     # Cost guardrail: with RUN_TOKEN_BUDGET set, the backend is wrapped
@@ -1027,18 +1052,92 @@ def build_graph(
             "draft": draft.model_dump(),
         }
 
+    # --- Node wrappers: run events + durations -------------------------
+    # Every node is wrapped once, here, so event emission and duration
+    # measurement live in exactly one place instead of eleven. The
+    # wrapper also derives the semantic events from the node's state
+    # update (the diagnosis' tool calls, the guardrail verdict, a
+    # repair attempt) — the nodes themselves stay event-agnostic.
+    durations: dict[str, float] = {}
+    if run_context is not None:
+        run_context["durations"] = durations
+
+    def _emit_semantic(name: str, update: dict, shipment_id: str) -> None:
+        if event_sink is None:
+            return
+        if name == "diagnose":
+            for call in (update.get("diagnosis") or {}).get("tool_calls", []):
+                event_sink.emit(
+                    RunEvent(
+                        type="tool_called",
+                        shipment_id=shipment_id,
+                        node=name,
+                        detail={"tool": call["name"], "summary": call["summary"]},
+                    )
+                )
+        elif name == "validate":
+            validation = update.get("validation") or {}
+            event_sink.emit(
+                RunEvent(
+                    type="guardrail_verdict",
+                    shipment_id=shipment_id,
+                    node=name,
+                    detail={
+                        "passed": bool(validation.get("passed")),
+                        "errors": list(validation.get("errors", [])),
+                    },
+                )
+            )
+            if update.get("repair_attempted"):
+                event_sink.emit(
+                    RunEvent(
+                        type="repair_attempted",
+                        shipment_id=shipment_id,
+                        node=name,
+                        detail={
+                            "attempts": int(update.get("repair_attempts") or 0),
+                            "repaired": bool(update.get("repaired")),
+                        },
+                    )
+                )
+
+    def _wrap(name, fn):
+        def wrapped(state: AgentState) -> AgentState:
+            shipment_id = (state.get("shipment") or {}).get("shipment_id", "")
+            if event_sink is not None:
+                event_sink.emit(
+                    RunEvent(type="node_started", shipment_id=shipment_id, node=name)
+                )
+            started = time.perf_counter()
+            update = fn(state)
+            elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
+            durations[name] = elapsed_ms
+            if event_sink is not None:
+                event_sink.emit(
+                    RunEvent(
+                        type="node_finished",
+                        shipment_id=shipment_id,
+                        node=name,
+                        duration_ms=elapsed_ms,
+                    )
+                )
+                _emit_semantic(name, update, shipment_id)
+            return update
+
+        return wrapped
+
     graph = StateGraph(AgentState)
-    graph.add_node("extract", extract)
-    graph.add_node("ingest", ingest)
-    graph.add_node("classify", classify)
-    graph.add_node("retrieve", retrieve)
-    graph.add_node("diagnose", diagnose)
-    graph.add_node("options", options)
-    graph.add_node("draft", draft)
-    graph.add_node("verify", verify)
-    graph.add_node("review", review)
-    graph.add_node("validate", validate)
-    graph.add_node("human_approval", human_approval)
+    graph.add_node("extract", _wrap("extract", extract))
+    graph.add_node("ingest", _wrap("ingest", ingest))
+    graph.add_node("classify", _wrap("classify", classify))
+    graph.add_node("retrieve", _wrap("retrieve", retrieve))
+    graph.add_node("diagnose", _wrap("diagnose", diagnose))
+    graph.add_node("options", _wrap("options", options))
+    graph.add_node("draft", _wrap("draft", draft))
+    graph.add_node("verify", _wrap("verify", verify))
+    graph.add_node("review", _wrap("review", review))
+    graph.add_node("validate", _wrap("validate", validate))
+    graph.add_node("human_approval", _wrap("human_approval", human_approval))
     graph.set_entry_point("extract")
     for source, target in [
         ("extract", "ingest"),
@@ -1063,6 +1162,7 @@ def run_shipment(
     retriever: Retriever | None = None,
     history: dict | None = None,
     priors: list[dict] | None = None,
+    event_sink: EventSink | None = None,
 ) -> AgentResult:
     """Run one shipment through the full graph and return the typed result.
 
@@ -1071,26 +1171,58 @@ def run_shipment(
     diagnosis as evidence. ``priors`` is the raw stored-history entries
     behind that summary — the diagnosis tool loop reads them (lane and
     carrier history tools). Direct callers usually leave both None.
+
+    ``event_sink`` receives the run's structured events (see
+    ``events.py``): run_started, per-node start/finish with durations,
+    tool calls, the guardrail verdict, repair attempts, and
+    run_completed / run_failed. Leave it None for a silent run.
     """
     shipment_model = (
         shipment if isinstance(shipment, ShipmentInput) else ShipmentInput.model_validate(shipment)
     )
     effective_backend = backend or MockModelBackend()
-    app = build_graph(backend=effective_backend, retriever=retriever)
+    run_context: dict = {}
+    app = build_graph(
+        backend=effective_backend,
+        retriever=retriever,
+        event_sink=event_sink,
+        run_context=run_context,
+    )
     # Telemetry: snapshot the backend's cumulative usage around the run
     # (a service reuses one backend across runs, so the run's share is
     # the delta), and time the whole invoke on the wall clock.
     usage_totals = getattr(effective_backend, "usage_totals", None)
     before = usage_totals() if callable(usage_totals) else None
     started = time.perf_counter()
-    final = app.invoke(
-        {
-            "shipment": shipment_model.model_dump(mode="json"),
-            "history": history,
-            "priors": priors or [],
-        }
-    )
+    if event_sink is not None:
+        event_sink.emit(RunEvent(type="run_started", shipment_id=shipment_model.shipment_id))
+    try:
+        final = app.invoke(
+            {
+                "shipment": shipment_model.model_dump(mode="json"),
+                "history": history,
+                "priors": priors or [],
+            }
+        )
+    except Exception as exc:
+        if event_sink is not None:
+            event_sink.emit(
+                RunEvent(
+                    type="run_failed",
+                    shipment_id=shipment_model.shipment_id,
+                    detail={"error": str(exc)},
+                )
+            )
+        raise
     latency = round(time.perf_counter() - started, 3)
+    if event_sink is not None:
+        event_sink.emit(
+            RunEvent(
+                type="run_completed",
+                shipment_id=shipment_model.shipment_id,
+                detail={"status": final.get("approval_status", "awaiting_approval")},
+            )
+        )
     telemetry = _run_telemetry(
         effective_backend, before, latency, budget_limit=_token_budget()
     )
@@ -1121,7 +1253,7 @@ def run_shipment(
         needs_information=bool(final.get("needs_information")),
         information_request=final.get("information_request"),
         telemetry=telemetry,
-        trace=_build_trace(shipment_model, final),
+        trace=_build_trace(shipment_model, final, durations=run_context.get("durations")),
         approval_status=final.get("approval_status", "awaiting_approval"),
         external_action_taken=False,
     )

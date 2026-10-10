@@ -434,6 +434,10 @@ class TraceStep(BaseModel):
     status: str = "completed"  # completed | passed | failed | awaiting
     summary: str = ""
     details: list[str] = Field(default_factory=list)
+    # Wall-clock time the node took, measured by the graph's node
+    # wrappers (the same measurement the run-event stream reports).
+    # None only for results assembled without a graph run.
+    duration_ms: float | None = None
 
 
 class AgentResult(BaseModel):

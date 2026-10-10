@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from .config import env_float, env_str, load_dotenv
 from .graph import run_shipment
 from .model_backends import ModelBackend, get_backend
+from .ports import EventSink
 from .retriever import Retriever, get_retriever
 from .schemas import AgentResult, ShipmentInput
 from .store import ApprovalRecord, ApprovalStore, carrier_summary, default_store
@@ -91,9 +92,13 @@ class ShipmentService:
             self._resolved_store = self.store or default_store()
         return self._resolved_store
 
-    def analyze(self, shipment: ShipmentInput | dict) -> AgentResult:
+    def analyze(
+        self, shipment: ShipmentInput | dict, event_sink: EventSink | None = None
+    ) -> AgentResult:
         # Backend and retriever come from the environment (MODEL_BACKEND /
         # RETRIEVER, with the repo-root .env loaded) unless injected.
+        # ``event_sink`` (optional) receives the run's structured events
+        # (see events.py) — the API's streaming endpoint passes one.
         backend = self.backend or get_backend()
         if self.retriever is None:
             self.retriever = get_retriever()
@@ -102,10 +107,14 @@ class ShipmentService:
             if isinstance(shipment, ShipmentInput)
             else ShipmentInput.model_validate(shipment)
         )
-        return self._analyze_model(model, backend, self.retriever)
+        return self._analyze_model(model, backend, self.retriever, event_sink=event_sink)
 
     def _analyze_model(
-        self, model: ShipmentInput, backend: ModelBackend, retriever: Retriever
+        self,
+        model: ShipmentInput,
+        backend: ModelBackend,
+        retriever: Retriever,
+        event_sink: EventSink | None = None,
     ) -> AgentResult:
         # Memory: what the store already knows about this consignee and
         # this lane becomes diagnosis evidence for the new analysis.
@@ -127,6 +136,7 @@ class ShipmentService:
             retriever=retriever,
             history=history,
             priors=priors,
+            event_sink=event_sink,
         )
         self._get_store().save(
             ApprovalRecord(result=result, shipment=model.model_dump(mode="json"))
