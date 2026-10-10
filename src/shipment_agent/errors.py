@@ -61,6 +61,11 @@ def _fix_hint(backend: str, kind: str) -> str:
     return "see the provider detail above; check the backend configuration in .env"
 
 
+def _detail_of(exc: Exception) -> str:
+    detail = str(exc).strip().splitlines()[0] if str(exc).strip() else type(exc).__name__
+    return detail[:237] + "..." if len(detail) > 240 else detail
+
+
 def translate_provider_error(
     exc: Exception, *, backend: str, base_url: str | None
 ) -> ProviderError:
@@ -68,11 +73,55 @@ def translate_provider_error(
     if isinstance(exc, ProviderError):
         return exc
     kind = _failure_kind(exc)
-    detail = str(exc).strip().splitlines()[0] if str(exc).strip() else type(exc).__name__
-    if len(detail) > 240:
-        detail = detail[:237] + "..."
     endpoint = base_url or "the provider default endpoint"
     return ProviderError(
-        f"{backend} provider call failed ({kind}): {detail} — endpoint: {endpoint}. "
+        f"{backend} provider call failed ({kind}): {_detail_of(exc)} — endpoint: {endpoint}. "
         f"Likely fix: {_fix_hint(backend, kind)}."
+    )
+
+
+def _looks_like_url_config_error(exc: Exception) -> bool:
+    """True when a failure smells like URL/proxy configuration, not the API.
+
+    The canonical case (found by a live run): a ``NO_PROXY`` list with
+    bracketed IPv6 entries (``[::1]``) makes the SDK's HTTP library raise
+    ``InvalidURL: Invalid port`` while *constructing* the client — before
+    any request exists to translate.
+    """
+    name = type(exc).__name__.lower()
+    message = str(exc).lower()
+    return (
+        "url" in name
+        or "invalid url" in message
+        or "invalid port" in message
+        or "proxy" in message
+    )
+
+
+_PROXY_FIX_HINT = (
+    "check the proxy environment variables (HTTP_PROXY / HTTPS_PROXY / "
+    "NO_PROXY) and the backend base URL — a malformed proxy URL, or a "
+    "NO_PROXY entry the HTTP library cannot parse (e.g. bracketed IPv6 "
+    "entries like [::1]), fails client construction before any request "
+    "is made; simplify NO_PROXY to hostnames / plain IPs and re-run"
+)
+
+
+def translate_construction_error(
+    exc: Exception, *, backend: str, base_url: str | None = None
+) -> ProviderError:
+    """Turn a provider-client *construction* failure into a ProviderError.
+
+    Construction sits outside the per-call wrapping (there is no call
+    yet), so without this it escapes as a raw SDK traceback — exactly
+    what the live run hit with a malformed ``NO_PROXY``. Same product
+    style as :func:`translate_provider_error`: backend, endpoint, fix.
+    """
+    if isinstance(exc, ProviderError):
+        return exc
+    hint = _PROXY_FIX_HINT if _looks_like_url_config_error(exc) else _fix_hint(backend, "provider")
+    endpoint = base_url or "the provider default endpoint"
+    return ProviderError(
+        f"{backend} provider client construction failed: {_detail_of(exc)} — "
+        f"endpoint: {endpoint}. Likely fix: {hint}."
     )

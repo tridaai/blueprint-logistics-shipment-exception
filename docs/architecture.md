@@ -349,6 +349,7 @@ always means "compared and agreed".
 | Retrieved policies irrelevant | draft still carries citations; approver sees policy titles and can reject |
 | LLM backend unavailable at startup | explicit RuntimeError at construction naming the fix (missing key or missing `llm` extra); no silent fallback to the mock |
 | Provider unreachable mid-run (e.g. Ollama down) | translated `ProviderError` naming backend, endpoint, likely fix; degradable nodes fall back with the reason in the trace; a drafting failure ends the run cleanly (CLI/demo exit 1, API 502). No SDK retries — fails within `LLM_TIMEOUT_SECONDS` |
+| Provider client cannot even be constructed (e.g. a `NO_PROXY` entry like `[::1]` the HTTP library cannot parse) | translated `ProviderError` from the construction site itself — naming the backend, the endpoint, and the proxy variables to check — surfaced through the same CLI/API error paths, never a raw SDK traceback |
 | LLM classification malformed/unavailable | cross-check records `rules_only` with the failure in its note; the rule result stands and the run continues |
 | LLM extraction / diagnosis / options / verification failure | that node falls back to provided fields / the evidence template / template options / the deterministic checklist; the fallback is recorded in the trace and the run continues |
 | Chroma installed but store broken | semantic retrieval falls back to in-memory cosine; `vector_store` in the result reports `memory` |

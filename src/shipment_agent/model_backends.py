@@ -35,7 +35,7 @@ import re
 from typing import Protocol
 
 from .config import env_float, env_str, load_dotenv
-from .errors import translate_provider_error
+from .errors import translate_construction_error, translate_provider_error
 from .prompts import (
     CLASSIFY_SYSTEM_PROMPT,
     CLASSIFY_USER_TEMPLATE,
@@ -509,9 +509,14 @@ class OpenAIBackend(_BaseLLMBackend):
         base_url = env_str("OPENAI_BASE_URL")
         if base_url:
             client_kwargs["base_url"] = base_url
-        self._client = OpenAI(**client_kwargs)
-        self._model = env_str("OPENAI_MODEL", "gpt-4o-mini")
         self.base_url = base_url or "https://api.openai.com/v1"
+        try:
+            self._client = OpenAI(**client_kwargs)
+        except Exception as exc:  # construction failures are translated too
+            raise translate_construction_error(
+                exc, backend=self.name, base_url=self.base_url
+            ) from exc
+        self._model = env_str("OPENAI_MODEL", "gpt-4o-mini")
 
     def _complete(self, system: str, user: str, max_tokens: int = 600) -> str:
         try:
@@ -557,9 +562,14 @@ class AnthropicBackend(_BaseLLMBackend):
         base_url = env_str("ANTHROPIC_BASE_URL")
         if base_url:
             client_kwargs["base_url"] = base_url
-        self._client = anthropic.Anthropic(**client_kwargs)
-        self._model = env_str("ANTHROPIC_MODEL", "claude-sonnet-4-5")
         self.base_url = base_url or "https://api.anthropic.com"
+        try:
+            self._client = anthropic.Anthropic(**client_kwargs)
+        except Exception as exc:  # construction failures are translated too
+            raise translate_construction_error(
+                exc, backend=self.name, base_url=self.base_url
+            ) from exc
+        self._model = env_str("ANTHROPIC_MODEL", "claude-sonnet-4-5")
 
     def _complete(self, system: str, user: str, max_tokens: int = 600) -> str:
         try:
@@ -604,12 +614,17 @@ class OllamaBackend(OpenAIBackend):
         except ImportError as exc:
             raise _missing_sdk_error("ollama", "OpenAI") from exc
         self.base_url = env_str("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-        self._client = OpenAI(
-            api_key="ollama",  # placeholder — Ollama ignores it
-            base_url=self.base_url,
-            timeout=env_float("LLM_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS),
-            max_retries=0,  # see OpenAIBackend — degradation is the pipeline's job
-        )
+        try:
+            self._client = OpenAI(
+                api_key="ollama",  # placeholder — Ollama ignores it
+                base_url=self.base_url,
+                timeout=env_float("LLM_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS),
+                max_retries=0,  # see OpenAIBackend — degradation is the pipeline's job
+            )
+        except Exception as exc:  # construction failures are translated too
+            raise translate_construction_error(
+                exc, backend=self.name, base_url=self.base_url
+            ) from exc
         self._model = env_str("OLLAMA_MODEL", "llama3.1")
 
 

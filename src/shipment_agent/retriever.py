@@ -29,7 +29,7 @@ import re
 from typing import Protocol
 
 from .config import env_float, env_str, load_dotenv
-from .errors import translate_provider_error
+from .errors import translate_construction_error, translate_provider_error
 from .model_backends import DEFAULT_TIMEOUT_SECONDS, _missing_sdk_error
 from .policies_data import POLICIES
 from .schemas import RetrievedPolicy
@@ -152,12 +152,19 @@ class SemanticRetriever:
             except ImportError as exc:
                 raise _missing_sdk_error("ollama (embeddings)", "OpenAI") from exc
             base_url = env_str("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-            client = OpenAI(
-                api_key="ollama",  # placeholder — Ollama ignores it
-                base_url=base_url,
-                timeout=timeout,
-                max_retries=0,
-            )
+            try:
+                client = OpenAI(
+                    api_key="ollama",  # placeholder — Ollama ignores it
+                    base_url=base_url,
+                    timeout=timeout,
+                    max_retries=0,
+                )
+            except Exception as exc:  # construction failures are translated too
+                raise translate_construction_error(
+                    exc,
+                    backend=f"ollama embeddings (RETRIEVER={self._mode_label})",
+                    base_url=base_url,
+                ) from exc
             return client, env_str("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text"), "ollama", base_url
         if not env_str("OPENAI_API_KEY"):
             hint = (
@@ -186,12 +193,15 @@ class SemanticRetriever:
         if base_url:
             client_kwargs["base_url"] = base_url
         model = env_str("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
-        return (
-            OpenAI(**client_kwargs),
-            model,
-            "openai",
-            base_url or "https://api.openai.com/v1",
-        )
+        try:
+            client = OpenAI(**client_kwargs)
+        except Exception as exc:  # construction failures are translated too
+            raise translate_construction_error(
+                exc,
+                backend=f"openai embeddings (RETRIEVER={self._mode_label})",
+                base_url=base_url or "https://api.openai.com/v1",
+            ) from exc
+        return (client, model, "openai", base_url or "https://api.openai.com/v1")
 
     def _embed(self, texts: list[str]) -> list[list[float]]:
         try:

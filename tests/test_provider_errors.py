@@ -248,6 +248,101 @@ def test_options_failure_falls_back_with_a_recorded_note(fake_openai):
 
 
 # --------------------------------------------------------------------------
+# Client *construction* failures are translated too (the NO_PROXY case)
+# --------------------------------------------------------------------------
+
+class InvalidURL(Exception):
+    """Stands in for httpx.InvalidURL — raised while a client is being
+    constructed when NO_PROXY carries entries the URL parser rejects
+    (bracketed IPv6 like [::1]). Found by a live run: it escaped as a
+    raw traceback because construction sits outside the call wrapping."""
+
+
+class ExplodingOpenAI:
+    def __init__(self, **kwargs):
+        raise InvalidURL("Invalid port: ':1]'")
+
+
+class ExplodingAnthropic:
+    def __init__(self, **kwargs):
+        raise InvalidURL("Invalid port: ':1]'")
+
+
+@pytest.fixture
+def exploding_openai(monkeypatch):
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=ExplodingOpenAI))
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    return ExplodingOpenAI
+
+
+@pytest.fixture
+def exploding_anthropic(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules, "anthropic", SimpleNamespace(Anthropic=ExplodingAnthropic)
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    return ExplodingAnthropic
+
+
+def test_openai_construction_failure_is_translated(exploding_openai):
+    from shipment_agent.model_backends import OpenAIBackend
+
+    with pytest.raises(ProviderError) as excinfo:
+        OpenAIBackend()
+    message = str(excinfo.value)
+    assert "openai provider client construction failed" in message
+    assert "NO_PROXY" in message  # the likely cause is named
+    assert "Traceback" not in message
+
+
+def test_anthropic_construction_failure_is_translated(exploding_anthropic):
+    from shipment_agent.model_backends import AnthropicBackend
+
+    with pytest.raises(ProviderError) as excinfo:
+        AnthropicBackend()
+    message = str(excinfo.value)
+    assert "anthropic provider client construction failed" in message
+    assert "NO_PROXY" in message
+
+
+def test_ollama_construction_failure_is_translated(exploding_openai):
+    with pytest.raises(ProviderError) as excinfo:
+        OllamaBackend()
+    assert "ollama provider client construction failed" in str(excinfo.value)
+
+
+def test_embeddings_construction_failure_is_translated(exploding_openai):
+    with pytest.raises(ProviderError) as excinfo:
+        get_retriever("semantic")
+    message = str(excinfo.value)
+    assert "openai embeddings (RETRIEVER=semantic)" in message
+    assert "construction failed" in message
+
+
+def test_cli_reports_construction_failure_cleanly(exploding_openai, monkeypatch, capsys):
+    monkeypatch.setenv("MODEL_BACKEND", "openai")
+    monkeypatch.setattr("sys.argv", ["shipment-agent", "--index", "0"])
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+    assert excinfo.value.code == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: openai provider client construction failed")
+    assert "Traceback" not in err
+
+
+def test_api_returns_502_for_construction_failure(exploding_openai, monkeypatch):
+    from shipment_agent.store import InMemoryStore
+
+    monkeypatch.setenv("MODEL_BACKEND", "openai")
+    service = ShipmentService(store=InMemoryStore())  # backend resolved per-call
+    monkeypatch.setattr(api_module, "service", service)
+    client = TestClient(api_module.app, raise_server_exceptions=False)
+    response = client.post("/shipments/analyze", json=SHIPMENT)
+    assert response.status_code == 502
+    assert "construction failed" in response.json()["detail"]
+
+
+# --------------------------------------------------------------------------
 # Embeddings errors name the RETRIEVER value that was set
 # --------------------------------------------------------------------------
 
