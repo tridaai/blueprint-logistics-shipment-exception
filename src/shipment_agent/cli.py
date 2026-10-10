@@ -115,7 +115,7 @@ def _run_batch(shipments: list[ShipmentInput], concurrency: int) -> list[BatchIt
     store (the CLI persists nothing), each item rendered as it lands.
     Configuration was already resolved by main() before this runs, so a
     misconfigured backend fails loudly there, not per item here."""
-    service = build_service_from_env(store=InMemoryStore())
+    service = build_service_from_env(store=InMemoryStore(), checkpointer=False)
     items = service.analyze_batch(shipments, concurrency=concurrency)
     for shipment, item in zip(shipments, items):
         if item.error:

@@ -4,12 +4,17 @@ Pipeline — every step is a named, inspectable node:
 
     extract ──► ingest ──► classify ──► retrieve ──► diagnose ──► options
         ──► draft ──► verify ──► review ──► validate ──► human_approval
-        ──► END
+        ──► approval_gate ──► END
 
 The graph deliberately has NO node that sends a message, files a claim, or
-touches an external system. It ends at the human-approval gate. Acting on an
-approved draft is a separate, explicit step (see ``service.py``), which in
-this prototype still performs no external action.
+touches an external system. It ends at the human-approval gate: with a
+checkpointer attached (see ``checkpoints.py``), ``approval_gate`` is a
+real ``interrupt()`` — the run's state persists there and the service's
+approve/reject resumes the thread with the decision. Without a
+checkpointer the gate node is a pass-through and the flow is exactly
+the service-state flow. Acting on an approved draft is a separate,
+explicit step (see ``service.py``), which in this prototype still
+performs no external action.
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ import time
 from typing import TypedDict
 
 from langgraph.graph import END, StateGraph
+from langgraph.types import Command, interrupt
 
 from .autonomy import compute_autonomy
 from .clarify import build_information_request
@@ -50,7 +56,7 @@ from .schemas import (
     VerificationResult,
 )
 from .events import RunEvent
-from .ports import EventSink
+from .ports import Checkpointer, EventSink
 from .tools import compare_documents, compute_delay_hours, document_pair_warning
 from .tools_agent import DiagnosisToolBox
 from .verify import verify_draft
@@ -591,6 +597,7 @@ def build_graph(
     retriever: Retriever | None = None,
     event_sink: EventSink | None = None,
     run_context: dict | None = None,
+    checkpointer: Checkpointer | None = None,
 ):
     """Compile the LangGraph pipeline with injectable backend + retriever.
 
@@ -600,6 +607,12 @@ def build_graph(
     the guardrail verdict, repair attempts). ``run_context``, when
     given, is filled with the run's measurements (``durations``:
     node name → milliseconds) for the caller to fold into the trace.
+
+    ``checkpointer`` (a ports.Checkpointer), when given, turns the
+    final node into a checkpointed approval gate: the run pauses at
+    an ``interrupt()`` with its state persisted under the caller's
+    thread_id, and :func:`resume_approval` completes it with the
+    human's decision. Without one, the gate node is a pass-through.
     """
     backend = backend or MockModelBackend()
     retriever = retriever or KeywordRetriever()
@@ -1052,6 +1065,32 @@ def build_graph(
             "draft": draft.model_dump(),
         }
 
+    def approval_gate(state: AgentState) -> AgentState:
+        # The checkpointed gate. With a checkpointer attached this node
+        # interrupts the run: the state persists at the gate (thread_id
+        # = the shipment record id) until the service resumes the
+        # thread with the human's decision (see resume_approval). The
+        # node itself records the decision in the graph state — it
+        # sends nothing, files nothing; the service layer owns the
+        # decision record and any dispatch. Without a checkpointer the
+        # node is a pass-through and the run simply ends, as before.
+        # (Not event-wrapped: its "duration" would span the human wait.)
+        if checkpointer is None:
+            return {}
+        decision = interrupt(
+            {
+                "gate": "human_approval",
+                "shipment_id": state["shipment"]["shipment_id"],
+                "status": "awaiting_approval",
+            }
+        )
+        if isinstance(decision, dict) and decision.get("decision") in (
+            "approved",
+            "rejected",
+        ):
+            return {"approval_status": decision["decision"]}
+        return {}
+
     # --- Node wrappers: run events + durations -------------------------
     # Every node is wrapped once, here, so event emission and duration
     # measurement live in exactly one place instead of eleven. The
@@ -1138,6 +1177,7 @@ def build_graph(
     graph.add_node("review", _wrap("review", review))
     graph.add_node("validate", _wrap("validate", validate))
     graph.add_node("human_approval", _wrap("human_approval", human_approval))
+    graph.add_node("approval_gate", approval_gate)
     graph.set_entry_point("extract")
     for source, target in [
         ("extract", "ingest"),
@@ -1150,9 +1190,12 @@ def build_graph(
         ("verify", "review"),
         ("review", "validate"),
         ("validate", "human_approval"),
-        ("human_approval", END),
+        ("human_approval", "approval_gate"),
+        ("approval_gate", END),
     ]:
         graph.add_edge(source, target)
+    if checkpointer is not None:
+        return graph.compile(checkpointer=checkpointer)
     return graph.compile()
 
 
@@ -1163,6 +1206,8 @@ def run_shipment(
     history: dict | None = None,
     priors: list[dict] | None = None,
     event_sink: EventSink | None = None,
+    checkpointer: Checkpointer | None = None,
+    thread_id: str | None = None,
 ) -> AgentResult:
     """Run one shipment through the full graph and return the typed result.
 
@@ -1176,6 +1221,13 @@ def run_shipment(
     ``events.py``): run_started, per-node start/finish with durations,
     tool calls, the guardrail verdict, repair attempts, and
     run_completed / run_failed. Leave it None for a silent run.
+
+    ``checkpointer`` + ``thread_id`` (default: the shipment id) run
+    the graph checkpointed: it pauses at the approval gate with its
+    state persisted, ready for :func:`resume_approval`. Each analysis
+    starts a FRESH thread — any earlier thread for the same record is
+    deleted first — because re-analysing a shipment supersedes the
+    earlier run (the store replaces the record the same way).
     """
     shipment_model = (
         shipment if isinstance(shipment, ShipmentInput) else ShipmentInput.model_validate(shipment)
@@ -1187,7 +1239,13 @@ def run_shipment(
         retriever=retriever,
         event_sink=event_sink,
         run_context=run_context,
+        checkpointer=checkpointer,
     )
+    invoke_config = None
+    if checkpointer is not None:
+        resolved_thread = thread_id or shipment_model.shipment_id
+        checkpointer.delete_thread(resolved_thread)
+        invoke_config = {"configurable": {"thread_id": resolved_thread}}
     # Telemetry: snapshot the backend's cumulative usage around the run
     # (a service reuses one backend across runs, so the run's share is
     # the delta), and time the whole invoke on the wall clock.
@@ -1202,7 +1260,8 @@ def run_shipment(
                 "shipment": shipment_model.model_dump(mode="json"),
                 "history": history,
                 "priors": priors or [],
-            }
+            },
+            invoke_config,
         )
     except Exception as exc:
         if event_sink is not None:
@@ -1265,6 +1324,39 @@ def run_shipment(
         "telemetry": telemetry.model_dump(),
     }
     return result
+
+
+def resume_approval(
+    thread_id: str,
+    decision: dict,
+    checkpointer: Checkpointer | None,
+) -> dict | None:
+    """Resume a checkpointed thread paused at the approval gate.
+
+    ``decision`` is the resume payload the gate node records, e.g.
+    ``{"decision": "approved", "actor": "…", "reason": "…"}``. Returns
+    the final graph state when the thread was pending and has now
+    completed, or ``None`` when there is nothing to resume — no
+    checkpointer, an unknown thread, or a thread that already
+    completed (e.g. the analysis ran with checkpoints off, or the
+    decision was already applied). Callers treat the store as the
+    record of the decision either way; this is the graph-state half.
+
+    The graph is rebuilt with the deterministic fallback backend on
+    purpose: the only node left to run is the gate, which does no
+    model work, so a resume never touches a provider.
+    """
+    if checkpointer is None:
+        return None
+    app = build_graph(checkpointer=checkpointer)
+    config = {"configurable": {"thread_id": thread_id}}
+    try:
+        snapshot = app.get_state(config)
+    except Exception:
+        return None
+    if not snapshot.next:  # nothing pending on this thread
+        return None
+    return app.invoke(Command(resume=decision), config)
 
 
 def _run_telemetry(

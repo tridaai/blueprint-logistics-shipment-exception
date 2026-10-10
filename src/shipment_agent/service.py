@@ -10,6 +10,14 @@ recorded on the result (see ``dispatch_approval_webhook``).
 Records live in an approval store (``store.py``): SQLite on disk by
 default, so analyses and human decisions survive restarts; the
 in-memory store remains available as a test double.
+
+The approval gate is checkpointed (``checkpoints.py``, on unless
+``CHECKPOINTS=off``): an analysis pauses its graph at the gate with
+the state persisted under the shipment id, and approve/reject resume
+that thread with the decision. The split is deliberate — the store is
+the record of decisions (and the only thing the decision flow reads);
+the checkpointer holds graph state. A missing/finished thread never
+blocks a decision.
 """
 
 from __future__ import annotations
@@ -20,10 +28,11 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
+from .checkpoints import get_checkpointer
 from .config import env_float, env_str, load_dotenv
-from .graph import run_shipment
+from .graph import resume_approval, run_shipment
 from .model_backends import ModelBackend, get_backend
-from .ports import EventSink
+from .ports import Checkpointer, EventSink
 from .retriever import Retriever, get_retriever
 from .schemas import AgentResult, ShipmentInput
 from .store import ApprovalRecord, ApprovalStore, carrier_summary, default_store
@@ -85,12 +94,47 @@ class ShipmentService:
     backend: ModelBackend | None = None
     retriever: Retriever | None = None
     store: ApprovalStore | None = None
+    # The gate checkpointer: a saver instance, None (= resolve from the
+    # environment, CHECKPOINTS, default on), or False (= disabled,
+    # whatever the environment says — the CLI batch path uses this
+    # because it persists nothing).
+    checkpointer: Checkpointer | bool | None = None
     _resolved_store: ApprovalStore | None = field(default=None, repr=False)
+    _resolved_checkpointer: Checkpointer | None = field(default=None, repr=False)
+    _checkpointer_resolved: bool = field(default=False, repr=False)
 
     def _get_store(self) -> ApprovalStore:
         if self._resolved_store is None:
             self._resolved_store = self.store or default_store()
         return self._resolved_store
+
+    def _get_checkpointer(self) -> Checkpointer | None:
+        if not self._checkpointer_resolved:
+            self._checkpointer_resolved = True
+            if self.checkpointer is False:
+                self._resolved_checkpointer = None
+            elif self.checkpointer is not None:
+                self._resolved_checkpointer = self.checkpointer  # type: ignore[assignment]
+            else:
+                self._resolved_checkpointer = get_checkpointer()
+        return self._resolved_checkpointer
+
+    def _resume_thread(self, shipment_id: str, decision: dict) -> None:
+        """Complete the checkpointed graph thread with a decision.
+
+        Best-effort by design: the store record the caller just saved
+        is the decision of record. A thread that is missing or already
+        finished (the analysis ran with checkpoints off, modes were
+        mixed) has nothing to resume, and a resume failure never
+        unmakes a recorded human decision.
+        """
+        checkpointer = self._get_checkpointer()
+        if checkpointer is None:
+            return
+        try:
+            resume_approval(shipment_id, decision, checkpointer)
+        except Exception:
+            pass
 
     def analyze(
         self, shipment: ShipmentInput | dict, event_sink: EventSink | None = None
@@ -137,6 +181,8 @@ class ShipmentService:
             history=history,
             priors=priors,
             event_sink=event_sink,
+            checkpointer=self._get_checkpointer(),
+            thread_id=model.shipment_id,
         )
         self._get_store().save(
             ApprovalRecord(result=result, shipment=model.model_dump(mode="json"))
@@ -322,6 +368,10 @@ class ShipmentService:
             if dispatch == "sent":
                 record.result.external_action_taken = True
         store.save(record)
+        self._resume_thread(
+            shipment_id,
+            {"decision": "approved", "actor": approver, "reason": reason},
+        )
         return record.result
 
     def reject(self, shipment_id: str, reviewer: str, reason: str = "") -> AgentResult:
@@ -340,6 +390,10 @@ class ShipmentService:
         record.result.decision_reason = reason or None
         record.result.external_action_taken = False
         store.save(record)
+        self._resume_thread(
+            shipment_id,
+            {"decision": "rejected", "actor": reviewer, "reason": reason},
+        )
         return record.result
 
     def get(self, shipment_id: str) -> AgentResult | None:

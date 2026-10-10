@@ -11,17 +11,22 @@ configuration becomes concrete objects:
   invocation; the service resolves per analysis, which keeps batch
   runs free of shared usage counters — see ``service.py``);
 - the store comes from :func:`default_store` (``STATE_DB_PATH``);
+- the gate checkpointer comes from
+  :func:`~shipment_agent.checkpoints.get_checkpointer`
+  (``CHECKPOINTS`` / ``CHECKPOINT_DB_PATH``) — resolved lazily by the
+  service, like the backend;
 - :func:`build_service_from_env` assembles the service the API runs,
-  and accepts a store override for callers that must not persist
-  (the CLI batch path passes its in-memory store).
+  and accepts overrides for callers that must not persist (the CLI
+  batch path passes its in-memory store and disables checkpoints).
 
 The ports these objects satisfy are declared in ``ports.py``.
 """
 
 from __future__ import annotations
 
+from .checkpoints import get_checkpointer
 from .model_backends import get_backend
-from .ports import ModelBackend, Retriever, Store
+from .ports import Checkpointer, ModelBackend, Retriever, Store
 from .retriever import get_retriever
 from .service import ShipmentService
 from .store import default_store
@@ -42,12 +47,25 @@ def build_store() -> Store:
     return default_store()
 
 
-def build_service_from_env(store: Store | None = None) -> ShipmentService:
+def build_checkpointer() -> Checkpointer | None:
+    """The gate checkpointer the environment configures (see checkpoints)."""
+    return get_checkpointer()
+
+
+def build_service_from_env(
+    store: Store | None = None,
+    checkpointer: Checkpointer | bool | None = None,
+) -> ShipmentService:
     """Assemble the ShipmentService from configuration.
 
-    ``store`` overrides the configured store — used by the CLI batch
-    path, which persists nothing. Backend and retriever deliberately
-    stay lazily resolved inside the service (its documented behaviour:
-    fresh per analysis unless a caller injects doubles).
+    ``store`` / ``checkpointer`` override the configured collaborators
+    — used by the CLI batch path, which persists nothing (in-memory
+    store, checkpoints off). Backend, retriever, and (by default) the
+    checkpointer stay lazily resolved inside the service (its
+    documented behaviour: fresh per analysis unless a caller injects
+    doubles).
     """
-    return ShipmentService(store=store if store is not None else build_store())
+    return ShipmentService(
+        store=store if store is not None else build_store(),
+        checkpointer=checkpointer,
+    )
