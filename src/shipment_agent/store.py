@@ -274,6 +274,7 @@ class InMemoryStore:
         # shadowing each other.
         self._records: dict[tuple[str, str], ApprovalRecord] = {}
         self._worker_status: dict[str, dict] = {}
+        self._summaries: dict[str, dict] = {}
         self._tenant_policies: dict[tuple[str, str], dict] = {}
         self._lock = threading.Lock()
 
@@ -290,6 +291,16 @@ class InMemoryStore:
     def all_worker_status(self) -> dict[str, dict]:
         with self._lock:
             return dict(self._worker_status)
+
+    # Summary rows (see ports.Store): one digest per key, replaced
+    # wholesale on each composition.
+    def save_summary(self, key: str, summary: dict) -> None:
+        with self._lock:
+            self._summaries[key] = summary
+
+    def summary(self, key: str) -> dict | None:
+        with self._lock:
+            return self._summaries.get(key)
 
     # Tenant policy documents (see ports.Store): keyed by the
     # (tenant, policy) pair, like the records themselves.
@@ -581,6 +592,37 @@ class SQLiteStore:
                 "SELECT worker, summary_json FROM worker_status"
             ).fetchall()
         return {row["worker"]: json.loads(row["summary_json"]) for row in rows}
+
+    # Summary rows (see ports.Store): a side table the store owns
+    # its DDL for, like worker_status above.
+    def _ensure_summaries_table(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS summaries (
+                key TEXT PRIMARY KEY,
+                summary_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+
+    def save_summary(self, key: str, summary: dict) -> None:
+        with self._connect() as conn:
+            self._ensure_summaries_table(conn)
+            conn.execute(
+                "INSERT OR REPLACE INTO summaries "
+                "(key, summary_json, updated_at) VALUES (?, ?, ?)",
+                (key, json.dumps(summary), summary.get("generated_at", "")),
+            )
+
+    def summary(self, key: str) -> dict | None:
+        with self._connect() as conn:
+            self._ensure_summaries_table(conn)
+            row = conn.execute(
+                "SELECT summary_json FROM summaries WHERE key = ?",
+                (key,),
+            ).fetchone()
+        return json.loads(row["summary_json"]) if row else None
 
     # Tenant policy documents (see ports.Store): a side table the
     # store owns its DDL for, like worker_status above.
@@ -928,6 +970,28 @@ class PostgresStore:
                 "SELECT worker, summary FROM worker_status"
             ).fetchall()
         return {row[0]: row[1] for row in rows}
+
+    # Summary rows (see ports.Store): the summaries table is
+    # migration 0008's; this class issues no DDL, as everywhere.
+    def save_summary(self, key: str, summary: dict) -> None:
+        from psycopg.types.json import Jsonb
+
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO summaries (key, summary) VALUES (%s, %s) "
+                "ON CONFLICT (key) DO UPDATE SET "
+                "summary = EXCLUDED.summary, updated_at = now()",
+                (key, Jsonb(summary)),
+            )
+            conn.commit()
+
+    def summary(self, key: str) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT summary FROM summaries WHERE key = %s",
+                (key,),
+            ).fetchone()
+        return row[0] if row else None
 
     # Tenant policy documents (see ports.Store): the tenant_policies
     # table is migration 0007's; this class issues no DDL, as

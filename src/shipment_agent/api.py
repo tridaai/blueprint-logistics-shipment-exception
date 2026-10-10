@@ -531,6 +531,25 @@ def approval_queue(
     }
 
 
+@app.get("/queue/digest", dependencies=_AUTH)
+def queue_digest() -> dict:
+    """The escalation digest: the shift lead's morning picture.
+
+    Breaches by ladder stage (and by severity), the breach and
+    escalation events fired in the last 24h (escalations naming the
+    per-severity factor that fired), the oldest waiter per severity
+    per tenant, stale workers, and open key-rotation windows —
+    composed deterministically in code from the queue, staleness,
+    and rotation projections (no model prose). Pull-first: the SLA
+    sweep composes and stores the digest on its summary row, and
+    this endpoint serves that row (``stored``: true); before the
+    first sweep, the same projection is composed on read
+    (``stored``: false). Deployment-wide by design — an operator
+    artefact whose per-tenant sections are named inside it, like
+    /metrics."""
+    return service.queue_digest()
+
+
 @app.post("/queue/sla-sweep", dependencies=_AUTH)
 def sla_breach_sweep(
     x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),

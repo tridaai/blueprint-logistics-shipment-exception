@@ -1672,6 +1672,102 @@ class ShipmentService:
 
         return queue_summary(self.approval_queue(tenant_id=tenant_id))
 
+    #: The store key the escalation digest lives under.
+    DIGEST_KEY = "queue_digest"
+
+    def compose_queue_digest(self, now=None) -> dict:
+        """Compose the escalation digest from the current store.
+
+        The shift lead's morning picture (see
+        ``insights.escalation_digest``): breaches by stage, the
+        ladder's firings in the last 24h naming the per-severity
+        factors, the oldest waiter per severity per tenant, stale
+        workers, and open key-rotation windows — composed in code
+        from the same projections the queue, the staleness view,
+        and the rotation view serve; no model prose. Deployment-
+        wide by design: the digest is an operator artefact, and its
+        per-tenant sections are named inside it.
+        """
+        from datetime import datetime, timezone
+
+        from .config import (
+            tenant_api_keys,
+            tenant_previous_api_keys,
+            tenant_rotation_status,
+        )
+        from .insights import (
+            approval_queue as _queue_projection,
+        )
+        from .insights import (
+            escalation_digest,
+            sla_escalation_factors_from_env,
+            sla_thresholds_from_env,
+        )
+
+        moment = now or datetime.now(timezone.utc)
+        records = self._get_store().records()
+        partitions: dict[str, list[ApprovalRecord]] = {}
+        for record in records:
+            partitions.setdefault(record.tenant_id, []).append(record)
+        thresholds = sla_thresholds_from_env()
+        factors = sla_escalation_factors_from_env()
+        queues = {
+            tenant: _queue_projection(
+                partition,
+                now=moment,
+                sla_hours=thresholds,
+                escalation_factor=factors,
+            )
+            for tenant, partition in partitions.items()
+        }
+        known_tenants = set(tenant_api_keys()) | set(tenant_previous_api_keys())
+        rotations = [
+            tenant_rotation_status(tenant, now=moment)
+            for tenant in sorted(known_tenants)
+        ]
+        return escalation_digest(
+            queues,
+            records,
+            now=moment,
+            staleness=self.worker_staleness(now=moment),
+            rotations=rotations,
+            escalation_factors=factors,
+        )
+
+    def _store_queue_digest(self, digest: dict) -> None:
+        """Leave the composed digest on its summary row.
+
+        The sweep composes; GET /queue/digest pulls. A store double
+        without summary rows — or a failed write — is skipped
+        silently: the digest is a projection, and composing on read
+        (see :meth:`queue_digest`) degrades to the same content."""
+        try:
+            save = getattr(self._get_store(), "save_summary", None)
+            if callable(save):
+                save(self.DIGEST_KEY, digest)
+        except Exception:  # a projection never breaks the sweep
+            pass
+
+    def queue_digest(self, now=None) -> dict:
+        """The escalation digest, pull-first.
+
+        Serves the summary row the sweep stored (``stored``: True,
+        with its composition time) — composing is the sweep's job,
+        on the sweep's cadence. Before the first sweep has stored
+        one (or on a store without summary rows) the digest is
+        composed on read instead (``stored``: False): the content
+        is the same deterministic projection either way, only its
+        freshness differs, and the flag says which."""
+        read = getattr(self._get_store(), "summary", None)
+        if callable(read):
+            try:
+                stored = read(self.DIGEST_KEY)
+            except Exception:
+                stored = None
+            if stored:
+                return {**stored, "stored": True}
+        return {**self.compose_queue_digest(now=now), "stored": False}
+
     def sla_breach_sweep(
         self,
         *,
@@ -1865,6 +1961,11 @@ class ShipmentService:
         # workers' own rows, not this sweep's entries — the sweep's
         # result stays the queue's story.
         self.check_worker_staleness(now=moment)
+        # The sweep also leaves the morning picture behind: the
+        # escalation digest, composed now that this sweep's own
+        # firings and heartbeat are on record, stored for
+        # GET /queue/digest to pull (see compose_queue_digest).
+        self._store_queue_digest(self.compose_queue_digest(now=moment))
         return entries
 
     def carrier_scorecards(self, tenant_id: str | None = None) -> list[dict]:

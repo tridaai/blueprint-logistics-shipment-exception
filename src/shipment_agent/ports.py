@@ -121,6 +121,19 @@ class Store(Protocol):
 
     def all_worker_status(self) -> dict[str, dict]: ...
 
+    # Summary rows: named, deployment-wide digests composed by a
+    # background process and read by the API — today the queue's
+    # escalation digest (see service.compose_queue_digest), stored
+    # under its key by the SLA sweep and served by GET /queue/digest.
+    # The worker-status pattern generalised: one row per key,
+    # replaced on each composition; counts and ids only, never
+    # shipment content, and not tenant-partitioned (the digest is an
+    # operator artefact whose per-tenant sections are named inside).
+
+    def save_summary(self, key: str, summary: dict) -> None: ...
+
+    def summary(self, key: str) -> dict | None: ...
+
     # Tenant policy documents: the runtime-managed slice of a
     # tenant's retrieval corpus (see service.upsert_tenant_policy).
     # The bundled corpora in policies_data.py are code; these rows

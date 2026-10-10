@@ -281,6 +281,147 @@ def approval_queue(
     return items
 
 
+# ---------------------------------------------------------------------------
+# Escalation digest
+# ---------------------------------------------------------------------------
+
+#: How far back the digest's "fired" sections look. A shift-length
+#: window: the morning picture a shift lead asked for, not an audit.
+DIGEST_WINDOW_HOURS = 24
+
+
+def escalation_digest(
+    queues_by_tenant: dict[str, list[dict]],
+    records: list,
+    *,
+    now: datetime,
+    staleness: dict | None = None,
+    rotations: list[dict] | None = None,
+    escalation_factors: dict | None = None,
+    window_hours: float = DIGEST_WINDOW_HOURS,
+) -> dict:
+    """The shift lead's morning picture, composed in code.
+
+    A pure projection (the service gathers the inputs; this module
+    stays deterministic over them):
+
+    - ``breaches_by_stage`` — awaiting items across every tenant,
+      counted by the ladder stage they stand on
+      (within_budget / breach / escalated), with the breach-stage
+      counts broken out by severity alongside.
+    - ``breaches_fired`` / ``escalations_fired`` — the ladder's
+      events in the last ``window_hours``, read from the records'
+      own SLA ledgers (an attempt is a firing, whatever its
+      delivery outcome — the outcome rides along). Escalations name
+      the per-severity factor that fired: the factor the ladder
+      applied to that severity, from ``escalation_factors``.
+    - ``oldest_waiter_per_severity`` — per tenant, the single
+      oldest awaiting item of each severity: who has been waiting
+      longest, where.
+    - ``stale_workers`` — the watched workers the staleness view
+      calls stale (the observer's own health).
+    - ``open_key_rotation_windows`` — tenants whose previous key is
+      still inside its grace window: rotations somebody still has
+      to finish.
+
+    Counts and ids only — no shipment content, like every other
+    projection in this module.
+    """
+    from datetime import timedelta
+
+    window_start = now - timedelta(hours=window_hours)
+    factors = escalation_factors or {}
+    by_stage = {"within_budget": 0, "breach": 0, "escalated": 0}
+    breaches_by_severity: Counter = Counter()
+    oldest: dict[str, dict] = {}
+    awaiting_total = 0
+    for tenant, items in queues_by_tenant.items():
+        awaiting_total += len(items)
+        per_severity: dict[str, dict] = {}
+        for item in items:
+            stage = item["sla_stage"]
+            by_stage[stage] = by_stage.get(stage, 0) + 1
+            if stage in ("breach", "escalated"):
+                breaches_by_severity[item["severity"]] += 1
+            current = per_severity.get(item["severity"])
+            if current is None or (item["age_seconds"] or 0) > (
+                current["age_seconds"] or 0
+            ):
+                per_severity[item["severity"]] = {
+                    "shipment_id": item["shipment_id"],
+                    "age_seconds": item["age_seconds"],
+                    "created_at": item["created_at"],
+                    "sla_stage": stage,
+                }
+        if per_severity:
+            oldest[tenant] = per_severity
+
+    breaches_fired: list[dict] = []
+    escalations_fired: list[dict] = []
+    for record in records:
+        severity = record.result.classification.severity.value
+        for attempt in record.sla_dispatch_attempts:
+            at = _parse_iso(attempt.get("at"))
+            if at is not None and at >= window_start:
+                breaches_fired.append(
+                    {
+                        "shipment_id": record.result.shipment_id,
+                        "tenant_id": record.tenant_id,
+                        "severity": severity,
+                        "at": attempt["at"],
+                        "outcome": attempt.get("outcome"),
+                    }
+                )
+        for attempt in record.sla_escalation_attempts:
+            at = _parse_iso(attempt.get("at"))
+            if at is not None and at >= window_start:
+                escalations_fired.append(
+                    {
+                        "shipment_id": record.result.shipment_id,
+                        "tenant_id": record.tenant_id,
+                        "severity": severity,
+                        "escalation_factor": factors.get(severity),
+                        "at": attempt["at"],
+                        "outcome": attempt.get("outcome"),
+                    }
+                )
+    breaches_fired.sort(key=lambda entry: entry["at"], reverse=True)
+    escalations_fired.sort(key=lambda entry: entry["at"], reverse=True)
+
+    stale_workers = [
+        {
+            "worker": worker,
+            "last_sweep_at": info.get("last_sweep_at"),
+            "age_seconds": info.get("age_seconds"),
+            "threshold_seconds": info.get("threshold_seconds"),
+        }
+        for worker, info in sorted((staleness or {}).items())
+        if info.get("stale")
+    ]
+    open_windows = [
+        {
+            "tenant_id": status["tenant_id"],
+            "rotated_at": status.get("rotated_at"),
+            "grace_deadline": status.get("grace_deadline"),
+            "grace_hours": status.get("grace_hours"),
+        }
+        for status in (rotations or [])
+        if status.get("grace_open")
+    ]
+    return {
+        "generated_at": now.isoformat(),
+        "window_hours": window_hours,
+        "awaiting_total": awaiting_total,
+        "breaches_by_stage": by_stage,
+        "breaches_by_severity": dict(sorted(breaches_by_severity.items())),
+        "breaches_fired": breaches_fired,
+        "escalations_fired": escalations_fired,
+        "oldest_waiter_per_severity": oldest,
+        "stale_workers": stale_workers,
+        "open_key_rotation_windows": open_windows,
+    }
+
+
 def queue_summary(items: list[dict]) -> dict:
     """The queue's own health, over :func:`approval_queue` items:
     depth, SLA breaches, and the age/severity mix — the numbers the
