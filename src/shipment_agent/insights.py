@@ -27,6 +27,12 @@ by the model):
   rates across all carriers: the comparison point that turns a
   carrier's rates into a reliability signal for option scoring
   (see ``options.reliability_adjustment``).
+- **Lane projections** — the same scorecard and baseline computed
+  over one corridor (``origin -> destination``) only: a carrier can
+  be fine everywhere except one lane, and the option scorer's
+  reliability term reads the lane figures when the carrier has
+  enough history *on that lane* (see
+  ``options.reliability_adjustment``).
 """
 
 from __future__ import annotations
@@ -301,6 +307,62 @@ def fleet_baseline(records: list[ApprovalRecord]) -> dict | None:
         "exception_rate": round(exceptions / shipments, 3),
         "damage_rate": round(damage / shipments, 3),
     }
+
+
+def lane_scorecard(
+    records: list[ApprovalRecord],
+    carrier: str,
+    origin: str,
+    destination: str,
+    *,
+    exclude_shipment_id: str | None = None,
+) -> dict | None:
+    """One carrier's scorecard on ONE lane, or None when they have
+    no history there.
+
+    The carrier scorecard computed over the lane's records only —
+    same shape, plus the ``lane`` it describes. This is the dominant
+    reliability signal when it is thick enough: a carrier's global
+    record can hide a corridor where it keeps breaking freight.
+    """
+    lane = f"{origin} -> {destination}"
+    lane_records = [
+        record
+        for record in records
+        if (history_entry(record) or {}).get("lane") == lane
+    ]
+    card = carrier_scorecard(
+        lane_records, carrier, exclude_shipment_id=exclude_shipment_id
+    )
+    if card is None:
+        return None
+    return {**card, "lane": lane}
+
+
+def lane_baseline(
+    records: list[ApprovalRecord],
+    origin: str,
+    destination: str,
+    *,
+    exclude_shipment_id: str | None = None,
+) -> dict | None:
+    """The fleet baseline over ONE lane's shipments, or None.
+
+    The comparison point for the lane scorecard: how ALL carriers
+    perform on this corridor. Same shape as :func:`fleet_baseline`,
+    plus the ``lane`` it describes.
+    """
+    lane = f"{origin} -> {destination}"
+    lane_records = [
+        record
+        for record in records
+        if (history_entry(record) or {}).get("lane") == lane
+        and record.result.shipment_id != exclude_shipment_id
+    ]
+    baseline = fleet_baseline(lane_records)
+    if baseline is None:
+        return None
+    return {**baseline, "lane": lane}
 
 
 def format_carrier_scorecard_line(card: dict) -> str:

@@ -72,6 +72,12 @@ from .insights import (
 from .insights import (
     fleet_baseline as _fleet_baseline,
 )
+from .insights import (
+    lane_baseline as _lane_baseline,
+)
+from .insights import (
+    lane_scorecard as _lane_scorecard,
+)
 from .model_backends import ModelBackend, get_backend
 from .object_store import get_object_store
 from .ports import Checkpointer, EventSink, ObjectStore
@@ -710,6 +716,29 @@ class ShipmentService:
             )
             if baseline is not None:
                 history = {**history, "fleet_baseline": baseline}
+            # The lane axis of the same record: this carrier on THIS
+            # corridor, against the corridor's own baseline. When the
+            # lane history is thick enough, those are the figures the
+            # reliability term reads (options._reliability_basis) —
+            # a carrier fine everywhere except one lane should be
+            # priced on the lane the freight is about to travel.
+            lane_card = _lane_scorecard(
+                records,
+                model.carrier,
+                model.origin,
+                model.destination,
+                exclude_shipment_id=model.shipment_id,
+            )
+            if lane_card is not None:
+                history = {**history, "carrier_lane_scorecard": lane_card}
+                lane_base = _lane_baseline(
+                    records,
+                    model.origin,
+                    model.destination,
+                    exclude_shipment_id=model.shipment_id,
+                )
+                if lane_base is not None:
+                    history = {**history, "lane_baseline": lane_base}
         result = run_shipment(
             model,
             backend=backend,

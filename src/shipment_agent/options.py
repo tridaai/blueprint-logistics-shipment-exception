@@ -27,6 +27,14 @@ with its workings in the run's option notes — memory feeding the
 decision, never hiding inside it. No track record (or one at/better
 than the fleet) means no adjustment: the base formula stands alone,
 which is why the golden evals — run without a store — are unchanged.
+
+The term has a second axis: the **lane**. When the carrier has
+enough stored history on *this shipment's lane* (its lane
+scorecard against the lane's own baseline, ``insights.py``), the
+lane figures dominate — a carrier can be reliable everywhere
+except one corridor, and the corridor is what this shipment is
+about to travel. Below that history threshold the carrier-wide
+figures stand, exactly as before.
 """
 
 from __future__ import annotations
@@ -131,50 +139,106 @@ _RELIABILITY_FACTORS = {
 }
 
 
+def _reliability_basis(
+    scorecard: dict | None,
+    baseline: dict | None,
+    lane_scorecard: dict | None,
+    lane_baseline: dict | None,
+) -> tuple[dict | None, dict | None, str]:
+    """Which figures the reliability term reads, and their scope.
+
+    The lane figures dominate when they exist and the carrier's
+    history *on this lane* clears the same minimum-history gate the
+    carrier-wide term uses — a thin lane record is an anecdote, and
+    the term falls back to the carrier-wide figures rather than
+    pricing one. Returns (card, baseline, scope) with scope
+    ``"lane"`` or ``"carrier"``.
+    """
+    if (
+        lane_scorecard
+        and lane_baseline
+        and lane_scorecard.get("shipments", 0) >= RELIABILITY_MIN_SHIPMENTS
+    ):
+        return lane_scorecard, lane_baseline, "lane"
+    return scorecard, baseline, "carrier"
+
+
 def reliability_adjustment(
-    kind: str, scorecard: dict | None, baseline: dict | None
+    kind: str,
+    scorecard: dict | None,
+    baseline: dict | None,
+    *,
+    lane_scorecard: dict | None = None,
+    lane_baseline: dict | None = None,
 ) -> float:
     """The carrier reliability term for one option kind, in points.
 
-    ``unreliability`` is the carrier's excess over the fleet
-    baseline — damage excess counts double, because damage is the
-    failure waiting cannot undo:
+    ``unreliability`` is the carrier's excess over the baseline —
+    damage excess counts double, because damage is the failure
+    waiting cannot undo:
 
-        min(1, 2 * max(0, damage_rate - fleet_damage_rate)
-               + max(0, exception_rate - fleet_exception_rate))
+        min(1, 2 * max(0, damage_rate - baseline_damage_rate)
+               + max(0, exception_rate - baseline_exception_rate))
 
+    The figures are the lane's when the lane basis is active (see
+    :func:`_reliability_basis`), the carrier-wide ones otherwise.
     The term is that index scaled to at most
     ``RELIABILITY_MAX_POINTS`` and signed by the kind's factor.
     Zero when there is no scorecard, no baseline, too little
     history, a reliability-neutral kind, or a carrier performing
-    at/better than the fleet — the common case, by design.
+    at/better than the comparison — the common case, by design.
     """
-    if not scorecard or not baseline:
+    card, base, _scope = _reliability_basis(
+        scorecard, baseline, lane_scorecard, lane_baseline
+    )
+    if not card or not base:
         return 0.0
-    if scorecard.get("shipments", 0) < RELIABILITY_MIN_SHIPMENTS:
+    if card.get("shipments", 0) < RELIABILITY_MIN_SHIPMENTS:
         return 0.0
     factor = _RELIABILITY_FACTORS.get(kind, 0.0)
     if factor == 0.0:
         return 0.0
-    excess_damage = max(0.0, scorecard["damage_rate"] - baseline["damage_rate"])
-    excess_exception = max(
-        0.0, scorecard["exception_rate"] - baseline["exception_rate"]
-    )
+    excess_damage = max(0.0, card["damage_rate"] - base["damage_rate"])
+    excess_exception = max(0.0, card["exception_rate"] - base["exception_rate"])
     unreliability = min(1.0, 2.0 * excess_damage + excess_exception)
     if unreliability <= 0.0:
         return 0.0
     return round(RELIABILITY_MAX_POINTS * unreliability * factor, 2)
 
 
-def reliability_note(scorecard: dict, baseline: dict) -> str:
+def reliability_note(
+    scorecard: dict | None,
+    baseline: dict | None,
+    *,
+    lane_scorecard: dict | None = None,
+    lane_baseline: dict | None = None,
+) -> str:
     """The one-line workings of a run's reliability term, for the
-    trace/console: the numbers the adjustment came from."""
+    trace/console: the numbers the adjustment came from, read at
+    whichever basis was active — lane-conditioned when the lane
+    figures dominated, carrier-wide otherwise."""
+    card, base, scope = _reliability_basis(
+        scorecard, baseline, lane_scorecard, lane_baseline
+    )
+    if scope == "lane" and card is not None and base is not None:
+        return (
+            f"carrier reliability term applied (lane-conditioned): "
+            f"{card['carrier']} on {card.get('lane', '')} runs damage rate "
+            f"{card['damage_rate']} / exception rate {card['exception_rate']} "
+            f"against the lane's {base['damage_rate']} / "
+            f"{base['exception_rate']} over {card['shipments']} prior "
+            "shipment(s) on this lane — options that reduce reliance on "
+            "this carrier on this lane gain, waiting loses "
+            f"(max ±{RELIABILITY_MAX_POINTS:g} points, computed in options.py)"
+        )
+    card = card if card is not None else scorecard
+    base = base if base is not None else baseline
     return (
-        f"carrier reliability term applied: {scorecard['carrier']} runs "
-        f"damage rate {scorecard['damage_rate']} / exception rate "
-        f"{scorecard['exception_rate']} against the fleet's "
-        f"{baseline['damage_rate']} / {baseline['exception_rate']} "
-        f"over {scorecard['shipments']} prior shipment(s) — options "
+        f"carrier reliability term applied: {card['carrier']} runs "
+        f"damage rate {card['damage_rate']} / exception rate "
+        f"{card['exception_rate']} against the fleet's "
+        f"{base['damage_rate']} / {base['exception_rate']} "
+        f"over {card['shipments']} prior shipment(s) — options "
         "that reduce reliance on this carrier gain, waiting loses "
         f"(max ±{RELIABILITY_MAX_POINTS:g} points, computed in options.py)"
     )
@@ -197,6 +261,8 @@ def build_recovery_options(
     notes: list[str] | None = None,
     carrier_scorecard: dict | None = None,
     fleet_baseline: dict | None = None,
+    carrier_lane_scorecard: dict | None = None,
+    lane_baseline: dict | None = None,
 ) -> list[RecoveryOption]:
     """Propose (template or LLM), validate kinds, score in code, recommend.
 
@@ -207,6 +273,9 @@ def build_recovery_options(
     ``insights.py``) feed the reliability term on top of the base
     score — see :func:`reliability_adjustment`; both absent (the eval
     and first-run case) leaves every score exactly the base formula's.
+    ``carrier_lane_scorecard`` + ``lane_baseline`` are the same figures
+    for this shipment's lane alone: when the lane history is thick
+    enough they are the figures the term reads.
     """
     proposals: list[dict] | None = None
     propose_fn = getattr(backend, "propose_options", None) if backend is not None else None
@@ -237,7 +306,11 @@ def build_recovery_options(
     for i, proposal in enumerate(proposals):
         eta, cost, sla, score = score_option(proposal["kind"], delay_hours, severity)
         adjustment = reliability_adjustment(
-            proposal["kind"], carrier_scorecard, fleet_baseline
+            proposal["kind"],
+            carrier_scorecard,
+            fleet_baseline,
+            lane_scorecard=carrier_lane_scorecard,
+            lane_baseline=lane_baseline,
         )
         if adjustment:
             reliability_applied = True
@@ -255,8 +328,15 @@ def build_recovery_options(
                 carrier_reliability_adjustment=adjustment,
             )
         )
-    if reliability_applied and notes is not None and carrier_scorecard and fleet_baseline:
-        notes.append(reliability_note(carrier_scorecard, fleet_baseline))
+    if reliability_applied and notes is not None:
+        notes.append(
+            reliability_note(
+                carrier_scorecard,
+                fleet_baseline,
+                lane_scorecard=carrier_lane_scorecard,
+                lane_baseline=lane_baseline,
+            )
+        )
     if options:
         best = max(range(len(options)), key=lambda i: (options[i].score, -i))
         options[best].recommended = True

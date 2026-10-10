@@ -863,8 +863,11 @@ def build_graph(
         notes: list[str] = []
         # Scorecard-aware scoring: the service put the carrier's
         # track record and the fleet baseline in the run's history;
-        # the scorer's reliability term reads them (options.py). A
-        # direct run (evals, demos) has neither — base scores stand.
+        # the scorer's reliability term reads them (options.py). The
+        # lane figures ride along too — when the carrier's history
+        # on this lane is thick enough, they are the figures the
+        # term reads. A direct run (evals, demos) has none of them —
+        # base scores stand.
         history = state.get("history") or {}
         scored = build_recovery_options(
             exception_type=classification["exception_type"],
@@ -875,6 +878,8 @@ def build_graph(
             notes=notes,
             carrier_scorecard=history.get("carrier_scorecard"),
             fleet_baseline=history.get("fleet_baseline"),
+            carrier_lane_scorecard=history.get("carrier_lane_scorecard"),
+            lane_baseline=history.get("lane_baseline"),
         )
         recommended = next((o for o in scored if o.recommended), None)
         return {
