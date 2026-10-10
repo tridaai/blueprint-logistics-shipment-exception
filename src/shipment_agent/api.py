@@ -112,6 +112,7 @@ class ApproveRequest(BaseModel):
     # `approver` stays accepted as a legacy alias.
     actor: str | None = None
     approver: str | None = None
+    reason: str = ""  # optional — stored, and surfaces as feedback on later cases
 
 
 class RejectRequest(BaseModel):
@@ -166,7 +167,9 @@ def get_result(shipment_id: str) -> AgentResult:
 @app.post("/shipments/{shipment_id}/approve", response_model=AgentResult, dependencies=_AUTH)
 def approve(shipment_id: str, request: ApproveRequest) -> AgentResult:
     try:
-        return service.approve(shipment_id, approver=_decision_actor(request))
+        return service.approve(
+            shipment_id, approver=_decision_actor(request), reason=request.reason
+        )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

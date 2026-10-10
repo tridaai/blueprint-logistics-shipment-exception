@@ -52,6 +52,18 @@ def memory_evidence_lines(history: dict | None) -> list[str]:
             f"this carrier ({history.get('carrier', '')}) in the stored history "
             f"(exceptions: {breakdown})"
         )
+    for index, feedback in enumerate(history.get("feedback", [])):
+        verb = "reject" if feedback.get("decision") == "rejected" else "approve"
+        scope = (
+            "for this consignee"
+            if feedback.get("match") == "consignee"
+            else "on this lane"
+        )
+        when = "last" if index == 0 else "an earlier"
+        lines.append(
+            f"reviewer feedback: {when} decision {scope} was {verb} — "
+            f"reason: '{feedback.get('reason', '')}'"
+        )
     return lines
 
 

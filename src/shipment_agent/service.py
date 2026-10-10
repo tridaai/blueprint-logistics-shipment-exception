@@ -98,6 +98,12 @@ class ShipmentService:
             exclude_shipment_id=model.shipment_id
         )
         history = self._history_summary(model, priors)
+        # Feedback loop: what human deciders said about earlier cases
+        # for this consignee / lane (with their reasons) joins the same
+        # evidence — the next diagnosis shows the pattern of oversight.
+        feedback = self._feedback_for(model)
+        if feedback:
+            history = {**(history or {}), "feedback": feedback}
         result = run_shipment(
             model,
             backend=backend,
@@ -109,6 +115,53 @@ class ShipmentService:
             ApprovalRecord(result=result, shipment=model.model_dump(mode="json"))
         )
         return result
+
+    @staticmethod
+    def _consignee_of(shipment: ShipmentInput) -> str:
+        """The consignee memory matches on: customer name, else a
+        document's consignee field."""
+        return shipment.customer_name or next(
+            (
+                d.fields.get("consignee")
+                for d in shipment.documents
+                if d.fields.get("consignee")
+            ),
+            "",
+        )
+
+    def _feedback_for(self, shipment: ShipmentInput) -> list[dict]:
+        """Recent reviewer feedback matching this consignee or lane.
+
+        Bounded to the last 3 matching decisions (the store returns
+        newest first), reasons truncated — feedback is evidence, not a
+        transcript. Each entry: {decision, reason, match} where match
+        is "consignee" or "lane" (consignee wins when both match).
+        """
+        entries = self._get_store().decision_feedback(
+            exclude_shipment_id=shipment.shipment_id
+        )
+        if not entries:
+            return []
+        consignee = self._consignee_of(shipment)
+        lane = f"{shipment.origin} -> {shipment.destination}"
+        matched: list[dict] = []
+        for entry in entries:
+            if consignee and entry["consignee"] == consignee:
+                match = "consignee"
+            elif entry["lane"] == lane:
+                match = "lane"
+            else:
+                continue
+            matched.append(
+                {
+                    "decision": entry["decision"],
+                    "reason": entry["reason"][:160],
+                    "match": match,
+                }
+            )
+            if len(matched) == 3:
+                break
+        return matched
 
     def _history_summary(
         self, shipment: ShipmentInput, priors: list[dict] | None = None
@@ -126,14 +179,7 @@ class ShipmentService:
             )
         if not priors:
             return None
-        consignee = shipment.customer_name or next(
-            (
-                d.fields.get("consignee")
-                for d in shipment.documents
-                if d.fields.get("consignee")
-            ),
-            "",
-        )
+        consignee = self._consignee_of(shipment)
         lane = f"{shipment.origin} -> {shipment.destination}"
 
         def summarize(entries: list[dict]) -> tuple[int, list[str]]:
@@ -160,7 +206,9 @@ class ShipmentService:
             "carrier_type_counts": carrier["carrier_type_counts"],
         }
 
-    def approve(self, shipment_id: str, approver: str) -> AgentResult:
+    def approve(
+        self, shipment_id: str, approver: str, reason: str = ""
+    ) -> AgentResult:
         store = self._get_store()
         record = store.get(shipment_id)
         if record is None:
@@ -176,8 +224,10 @@ class ShipmentService:
             )
         record.approved = True
         record.approver = approver
+        record.approve_reason = reason
         record.result.approval_status = "approved"
         record.result.decided_by = approver
+        record.result.decision_reason = reason or None
         # Output routing: by default there is NO external action. When
         # the operator configures ACTION_WEBHOOK_URL, the approved
         # packet is POSTed to that endpoint (the customer's system of
@@ -206,6 +256,7 @@ class ShipmentService:
         record.reject_reason = reason
         record.result.approval_status = "rejected"
         record.result.decided_by = reviewer
+        record.result.decision_reason = reason or None
         record.result.external_action_taken = False
         store.save(record)
         return record.result

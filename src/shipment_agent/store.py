@@ -34,6 +34,7 @@ class ApprovalRecord:
     shipment: dict | None = None  # the analysed ShipmentInput, for history lookups
     approver: str | None = None
     approved: bool = False
+    approve_reason: str = ""
     rejected_by: str | None = None
     reject_reason: str = ""
     dispatch_status: str | None = None  # outbound webhook outcome, when configured
@@ -67,6 +68,36 @@ def history_entry(record: ApprovalRecord) -> dict | None:
         "lane": f"{shipment.get('origin', '')} -> {shipment.get('destination', '')}",
         "exception_type": classification.exception_type.value,
         "severity": classification.severity.value,
+    }
+
+
+def feedback_entry(record: ApprovalRecord) -> dict | None:
+    """One reviewer-feedback entry from a decided record, or None.
+
+    The feedback loop learns from oversight: a decision only teaches
+    when the decider said *why*. Undecided records and reasonless
+    decisions contribute nothing. Consignee/lane come from the same
+    history entry the memory lookup uses, so feedback matches a new
+    case exactly where memory would.
+    """
+    if record.approved:
+        decision, reason, decider = "approved", record.approve_reason, record.approver
+    elif record.rejected_by:
+        decision, reason, decider = "rejected", record.reject_reason, record.rejected_by
+    else:
+        return None
+    if not (reason or "").strip():
+        return None
+    entry = history_entry(record)
+    if entry is None:
+        return None
+    return {
+        "shipment_id": entry["shipment_id"],
+        "consignee": entry["consignee"],
+        "lane": entry["lane"],
+        "decision": decision,
+        "reason": reason,
+        "decided_by": decider or "",
     }
 
 
@@ -106,6 +137,7 @@ class ApprovalStore(Protocol):
     def save(self, record: ApprovalRecord) -> None: ...
     def get(self, shipment_id: str) -> ApprovalRecord | None: ...
     def prior_shipments(self, exclude_shipment_id: str | None = None) -> list[dict]: ...
+    def decision_feedback(self, exclude_shipment_id: str | None = None) -> list[dict]: ...
 
 
 class InMemoryStore:
@@ -126,6 +158,16 @@ class InMemoryStore:
             if record.result.shipment_id == exclude_shipment_id:
                 continue
             entry = history_entry(record)
+            if entry is not None:
+                entries.append(entry)
+        return entries
+
+    def decision_feedback(self, exclude_shipment_id: str | None = None) -> list[dict]:
+        entries = []
+        for record in reversed(list(self._records.values())):
+            if record.result.shipment_id == exclude_shipment_id:
+                continue
+            entry = feedback_entry(record)
             if entry is not None:
                 entries.append(entry)
         return entries
@@ -161,6 +203,10 @@ class SQLiteStore:
                 conn.execute("ALTER TABLE approvals ADD COLUMN shipment_json TEXT")
             if "dispatch_status" not in columns:
                 conn.execute("ALTER TABLE approvals ADD COLUMN dispatch_status TEXT")
+            if "approve_reason" not in columns:
+                conn.execute(
+                    "ALTER TABLE approvals ADD COLUMN approve_reason TEXT NOT NULL DEFAULT ''"
+                )
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._path)
@@ -175,8 +221,8 @@ class SQLiteStore:
                 """
                 INSERT OR REPLACE INTO approvals
                     (shipment_id, result_json, shipment_json, approver, approved,
-                     rejected_by, reject_reason, dispatch_status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     rejected_by, reject_reason, dispatch_status, approve_reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.result.shipment_id,
@@ -187,6 +233,7 @@ class SQLiteStore:
                     record.rejected_by,
                     record.reject_reason,
                     record.dispatch_status,
+                    record.approve_reason,
                 ),
             )
 
@@ -203,6 +250,7 @@ class SQLiteStore:
             shipment=shipment,
             approver=row["approver"],
             approved=bool(row["approved"]),
+            approve_reason=row["approve_reason"] if "approve_reason" in keys else "",
             rejected_by=row["rejected_by"],
             reject_reason=row["reject_reason"],
             dispatch_status=row["dispatch_status"] if "dispatch_status" in keys else None,
@@ -228,6 +276,21 @@ class SQLiteStore:
             if record.result.shipment_id == exclude_shipment_id:
                 continue
             entry = history_entry(record)
+            if entry is not None:
+                entries.append(entry)
+        return entries
+
+    def decision_feedback(self, exclude_shipment_id: str | None = None) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM approvals ORDER BY rowid DESC"
+            ).fetchall()
+        entries = []
+        for row in rows:
+            record = self._row_to_record(row)
+            if record.result.shipment_id == exclude_shipment_id:
+                continue
+            entry = feedback_entry(record)
             if entry is not None:
                 entries.append(entry)
         return entries

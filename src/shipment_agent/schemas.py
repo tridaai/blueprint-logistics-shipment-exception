@@ -466,6 +466,7 @@ class AgentResult(BaseModel):
     trace: list[TraceStep] = Field(default_factory=list)
     approval_status: str = "awaiting_approval"
     decided_by: str | None = None  # who approved/rejected, once decided
+    decision_reason: str | None = None  # the decider's stated reason, once decided (echo)
     dispatch_status: str | None = None  # sent | failed — only when ACTION_WEBHOOK_URL is set
     external_action_taken: bool = False
     disclaimer: str = (
