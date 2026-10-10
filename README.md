@@ -37,7 +37,7 @@ the offline smoke-test backend. The primary workflow is
 ```bash
 uv sync --extra dev              # 1 · install the locked set (uv.lock)
 uv run shipment-agent-demo       # 2 · one shipment, end to end, with a trace
-uv run pytest -q                 # 3 · the full test suite (306 tests)
+uv run pytest -q                 # 3 · the full test suite (343 tests)
 ```
 
 No uv? Create a virtual environment and use pip. The direct dependencies
@@ -107,8 +107,9 @@ lose hours and consistency.
 
 ## What this agent does
 
-For one shipment, end to end — an eleven-node LangGraph pipeline where the
-model does language work and code does every number:
+For one shipment, end to end — a LangGraph pipeline (eleven traced steps,
+an evidence fan-out, and a checkpointed approval gate) where the model
+does language work and code does every number:
 
 1. **Extracts** document fields (bill of lading, invoice, event text):
    with an LLM backend, the model extracts typed fields with per-field
@@ -189,14 +190,23 @@ model does language work and code does every number:
     Nothing is sent, filed, or posted anywhere — a human approves
     first.
 
-Two cross-cutting controls wrap the pipeline: a **per-run token
+Cross-cutting controls wrap the pipeline: a **per-run token
 budget** (`RUN_TOKEN_BUDGET`) degrades the remaining provider steps to
 their deterministic paths once a run's tokens pass the cap — the run
 finishes, the trace says which steps degraded, and telemetry reports
-the accounting — and the service layer analyses **batches
-concurrently** (`analyze_batch`, CLI `--all --concurrency N`), with
-one bad shipment captured in its own result instead of failing the
-batch.
+the accounting; a **resilience policy** (`resilience.py`) gives every
+provider call a timeout (`NODE_TIMEOUT_SECONDS`) and one retry for the
+idempotent language steps; the **evidence phase fans out** — retrieval,
+the extraction cross-check, and history evidence run concurrently and
+merge before diagnosis (results identical to the sequential schedule,
+pinned by an equivalence test); the **approval gate is checkpointed**
+(`CHECKPOINTS`, on by default) — the run pauses in the graph and a
+decision resumes its thread, surviving restarts; every run **streams
+structured events** (CLI `--stream`, or `POST /shipments/analyze/stream`
+as Server-Sent Events) with per-node durations that also land on the
+trace; and the service layer analyses **batches concurrently**
+(`analyze_batch`, CLI `--all --concurrency N`), with one bad shipment
+captured in its own result instead of failing the batch.
 
 **The classification resolution policy** (implemented in
 `crosscheck.py`, shown in the result and the trace): rules are
@@ -246,7 +256,10 @@ Use these seams to adapt it — each is one file or one setting:
   `src/shipment_agent/classifier.py`, and golden cases in
   `evals/golden.jsonl`.
 - **Real intake** — `POST /shipments/analyze` (FastAPI, `api.py`) accepts
-  the same JSON shape a TMS or carrier webhook can produce; approvals are
+  the same JSON shape a TMS or carrier webhook can produce;
+  `POST /shipments/analyze/stream` returns the run as Server-Sent
+  Events (live node/tool/guardrail events, the full result on the
+  final event); approvals are
   `POST /shipments/{id}/approve|reject` in `service.py`, where the action
   layer (send/file) plugs in behind the gate. The full contract —
   fields, document vocabulary, and how messy real payloads are
@@ -413,9 +426,12 @@ API, CLI, and traced demo — read the same variables.**
 | `CHROMA_DIR` | `<repo>/.chroma` | Local Chroma store directory (embedded mode; git-ignored) |
 | `CHROMA_HOST` / `CHROMA_PORT` | — / `8000` | Talk to a Chroma server instead of the embedded store (the local Docker stack sets these) |
 | `STATE_DB_PATH` | `<repo>/.data/state.db` | SQLite file for analyses + approval decisions (`:memory:` = in-memory test double) |
+| `CHECKPOINTS` | `on` | Checkpointed approval gate: runs pause in the graph at the gate and approve/reject resume the thread. `off`/`0`/`false`/`no` = the store-only flow |
+| `CHECKPOINT_DB_PATH` | `<repo>/.data/checkpoints.db` | SQLite file for LangGraph checkpoint state (graph state only — the store above remains the record of decisions) |
 | `API_KEY` | — (unset) | When set, data endpoints require the `X-API-Key` header; when unset the API is open (local dev) |
 | `LLM_JUDGE_MODEL` | backend's model | Judge model for the opt-in LLM eval pack |
 | `LLM_TIMEOUT_SECONDS` | `60` | Request timeout for provider API calls. SDK retries are disabled (`max_retries=0`), so a dead endpoint fails within this timeout instead of stalling on silent retries |
+| `NODE_TIMEOUT_SECONDS` | `180` | Resilience ceiling per provider call at a pipeline node; a call that exceeds it becomes a clean provider error and the idempotent language steps retry once (see `resilience.py`) |
 | `DIAGNOSIS_MAX_TOOL_CALLS` | `4` | Agentic diagnosis (provider mode): cap on tool calls (`search_policies` / `lane_history` / `shipment_facts` / `carrier_history`) the diagnosis loop may make before composing. Hard cap 6 |
 | `GUARDRAIL_REPAIR` | `on` | Bounded repair loop on guardrail failure: `off`/`0`/`false`/`no` disables it |
 | `GUARDRAIL_REPAIR_MAX_ATTEMPTS` | `1` | Redraft attempts per run when repair is on (hard cap 3) |
@@ -584,7 +600,7 @@ the verified facts (invented ETAs and prohibited promises fail the pack),
 with per-case tokens, latency, and estimated cost. It fails loudly
 without a real provider and is never part of the default gate or CI.
 
-Test suite: **306 tests, all passing** (`pytest -q`) — classifier, tools,
+Test suite: **343 tests, all passing** (`pytest -q`) — classifier, tools,
 retriever (keyword, semantic, hybrid + rerank, Chroma path with a faked
 client), the retrieval query built from shipment content, intake
 normalization (doc-type aliases, numeric coercion, the skipped-check
@@ -621,7 +637,10 @@ external network or a real API key.
 ## Repository structure
 
 ```
-src/shipment_agent/   agent graph (11 nodes), classifier + cross-check,
+src/shipment_agent/   agent graph (11 traced steps + evidence fan-out
+                      branches + checkpointed gate), ports (protocols)
+                      and wiring (composition root), run-event streaming,
+                      resilience policy, classifier + cross-check,
                       extractor, injection screening, diagnosis (agentic
                       tool loop in provider mode), options scorer,
                       retriever (keyword / semantic / hybrid, Chroma or
@@ -630,15 +649,15 @@ src/shipment_agent/   agent graph (11 nodes), classifier + cross-check,
                       reviewer feedback loop, clarification requests,
                       telemetry, autonomy policy, provider-error
                       translation, model backends (mock / OpenAI /
-                      Anthropic / Ollama), SQLite approval store,
-                      FastAPI app + web UI (static/), demo trace, CLI,
-                      service layer (incl. concurrent batch), bundled
-                      samples (data/)
+                      Anthropic / Ollama), SQLite approval store + SQLite
+                      checkpointer, FastAPI app + web UI (static/), demo
+                      trace, CLI, service layer (incl. concurrent batch),
+                      bundled samples (data/)
 docs/architecture.md  full architecture and productionisation notes
 data/sample/          synthetic shipments (14) + policy corpus mirror
 evals/                golden dataset (32 cases) + run_evals.py +
                       run_llm_evals.py (opt-in LLM-judge pack)
-tests/                306 pytest tests: unit, integration, API, UI,
+tests/                343 pytest tests: unit, integration, API, UI,
                       negation, persistence, auth, LLM backends and
                       eval pack (mocked SDKs), config, retrieval
 docker-compose.yml    agent only (offline fallback) — unchanged default

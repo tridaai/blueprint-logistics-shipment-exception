@@ -25,30 +25,42 @@ exactly where an unreviewed agent does reputational and financial damage.
 
 ```
 Shipment input (events + documents, JSON)
-        │
-        ▼
-┌─────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
-│   extract   │──►│    ingest    │──►│   classify   │──►│   retrieve   │
-│ LLM fields +│   │ validate,    │   │ rules × LLM  │   │ keyword /    │
-│ confidence, │   │ compute      │   │ cross-check  │   │ semantic /   │
-│ code-checked│   │ facts        │   │              │   │ hybrid+rerank│
-└─────────────┘   └──────────────┘   └──────────────┘   └──────────────┘
-                                                              │
-        ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐  ▼
-        │   human_   │◄──│   validate   │◄──│    review    │◄──│    verify    │◄─ draft ◄─ diagnose ─► options
-        │   approval │   │ guardrails   │   │ independent  │   │ self-critique│   (grounded on  (root cause;  (proposed,
-        │   (GATE)   │   │ as code +    │   │ reviewer     │   │ vs facts     │    recommended)  cited)        scored by code)
-        │            │   │ repair loop  │   │              │   │              │
-        └──────────────┘   └──────────────┘   └──────────────┘   └──────────────┘
-              │
-              ▼
-            END — no external action exists in this graph
-            (an approval may POST to an operator-configured webhook — §4)
+        |
+        v
+   extract --+                     (evidence fan-out: the bracketed
+             +--> classify --+--> retrieve ------+   branches run
+   ingest ---+               +--> discrepancies -+   concurrently and
+                             +--> history -------+   merge before diagnose)
+                                                      |
+        +---------------------------------------------+
+        v
+   diagnose -> options -> draft -> verify -> review -> validate
+   (root cause, (proposed,  (grounded  (self-     (indep.   (guardrails
+    agentic       scored      on recom-   critique   reviewer)  as code +
+    tool loop)    by code)    mendation)  vs facts)            repair loop)
+                                                      |
+                                                      v
+   human_approval -> approval_gate ==> END
+   (attaches the     (checkpointed pause: with CHECKPOINTS on (default)
+    autonomy note,    the run interrupts here and its graph state
+    the info request, persists in SQLite under thread_id = shipment id;
+    the telemetry)    approve/reject records the decision in the store
+                      and RESUMES the thread -- see section 4)
+
+Every node emits run events (node_started / node_finished{duration_ms},
+tool_called, guardrail_verdict, repair_attempted, ...) to an EventSink --
+streamed live by the CLI (--stream) and the API (SSE), section 4.
+No external action exists in this graph; an approval may POST to an
+operator-configured webhook from the service layer -- section 4.
 ```
 
 Implemented as a LangGraph `StateGraph` (`src/shipment_agent/graph.py`).
-Surfaced through FastAPI (`api.py`), a traced demo (`demo.py`), a batch
-CLI (`cli.py`), and a service layer that records approvals (`service.py`).
+The seams are protocols (`ports.py` — ModelBackend, Retriever, Store,
+EventSink, Checkpointer) and one composition root (`wiring.py`) builds
+the service from configuration; the entry points (FastAPI `api.py`, the
+traced demo `demo.py`, the batch CLI `cli.py`) never construct their
+own pieces. The service layer (`service.py`) records approvals and
+resumes checkpointed threads.
 
 ## 3. Graph and state design
 
@@ -69,6 +81,8 @@ serialisable shape:
 | `classify_note` | classify | the translated provider error when the LLM cross-check degraded to rules-only |
 | `policies` | retrieve | top-3 policy snippets with scores (+ how each was retrieved) |
 | `retrieval_info` | retrieve | mode, hybrid pool stats, vector store that served |
+| `extraction_discrepancies` | discrepancies (fan-out branch) | the extraction cross-check lines, computed concurrently with retrieval |
+| `history_evidence` | history (fan-out branch) | the memory + reviewer-feedback evidence lines, computed concurrently with retrieval |
 | `history` | service (memory) | prior-shipment summary for this consignee + lane, or `None`; recent reviewer-feedback entries for the case ride along under `feedback` |
 | `diagnosis` | diagnose | root cause, summary, evidence list (incl. memory lines), policy citations |
 | `recovery_options` | options | proposed options with code-computed scores |
@@ -437,6 +451,66 @@ default 5s). The outcome is recorded as `dispatch_status`
 (`sent`/`failed`) on the result; a failed dispatch never undoes the
 approval. Unset (the default), approval performs no external action.
 
+**The gate is also a checkpoint.** With `CHECKPOINTS` on (the default),
+the graph carries a LangGraph checkpointer and the final
+`approval_gate` node pauses the run with `interrupt()`; the graph
+state persists in SQLite (`.data/checkpoints.db`,
+`CHECKPOINT_DB_PATH` to move it) under `thread_id` = the shipment
+record id. `approve`/`reject` then *resume* the thread with the
+decision and the graph completes — a process restart between analysis
+and decision loses nothing. The responsibilities are split on purpose:
+the **store is the record of decisions** (the only thing the decision
+flow reads; a missing or finished thread never blocks a decision),
+the **checkpointer holds graph state** (where the run paused and what
+it carried). Each re-analysis starts a fresh thread, matching the
+store's replace-on-reanalyse behaviour. The pinned LangGraph ships
+the checkpoint base plus an in-memory saver only (its SQLite saver is
+a separate package), so `checkpoints.py` implements that base over
+stdlib `sqlite3` — per-call connections, LangGraph's own serde, WAL
+journal mode. `CHECKPOINTS=off` attaches no checkpointer and the flow
+is the pre-checkpoint one, unchanged.
+
+**The evidence phase fans out.** Retrieval, the extraction
+cross-check, and the history/feedback evidence are independent reads
+over disjoint inputs, so after classification they run as parallel
+LangGraph branches (with `extract`/`ingest` likewise concurrent
+before the classification join) and merge — disjoint state keys, so
+the merge is order-stable — before diagnose. LangGraph branches were
+chosen over a thread pool inside one node because each branch stays a
+named, traced, individually timed node. `evidence_mode="sequential"`
+chains the same node functions linearly, and an equivalence test pins
+parallel ≡ sequential results field by field on every sample.
+
+**Runs are observable as events, not just results.** Every node is
+wrapped: an `EventSink` (a `ports.py` protocol) receives structured
+events — `run_started`, `node_started`, `node_finished` (with
+`duration_ms`), `tool_called`, `guardrail_verdict`,
+`repair_attempted`, `run_completed`, `run_failed` — in every mode,
+including the offline fallback. Surfaces: the CLI's `--stream` prints
+them live; `POST /shipments/analyze/stream` returns them as
+Server-Sent Events with the full result JSON merged into the final
+event; the non-stream paths are unchanged, and the same durations
+land on the trace steps (`duration_ms`).
+
+**Provider calls carry a resilience policy.** `resilience.py` is one
+policy table, applied as a backend wrapper (outside the token-budget
+guard, so retries re-check the budget): every provider call runs
+under a per-node timeout (`NODE_TIMEOUT_SECONDS`, default 180 — the
+ceiling above the SDK's own per-request timeout), and only the
+idempotent language steps (extract, classify cross-check, diagnose,
+options, verify, review) retry on `ProviderError` — max 2 attempts,
+small backoff, recorded in the trace ("attempt 2 after provider
+error"). Drafting never retries (a redraft is a guardrail decision,
+not a transport retry) and nothing at or past the gate retries.
+
+**Ports and one composition root.** The seams the engine already had
+are declared as `typing.Protocol`s in `ports.py` (ModelBackend,
+Retriever, Store, EventSink, Checkpointer) — implementations re-export
+them, so existing imports keep working — and `wiring.py` is the single
+place that builds backend / retriever / store / checkpointer / service
+from configuration. API, CLI, and demo all take their service from
+it; nothing else constructs pipeline pieces.
+
 ## 5. Data model
 
 Inputs are deliberately boring JSON: a shipment, its schedule, its latest
@@ -489,7 +563,8 @@ always means "compared and agreed".
 | Novel exception phrasing | may classify as `none` — visible in evals as a miss; golden set grows from these |
 | Retrieved policies irrelevant | draft still carries citations; approver sees policy titles and can reject |
 | LLM backend unavailable at startup | explicit RuntimeError at construction naming the fix (missing key or missing `llm` extra); no silent fallback to the mock |
-| Provider unreachable mid-run (e.g. Ollama down) | translated `ProviderError` naming backend, endpoint, likely fix; degradable nodes fall back with the reason in the trace; a drafting failure ends the run cleanly (CLI/demo exit 1, API 502). No SDK retries — fails within `LLM_TIMEOUT_SECONDS` |
+| Provider unreachable mid-run (e.g. Ollama down) | translated `ProviderError` naming backend, endpoint, likely fix; the resilience policy retries the idempotent language steps once (trace records the retry); degradable nodes then fall back with the reason in the trace; a drafting failure ends the run cleanly (CLI/demo exit 1, API 502). No SDK-level retries — bounded by `LLM_TIMEOUT_SECONDS` per request and `NODE_TIMEOUT_SECONDS` per node call |
+| Provider call hangs (endpoint accepts, never answers) | the node timeout fires: a clean `ProviderError` naming `NODE_TIMEOUT_SECONDS`; degradable steps fall back as above. The abandoned worker thread is bounded by the SDK's own timeout |
 | Provider client cannot even be constructed (e.g. a `NO_PROXY` entry like `[::1]` the HTTP library cannot parse) | translated `ProviderError` from the construction site itself — naming the backend, the endpoint, and the proxy variables to check — surfaced through the same CLI/API error paths, never a raw SDK traceback |
 | LLM classification malformed/unavailable | cross-check records `rules_only` with the failure in its note; the rule result stands and the run continues |
 | LLM extraction / diagnosis / options / verification failure | that node falls back to provided fields / the evidence template / template options / the deterministic checklist; the fallback is recorded in the trace and the run continues |
@@ -634,6 +709,12 @@ Ordered by value when adapting this blueprint to your own operation:
   decisions per consignee/lane match, no weighting or decay.
 - The autonomy recommendation is policy, not learning: its band
   (none/low) is a starting posture a customer tunes, and it never acts.
+- The checkpointer is a minimal SQLite saver written for this
+  blueprint (the pinned LangGraph's SQLite saver is a separate
+  package): single-host, WAL-mode, serde-compatible with LangGraph's
+  own — a production deployment with concurrent writers across hosts
+  would swap it for the packaged saver or a Postgres checkpointer
+  behind the same `Checkpointer` protocol.
 - The Docker local stack (agent + Ollama + Chroma) is reviewed but not
   build-verified — no Docker daemon in the development environment.
 - No carrier/TMS integration and no claims filing — by design; the only
