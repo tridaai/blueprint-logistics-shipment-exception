@@ -353,6 +353,34 @@ cases that named the weakness (RQ-17/21/34) go from recall 0 to
 1.0, and keyword mean recall@3 on the 42-case set rises from
 91.7% to 98.8% with no case regressed.
 
+Round 10 is the round a live run demanded. The full pipeline
+ran live on NVIDIA's Nemotron-3-Super (13 model calls) and the
+model's draft **failed the guardrails** — no shipment ID, no
+next step — and the bounded repair could not fix what it could
+not name. So: the drafting prompt now carries the draft's
+required structural elements explicitly, and the repair
+feedback names **each failed guardrail check — advisory ones
+included** — with the element the redraft must contain; a
+stub-backend regression pins a draft missing both elements
+being repaired into a passing one, and the offline template
+path stays byte-stable. The **semantic half of retrieval gains
+the keyword half's polarity**: denied signal phrases are struck
+from the query before embedding (the corpus is embedded as
+written), and hybrid stand-in mean recall@3 on the 42-case set
+reaches 100%. The **digest gains a memory**: each sweep records
+one snapshot per tenant (migration `0010`, the corpus-ledger
+idiom — counts, ids, stages, and a content hash, pruned to a
+retention window), `GET /queue/digest?compare=previous` answers
+what moved since the previous picture, and
+`GET /queue/digest/history` serves a tenant's series. And the
+**trace tree gains the diagnosis' tool calls** — one span per
+lookup with its measured duration — which surfaced a latent
+break the new spans exposed: timed provider calls ran on a
+worker thread that dropped the caller's tracing context, so
+every provider span had been landing as a disconnected root;
+the timed call now inherits the context, and a real run
+exports one tree.
+
 **The classification resolution policy** (implemented in
 `crosscheck.py`, shown in the result and the trace): rules are
 authoritative on disagreement — **except** when the rules land on

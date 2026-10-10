@@ -185,7 +185,13 @@ stops scoring for the damage policy; a document affirming a denied
 signal loses a point per denial, and a document affirming no
 exception signal at all gains one per denial, denial being evidence
 of the absence those documents govern),
-`SemanticRetriever` (embedding cosine, same return shape), and
+`SemanticRetriever` (embedding cosine, same return shape — and
+the same polarity, read from the other side: before embedding,
+the query's denied signal phrases are struck from the embedding
+input, so a stated absence cannot pull the exception's policies
+up the cosine ranking either; the corpus side is embedded as
+written, because a policy's text is the thing being governed),
+and
 `HybridRetriever`. Hybrid retrieves a candidate pool from both (2×
 top-k each), deduplicates by policy ID, and **reranks by reciprocal-rank
 score fusion** (RRF, k=60) down to the cited top-3 — the trace shows
@@ -277,7 +283,16 @@ the approver and input to repair. On guardrail failure, a **bounded
 repair loop** (`GUARDRAIL_REPAIR`, default on;
 `GUARDRAIL_REPAIR_MAX_ATTEMPTS`, default 1, hard cap 3) redrafts with
 the failure reasons and self-verification issues fed back into the
-drafting prompt, then re-verifies, re-reviews, and re-validates. The original
+drafting prompt, then re-verifies, re-reviews, and re-validates.
+Two disciplines make that loop worth its tokens, both learned from
+a live provider run whose draft failed the gate: the drafting
+prompt itself carries the draft's **required structural elements**
+(the shipment ID in the body, a closing next step, the governing
+policies cited — a model cannot be repaired into a shape it was
+never shown), and the repair feedback names **each failed check —
+advisory checks included** — with the element the redraft must
+contain, in place of a rewritten instruction list a long reply
+buries. The original
 failure is preserved as `original_validation` and the attempt flagged
 (`repair_attempted` / `repaired`). The guardrail rules themselves do
 not change, and with repair off a failed draft behaves exactly as a
@@ -845,14 +860,30 @@ Ordered by value when adapting this blueprint to your own operation:
    in-process: behind `OTEL_EXPORTER_OTLP_ENDPOINT` (and the
    `otel` extra), every run exports an OpenTelemetry span tree —
    `shipment.run` over one span per graph node over one span per
-   provider call — with attributes allowlisted to ids and counts
+   provider call, with the diagnosis' tool calls spanned under
+   their node as well (tool name, measured duration, outcome) —
+   with attributes allowlisted to ids and counts
    (never shipment content), off by default (see `tracing.py`).
+   One subtlety the tree depends on: provider calls run on a
+   worker thread to hold their timeout, and the thread inherits
+   the caller's `contextvars` context — a bare thread hop starts
+   from an empty context and every span inside the call lands as
+   a disconnected root, so the timeout must never change whose
+   call it is.
    The queue also has its shift-level read: the SLA sweep composes
    an **escalation digest** (breaches by stage, the last 24h of
    ladder firings naming the per-severity factors, oldest waiter
    per severity per tenant, stale workers, open key-rotation
    windows) into a summary row (migration `0008`) that
-   `GET /queue/digest` pulls. Production extends the tracing
+   `GET /queue/digest` pulls. The sweep also keeps the picture:
+   one snapshot per tenant per digest in a dated series
+   (migration `0010` — stage counts, awaiting ids and stages,
+   firings, the rotation window's state, a SHA-256 of the entry;
+   metadata only, pruned to a retention window), so
+   `GET /queue/digest?compare=previous` can answer what moved —
+   new escalations, worsened and resolved shipments, the firings
+   between the two pictures — and `GET /queue/digest/history`
+   serves a tenant's series. Production extends the tracing
    across the customer's own systems and adds classification
    drift dashboards.
 6. **Evals as a regression gate:** the golden dataset grows from real
