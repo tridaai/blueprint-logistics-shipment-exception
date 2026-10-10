@@ -25,9 +25,9 @@ from .config import silence_langchain_deprecation_warnings
 silence_langchain_deprecation_warnings()
 
 from .graph import run_shipment
-from .model_backends import ModelBackend, get_backend
-from .retriever import Retriever, get_retriever
+from .ports import ModelBackend, Retriever
 from .samples import sample_shipment_models
+from .wiring import build_backend, build_retriever
 
 _LINE = "=" * 74
 
@@ -37,8 +37,8 @@ def print_trace(
     backend: ModelBackend | None = None,
     retriever: Retriever | None = None,
 ) -> None:
-    backend = backend or get_backend()
-    retriever = retriever or get_retriever()
+    backend = backend or build_backend()
+    retriever = retriever or build_retriever()
     shipments = sample_shipment_models()
     shipment = shipments[index]
     result = run_shipment(shipment, backend=backend, retriever=retriever)

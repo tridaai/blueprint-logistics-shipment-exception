@@ -28,7 +28,6 @@ import sqlite3
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
 
 from .config import env_str, load_dotenv
 from .schemas import AgentResult
@@ -139,11 +138,10 @@ def format_type_counts(type_counts: dict[str, int]) -> str:
     return ", ".join(f"{name}×{count}" for name, count in ordered)
 
 
-class ApprovalStore(Protocol):
-    def save(self, record: ApprovalRecord) -> None: ...
-    def get(self, shipment_id: str) -> ApprovalRecord | None: ...
-    def prior_shipments(self, exclude_shipment_id: str | None = None) -> list[dict]: ...
-    def decision_feedback(self, exclude_shipment_id: str | None = None) -> list[dict]: ...
+# The Store protocol is declared in ports.py (the seam registry) and
+# aliased here under its long-standing name, so existing imports keep
+# working.
+from .ports import Store as ApprovalStore  # noqa: E402,F401
 
 
 class InMemoryStore:

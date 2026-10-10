@@ -26,12 +26,12 @@ from .config import silence_langchain_deprecation_warnings
 silence_langchain_deprecation_warnings()
 
 from .graph import run_shipment
-from .model_backends import ModelBackend, get_backend
-from .retriever import Retriever, get_retriever
+from .ports import ModelBackend, Retriever
 from .samples import load_sample_shipments
 from .schemas import AgentResult, ShipmentInput
-from .service import BatchItem, ShipmentService
+from .service import BatchItem
 from .store import InMemoryStore
+from .wiring import build_backend, build_retriever, build_service_from_env
 
 
 def _load_shipments(path: Path | None) -> list[ShipmentInput]:
@@ -114,7 +114,7 @@ def _run_batch(shipments: list[ShipmentInput], concurrency: int) -> list[BatchIt
     store (the CLI persists nothing), each item rendered as it lands.
     Configuration was already resolved by main() before this runs, so a
     misconfigured backend fails loudly there, not per item here."""
-    service = ShipmentService(store=InMemoryStore())
+    service = build_service_from_env(store=InMemoryStore())
     items = service.analyze_batch(shipments, concurrency=concurrency)
     for shipment, item in zip(shipments, items):
         if item.error:
@@ -162,8 +162,8 @@ def main() -> None:
     # and so does a provider failure mid-run (e.g. Ollama not running):
     # provider errors arrive pre-translated via errors.ProviderError.
     try:
-        backend = get_backend()
-        retriever = get_retriever()
+        backend = build_backend()
+        retriever = build_retriever()
         shipments = _load_shipments(args.file)
         selected = shipments if args.all else [shipments[args.index]]
         started = time.perf_counter()

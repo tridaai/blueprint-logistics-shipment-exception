@@ -24,7 +24,7 @@ from .errors import ProviderError
 from .policies_data import POLICIES
 from .samples import load_sample_shipments
 from .schemas import AgentResult, ShipmentInput
-from .service import ShipmentService
+from .wiring import build_service_from_env
 
 # Load the repo-root .env at startup (real environment variables win), so
 # MODEL_BACKEND / RETRIEVER / API keys can live in the file — see .env.example.
@@ -58,7 +58,7 @@ app = FastAPI(
     version="0.1.0",
 )
 
-service = ShipmentService()
+service = build_service_from_env()
 
 
 @app.exception_handler(ProviderError)

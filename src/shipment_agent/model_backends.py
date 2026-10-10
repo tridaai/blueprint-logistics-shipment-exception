@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Protocol
 
 from .config import env_float, env_str, load_dotenv
 from .errors import translate_construction_error, translate_provider_error
@@ -94,12 +93,9 @@ class DraftContext(dict):
     """Loose dict of values used to render a draft (see graph.draft node)."""
 
 
-class ModelBackend(Protocol):
-    name: str
-
-    def draft_customer_update(self, context: DraftContext) -> tuple[str, str]:
-        """Return (subject, body) for a customer update draft."""
-        ...
+# The ModelBackend protocol is declared in ports.py (the seam
+# registry); it is re-exported here so existing imports keep working.
+from .ports import ModelBackend  # noqa: E402,F401
 
 
 _NEXT_STEP = {

@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Protocol
 
 from .config import env_float, env_str, load_dotenv
 from .errors import translate_construction_error, translate_provider_error
@@ -44,8 +43,9 @@ def _tokens(text: str) -> list[str]:
     return [t for t in re.findall(r"[a-z0-9]+", text.lower()) if t not in _STOPWORDS]
 
 
-class Retriever(Protocol):
-    def retrieve(self, query: str, top_k: int = 3) -> list[RetrievedPolicy]: ...
+# The Retriever protocol is declared in ports.py (the seam registry);
+# it is re-exported here so existing imports keep working.
+from .ports import Retriever  # noqa: E402,F401
 
 
 class KeywordRetriever:
