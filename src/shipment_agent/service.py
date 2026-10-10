@@ -910,9 +910,21 @@ class ShipmentService:
 
     def approval_queue(self) -> list[dict]:
         """The approval queue: awaiting shipments, severity first,
-        then oldest, each with the flags an approver scans for
-        (see ``insights.approval_queue``)."""
-        return _approval_queue(self._get_store().records())
+        then oldest, each with the flags an approver scans for, its
+        age bucket, and its SLA view under the configured budgets
+        (``QUEUE_SLA_HOURS_<SEVERITY>``, see ``insights``)."""
+        from .insights import sla_thresholds_from_env
+
+        return _approval_queue(
+            self._get_store().records(), sla_hours=sla_thresholds_from_env()
+        )
+
+    def approval_queue_summary(self) -> dict:
+        """The queue's health summary (depth, SLA breaches, age and
+        severity mix) — see ``insights.queue_summary``."""
+        from .insights import queue_summary
+
+        return queue_summary(self.approval_queue())
 
     def carrier_scorecards(self) -> list[dict]:
         """Scorecards for every carrier in the store, busiest first."""

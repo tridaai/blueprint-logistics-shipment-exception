@@ -275,10 +275,22 @@ def approval_queue() -> dict:
     sorted by severity then age (oldest first), each with the flags
     an approver scans for — cross-check disagreement, guardrail
     repair, reviewer block, failing guardrails, information needed,
-    auto-approval eligibility. The approver's worklist, computed
-    from the store (see ``insights.py``)."""
+    auto-approval eligibility — plus its age bucket and SLA view
+    (``sla_hours`` budget for its severity, ``sla_breach`` when the
+    wait has blown it). The response also carries the queue's own
+    ``summary`` (depth, breaches, age/severity mix) and the active
+    ``sla_hours`` budgets (``QUEUE_SLA_HOURS_<SEVERITY>``). The
+    approver's worklist, computed from the store (see
+    ``insights.py``)."""
+    from .insights import queue_summary, sla_thresholds_from_env
+
     queue_items = service.approval_queue()
-    return {"count": len(queue_items), "queue": queue_items}
+    return {
+        "count": len(queue_items),
+        "queue": queue_items,
+        "summary": queue_summary(queue_items),
+        "sla_hours": sla_thresholds_from_env(),
+    }
 
 
 @app.get("/carriers/scorecards", dependencies=_AUTH)

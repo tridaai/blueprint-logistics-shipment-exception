@@ -11,6 +11,11 @@ by the model):
   disagreement, a guardrail repair, a reviewer block, failing
   guardrails, an information request, auto-approval eligibility —
   so the queue itself is the daily worklist, not just a count.
+  Each item also carries its **age bucket** and an **SLA view**: a
+  case that waits too long is itself an exception, so every severity
+  has an age budget (configurable, see :func:`sla_thresholds_from_env`)
+  and an item past its budget is flagged ``sla_breach`` with the
+  overrun — the queue reports its own health, not just its contents.
 - **Carrier scorecards** — per-carrier aggregates over the whole
   stored history: shipment count, exception mix and rate, damage
   rate, and the human decision record (approvals / rejections /
@@ -29,9 +34,46 @@ from __future__ import annotations
 from collections import Counter
 from datetime import datetime, timezone
 
+from .config import env_float
 from .store import ApprovalRecord, format_type_counts, history_entry
 
 _SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+# How long a case of each severity may await a decision before the
+# wait itself becomes the exception. Defaults: a critical case gets
+# 4 hours of a human's attention; a low gets four days. Deployments
+# tune them per severity (QUEUE_SLA_HOURS_<SEVERITY>) — the queue is
+# an operations surface, and its budgets are an operations choice.
+DEFAULT_SLA_HOURS = {"critical": 4.0, "high": 24.0, "medium": 48.0, "low": 96.0}
+
+# Age buckets, coarsest last: the buckets an approver thinks in.
+AGE_BUCKETS = ("<1h", "1-4h", "4-24h", "1-3d", ">3d", "unknown")
+
+
+def age_bucket(age_seconds: float | None) -> str:
+    """The age bucket for a queue item (``unknown`` without a time)."""
+    if age_seconds is None:
+        return "unknown"
+    hours = age_seconds / 3600.0
+    if hours < 1:
+        return "<1h"
+    if hours < 4:
+        return "1-4h"
+    if hours < 24:
+        return "4-24h"
+    if hours < 72:
+        return "1-3d"
+    return ">3d"
+
+
+def sla_thresholds_from_env() -> dict[str, float]:
+    """The SLA age budgets by severity, env-tunable per severity:
+    ``QUEUE_SLA_HOURS_CRITICAL`` / ``_HIGH`` / ``_MEDIUM`` / ``_LOW``
+    over :data:`DEFAULT_SLA_HOURS`."""
+    return {
+        severity: env_float(f"QUEUE_SLA_HOURS_{severity.upper()}", default)
+        for severity, default in DEFAULT_SLA_HOURS.items()
+    }
 
 
 def _parse_iso(value: str | None) -> datetime | None:
@@ -43,7 +85,7 @@ def _parse_iso(value: str | None) -> datetime | None:
         return None
 
 
-def _queue_item(record: ApprovalRecord, now: datetime) -> dict:
+def _queue_item(record: ApprovalRecord, now: datetime, sla_hours: dict) -> dict:
     result = record.result
     entry = history_entry(record) or {}
     cross_check = result.cross_check
@@ -65,10 +107,21 @@ def _queue_item(record: ApprovalRecord, now: datetime) -> dict:
         ),
         "needs_information": result.needs_information,
     }
+    age_seconds = (
+        round((now - created).total_seconds(), 1) if created else None
+    )
+    severity = result.classification.severity.value
+    budget_hours = sla_hours.get(severity)
+    budget_seconds = budget_hours * 3600.0 if budget_hours is not None else None
+    overdue = (
+        max(0.0, age_seconds - budget_seconds)
+        if age_seconds is not None and budget_seconds is not None
+        else 0.0
+    )
     return {
         "shipment_id": result.shipment_id,
         "exception_type": result.classification.exception_type.value,
-        "severity": result.classification.severity.value,
+        "severity": severity,
         "confidence": result.classification.confidence,
         "carrier": entry.get("carrier", ""),
         "customer_name": entry.get("consignee", ""),
@@ -76,16 +129,22 @@ def _queue_item(record: ApprovalRecord, now: datetime) -> dict:
         "destination": entry.get("destination", ""),
         "lane": entry.get("lane", ""),
         "created_at": record.created_at,
-        "age_seconds": (
-            round((now - created).total_seconds(), 1) if created else None
-        ),
+        "age_seconds": age_seconds,
+        "age_bucket": age_bucket(age_seconds),
+        # The SLA view for this item: its severity's age budget, and
+        # whether (and by how long) the wait has already blown it.
+        "sla_hours": budget_hours,
+        "sla_breach": overdue > 0,
+        "sla_overdue_seconds": round(overdue, 1),
         "delay_hours": result.delay_hours,
         "flags": flags,
     }
 
 
 def approval_queue(
-    records: list[ApprovalRecord], now: datetime | None = None
+    records: list[ApprovalRecord],
+    now: datetime | None = None,
+    sla_hours: dict | None = None,
 ) -> list[dict]:
     """Shipments awaiting a decision, severity first, then oldest.
 
@@ -93,14 +152,18 @@ def approval_queue(
     history, not work. Sorting is total and deterministic: severity
     rank, then the analysis timestamp (records without one sort
     first — they are the oldest by definition), then shipment id.
+    ``sla_hours`` (severity → age budget in hours) defaults to
+    :data:`DEFAULT_SLA_HOURS`; the service passes the env-configured
+    thresholds (:func:`sla_thresholds_from_env`).
     """
+    thresholds = sla_hours if sla_hours is not None else DEFAULT_SLA_HOURS
     moment = now or datetime.now(timezone.utc)
     awaiting = [
         record
         for record in records
         if record.result.approval_status == "awaiting_approval"
     ]
-    items = [_queue_item(record, moment) for record in awaiting]
+    items = [_queue_item(record, moment, thresholds) for record in awaiting]
     items.sort(
         key=lambda item: (
             _SEVERITY_RANK.get(item["severity"], len(_SEVERITY_RANK)),
@@ -109,6 +172,31 @@ def approval_queue(
         )
     )
     return items
+
+
+def queue_summary(items: list[dict]) -> dict:
+    """The queue's own health, over :func:`approval_queue` items:
+    depth, SLA breaches, and the age/severity mix — the numbers the
+    ``/queue`` response and the console headline report."""
+    by_bucket = {bucket: 0 for bucket in AGE_BUCKETS}
+    by_severity: Counter = Counter()
+    breaches = 0
+    oldest: float | None = None
+    for item in items:
+        by_bucket[item["age_bucket"]] = by_bucket.get(item["age_bucket"], 0) + 1
+        by_severity[item["severity"]] += 1
+        if item["sla_breach"]:
+            breaches += 1
+        age = item["age_seconds"]
+        if age is not None and (oldest is None or age > oldest):
+            oldest = age
+    return {
+        "total": len(items),
+        "sla_breaches": breaches,
+        "by_bucket": by_bucket,
+        "by_severity": dict(sorted(by_severity.items())),
+        "oldest_age_seconds": oldest,
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -35,6 +35,7 @@
   .badge.sev-high, .badge.sev-critical { background:#FEF2F2; color:var(--bad); }
   .badge.sev-medium { background:#FFFBEB; color:var(--warn); }
   .badge.sev-low { background:#ECFDF5; color:var(--ok); }
+  tr.sla-breach { background:#FEF2F2; }
   .status { font-weight:700; }
   .status.approved { color:var(--ok); } .status.rejected { color:var(--bad); } .status.awaiting_approval { color:var(--indigo); }
   pre { white-space:pre-wrap; background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:12px; font-size:13px; margin:0; overflow:auto; }
@@ -102,14 +103,16 @@
   <section class="card">
     <h2>Approval queue — awaiting decisions</h2>
     <p class="note">The worklist from <code>GET /queue</code>: severity first, then oldest, with the flags an
-    approver scans for. Load any item to inspect its full result below.</p>
+    approver scans for, each item's age bucket, and its SLA view — a case past its severity's age budget
+    (<code>QUEUE_SLA_HOURS_*</code>) is itself an exception and is flagged as a breach. Load any item to
+    inspect its full result below.</p>
     <div class="row" style="margin:10px 0">
       <button class="primary" id="queue-refresh">Refresh queue</button>
       <span class="note" id="queue-note"></span>
     </div>
     <table>
-      <thead><tr><th>Shipment</th><th>Severity</th><th>Exception</th><th>Lane</th><th>Age</th><th>Flags</th><th></th></tr></thead>
-      <tbody id="queue-body"><tr><td colspan="7" class="note">Loading…</td></tr></tbody>
+      <thead><tr><th>Shipment</th><th>Severity</th><th>Exception</th><th>Lane</th><th>Age</th><th>SLA</th><th>Flags</th><th></th></tr></thead>
+      <tbody id="queue-body"><tr><td colspan="8" class="note">Loading…</td></tr></tbody>
     </table>
   </section>
 
@@ -489,21 +492,27 @@ async function loadQueue() {
     const res = await fetch('/queue', {headers: apiHeaders()});
     if (!res.ok) throw new Error('queue failed (' + res.status + ')');
     const data = await res.json();
-    note.textContent = data.count + ' awaiting';
+    const breaches = (data.summary && data.summary.sla_breaches) || 0;
+    note.textContent = data.count + ' awaiting' + (breaches ? ' · ' + breaches + ' SLA breach' + (breaches === 1 ? '' : 'es') : '');
     if (!data.queue.length) {
-      body.innerHTML = '<tr><td colspan="7" class="note">Queue is empty — analyze a shipment above and it will wait here for a decision.</td></tr>';
+      body.innerHTML = '<tr><td colspan="8" class="note">Queue is empty — analyze a shipment above and it will wait here for a decision.</td></tr>';
       return;
     }
     body.innerHTML = '';
     data.queue.forEach(item => {
       const tr = document.createElement('tr');
+      if (item.sla_breach) tr.className = 'sla-breach';
       const flags = queueFlagLabels(item.flags);
+      const slaText = item.sla_breach
+        ? '⛔ breach +' + formatAge(item.sla_overdue_seconds) + ' (budget ' + item.sla_hours + 'h)'
+        : 'within ' + (item.sla_hours ?? '—') + 'h budget';
       const cells = [
         item.shipment_id,
         null,  // severity badge, built below
         item.exception_type,
         item.lane || ((item.origin || '') + ' → ' + (item.destination || '')),
-        formatAge(item.age_seconds),
+        formatAge(item.age_seconds) + (item.age_bucket ? ' (' + item.age_bucket + ')' : ''),
+        slaText,
         flags.length ? flags.join(' · ') : '—',
       ];
       cells.forEach((text, i) => {
