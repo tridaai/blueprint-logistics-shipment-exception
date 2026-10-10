@@ -17,6 +17,7 @@ from __future__ import annotations
 from .extractor import extraction_discrepancies
 from .model_backends import DraftContext
 from .schemas import Diagnosis, DocumentExtraction, ShipmentInput
+from .store import format_type_counts
 from .tools_agent import TOOL_SPECS, DiagnosisToolBox, diagnosis_max_tool_calls
 
 
@@ -42,6 +43,13 @@ def memory_evidence_lines(history: dict | None) -> list[str]:
         lines.append(
             f"memory: {history['lane_count']} prior exception(s) on this lane "
             f"({history.get('lane', '')}) in the stored history (most recent: {recent})"
+        )
+    if history.get("carrier_exception_count"):
+        breakdown = format_type_counts(history.get("carrier_type_counts", {}))
+        lines.append(
+            f"carrier history: {history['carrier_count']} prior shipment(s) with "
+            f"this carrier ({history.get('carrier', '')}) in the stored history "
+            f"(exceptions: {breakdown})"
         )
     return lines
 

@@ -104,6 +104,82 @@ def test_memory_survives_across_service_instances_with_sqlite(tmp_path):
     )
 
 
+def _carrier_lines(result) -> list[str]:
+    assert result.diagnosis is not None
+    return [e for e in result.diagnosis.evidence if e.startswith("carrier history:")]
+
+
+def test_carrier_history_accumulates_across_consignees_and_lanes():
+    service = _service()
+    service.analyze(_damage("MEM-C1"))
+    # Different consignee AND different lane — only the carrier matches.
+    second = service.analyze(
+        _damage("MEM-C2", customer="Someone Else", origin="Atlanta, GA", destination="Miami, FL")
+    )
+    lines = _carrier_lines(second)
+    assert len(lines) == 1
+    assert "1 prior shipment(s) with this carrier" in lines[0]
+    assert "Synthetic Carrier" in lines[0]
+    assert "exceptions: damage×1" in lines[0]
+    # And the consignee/lane memory lines stay absent for this pair.
+    memory = _memory_lines(second)
+    assert not any("for this consignee" in line for line in memory)
+    assert not any("on this lane" in line for line in memory)
+
+
+def test_carrier_history_counts_by_type():
+    service = _service()
+    service.analyze(_damage("MEM-C3"))
+    delay = {
+        "shipment_id": "MEM-C4",
+        "origin": "Dallas, TX",
+        "destination": "Austin, TX",
+        "customer_name": "Other Co",
+        "carrier": "Synthetic Carrier",
+        "scheduled_delivery": "2026-10-10T09:00:00",
+        "estimated_delivery": "2026-10-11T21:00:00",
+        "latest_event": "Delayed at regional hub",
+        "documents": [],
+    }
+    service.analyze(delay)
+    third = service.analyze(
+        _damage("MEM-C5", customer="Third Co", origin="Tampa, FL", destination="Orlando, FL")
+    )
+    lines = _carrier_lines(third)
+    assert len(lines) == 1
+    assert "2 prior shipment(s) with this carrier" in lines[0]
+    assert "damage×1" in lines[0] and "delay×1" in lines[0]
+
+
+def test_carrier_history_miss_for_a_new_carrier():
+    service = _service()
+    service.analyze(_damage("MEM-C6"))
+    other = _damage("MEM-C7", customer="Other Co", origin="Atlanta, GA", destination="Miami, FL")
+    other["carrier"] = "Another Carrier"
+    result = service.analyze(other)
+    assert _carrier_lines(result) == []
+
+
+def test_graph_level_carrier_history_dict_becomes_evidence():
+    history = {
+        "consignee": "",
+        "consignee_count": 0,
+        "consignee_recent_types": [],
+        "lane": "Memphis, TN -> Charlotte, NC",
+        "lane_count": 0,
+        "lane_recent_types": [],
+        "carrier": "Synthetic Carrier",
+        "carrier_count": 3,
+        "carrier_exception_count": 3,
+        "carrier_type_counts": {"damage": 2, "delay": 1},
+    }
+    result = run_shipment(ShipmentInput.model_validate(_damage("MEM-C8")), history=history)
+    lines = _carrier_lines(result)
+    assert len(lines) == 1
+    assert "3 prior shipment(s) with this carrier" in lines[0]
+    assert "damage×2, delay×1" in lines[0]
+
+
 def test_graph_level_history_dict_becomes_evidence():
     history = {
         "consignee": "Acme Parts",

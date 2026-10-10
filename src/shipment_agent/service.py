@@ -23,7 +23,7 @@ from .graph import run_shipment
 from .model_backends import ModelBackend, get_backend
 from .retriever import Retriever, get_retriever
 from .schemas import AgentResult, ShipmentInput
-from .store import ApprovalRecord, ApprovalStore, default_store
+from .store import ApprovalRecord, ApprovalStore, carrier_summary, default_store
 
 __all__ = ["ApprovalRecord", "ShipmentService"]
 
@@ -144,7 +144,8 @@ class ShipmentService:
             [e for e in priors if consignee and e["consignee"] == consignee]
         )
         lane_count, lane_types = summarize([e for e in priors if e["lane"] == lane])
-        if not consignee_count and not lane_count:
+        carrier = carrier_summary(priors, shipment.carrier)
+        if not consignee_count and not lane_count and not carrier["carrier_exception_count"]:
             return None
         return {
             "consignee": consignee,
@@ -153,6 +154,10 @@ class ShipmentService:
             "lane": lane,
             "lane_count": lane_count,
             "lane_recent_types": lane_types,
+            "carrier": carrier["carrier"],
+            "carrier_count": carrier["carrier_count"],
+            "carrier_exception_count": carrier["carrier_exception_count"],
+            "carrier_type_counts": carrier["carrier_type_counts"],
         }
 
     def approve(self, shipment_id: str, approver: str) -> AgentResult:

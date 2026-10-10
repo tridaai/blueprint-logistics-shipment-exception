@@ -263,9 +263,13 @@ column by additive migration) and summarises matches for the same
 consignee and the same lane (origin → destination): counts of priors
 that themselves had exceptions, plus their most recent types. The
 summary reaches the diagnosis as evidence lines ("memory: 2 prior
-exception(s) for this consignee in the stored history…"). A shipment
-never counts itself; "none" priors do not count; empty history adds
-no line. Scope is deliberately small — counts and recent types, not a
+exception(s) for this consignee in the stored history…"). Carrier
+history rides along on the same summary: priors with this carrier
+become a "carrier history: N prior shipment(s) with this carrier …
+(exceptions: damage×2, delay×1)" evidence line, counted by the shared
+`carrier_summary` helper the diagnosis tool loop also uses. A shipment
+never counts itself; "none" priors do not count as exceptions; empty
+history adds no line. Scope is deliberately small — counts and recent types, not a
 case-retrieval system; the store is the seam where a customer's real
 history source would plug in.
 
