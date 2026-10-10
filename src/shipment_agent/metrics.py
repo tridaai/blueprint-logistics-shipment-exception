@@ -331,4 +331,16 @@ def render_prometheus(
                 for tenant, usage in sorted(key_usage.items())
             ],
         )
+        family(
+            "shipment_agent_tenant_key_rotation_closing",
+            "Whether a tenant's key-rotation grace window is ready to "
+            "close (1): the window is open and the previous key has "
+            "recorded no use for TENANT_KEY_QUIET_HOURS. Readiness "
+            "only — retiring the key stays a human's config change.",
+            [
+                ({"tenant": tenant}, 1 if usage.get("ready_to_close") else 0)
+                for tenant, usage in sorted(key_usage.items())
+                if "ready_to_close" in usage
+            ],
+        )
     return "\n".join(lines) + "\n"

@@ -1742,6 +1742,7 @@ class ShipmentService:
         from datetime import datetime, timezone
 
         from .config import (
+            rotation_close_readiness,
             tenant_api_keys,
             tenant_previous_api_keys,
             tenant_rotation_status,
@@ -1772,10 +1773,26 @@ class ShipmentService:
             for tenant, partition in partitions.items()
         }
         known_tenants = set(tenant_api_keys()) | set(tenant_previous_api_keys())
-        rotations = [
-            tenant_rotation_status(tenant, now=moment)
-            for tenant in sorted(known_tenants)
-        ]
+        rotations = []
+        for tenant in sorted(known_tenants):
+            status = tenant_rotation_status(tenant, now=moment)
+            # The readiness verdict rides on the same evidence
+            # /auth/rotation reads: this tenant's recorded
+            # previous-key use, from its own partition.
+            last_use = max(
+                (
+                    record.created_at
+                    for record in partitions.get(tenant, [])
+                    if record.auth_key_id == f"{tenant}:previous"
+                ),
+                default=None,
+            )
+            status.update(
+                rotation_close_readiness(
+                    tenant, last_previous_use_at=last_use, now=moment
+                )
+            )
+            rotations.append(status)
         return escalation_digest(
             queues,
             records,

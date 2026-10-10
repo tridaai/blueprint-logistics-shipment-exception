@@ -318,6 +318,89 @@ def tenant_rotation_status(tenant_id: str, now=None) -> dict:
     }
 
 
+DEFAULT_KEY_QUIET_HOURS = 24.0
+
+
+def tenant_key_quiet_hours(tenant_id: str) -> float:
+    """How long the previous key must go unused before its window
+    is *ready* to close.
+
+    ``TENANT_KEY_QUIET_HOURS_<TENANT>`` over the global
+    ``TENANT_KEY_QUIET_HOURS`` over :data:`DEFAULT_KEY_QUIET_HOURS`.
+    Readiness is evidence, not automation — see
+    :func:`rotation_close_readiness`. A negative value clamps to
+    zero (any recorded quiet at all counts), mirroring the grace
+    hours' clamp."""
+    import re
+
+    var = "TENANT_KEY_QUIET_HOURS_" + re.sub(
+        r"[^A-Za-z0-9]", "_", tenant_id
+    ).upper()
+    hours = env_float(var, env_float("TENANT_KEY_QUIET_HOURS", DEFAULT_KEY_QUIET_HOURS))
+    return max(0.0, hours)
+
+
+def rotation_close_readiness(
+    tenant_id: str, last_previous_use_at=None, now=None
+) -> dict:
+    """Whether a tenant's rotation grace window is ready to close.
+
+    The grace window's endgame used to be manual: watch
+    /auth/rotation, notice the old key has gone quiet, then unset
+    it. This computes the notice. The window is **ready to close**
+    when all of: a previous key is configured, a rotation is
+    recorded, the window is still open (a closed window needs no
+    decision), and the previous key has recorded no use for
+    ``TENANT_KEY_QUIET_HOURS`` — the quiet stretch runs from the
+    later of the rotation moment and the last recorded
+    previous-key request (``last_previous_use_at``, an ISO string
+    or datetime the caller reads from the store; None = the key
+    has never been used, so the stretch runs from the rotation).
+
+    Readiness never retires anything: unsetting the old key stays
+    a human's configuration change. This only names the moment,
+    with its evidence — ``quiet_since`` and the last use's time —
+    on /auth/rotation, in /metrics
+    (``shipment_agent_tenant_key_rotation_closing``), and in the
+    escalation digest's open-windows section.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    moment = now or datetime.now(timezone.utc)
+    status = tenant_rotation_status(tenant_id, now=moment)
+    last_use = None
+    if isinstance(last_previous_use_at, str):
+        try:
+            last_use = datetime.fromisoformat(
+                last_previous_use_at.replace("Z", "+00:00")
+            )
+        except ValueError:
+            last_use = None
+    elif last_previous_use_at is not None:
+        last_use = last_previous_use_at
+    if last_use is not None and last_use.tzinfo is None:
+        last_use = last_use.replace(tzinfo=timezone.utc)
+    rotated = tenant_key_rotated_at(tenant_id)
+    quiet_since = None
+    if rotated is not None:
+        quiet_since = max(rotated, last_use) if last_use is not None else rotated
+    quiet_hours = tenant_key_quiet_hours(tenant_id)
+    ready = bool(
+        status["previous_key_configured"]
+        and status["grace_open"]
+        and quiet_since is not None
+        and moment >= quiet_since + timedelta(hours=quiet_hours)
+    )
+    return {
+        "ready_to_close": ready,
+        "quiet_hours": quiet_hours,
+        "quiet_since": quiet_since.isoformat() if quiet_since else None,
+        "last_previous_key_request_at": (
+            last_use.isoformat() if last_use is not None else None
+        ),
+    }
+
+
 def per_tenant_keys_configured() -> bool:
     """Whether any per-tenant key configuration exists at all.
 

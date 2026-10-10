@@ -322,7 +322,10 @@ def escalation_digest(
       calls stale (the observer's own health).
     - ``open_key_rotation_windows`` — tenants whose previous key is
       still inside its grace window: rotations somebody still has
-      to finish.
+      to finish. Each names its readiness when the status carries
+      it (``ready_to_close`` — the old key quiet for
+      ``TENANT_KEY_QUIET_HOURS``, with the last recorded use as
+      evidence): a window can be open *and* finished being useful.
 
     Counts and ids only — no shipment content, like every other
     projection in this module.
@@ -404,6 +407,10 @@ def escalation_digest(
             "rotated_at": status.get("rotated_at"),
             "grace_deadline": status.get("grace_deadline"),
             "grace_hours": status.get("grace_hours"),
+            "ready_to_close": status.get("ready_to_close"),
+            "last_previous_key_request_at": status.get(
+                "last_previous_key_request_at"
+            ),
         }
         for status in (rotations or [])
         if status.get("grace_open")

@@ -434,6 +434,7 @@ def metrics(
     so a dead worker pages from the scrape, not just from
     /readiness."""
     from .config import (
+        rotation_close_readiness,
         tenant_api_keys,
         tenant_previous_api_keys,
         tenant_rotation_status,
@@ -449,19 +450,27 @@ def metrics(
         set(tenant_api_keys()) | set(tenant_previous_api_keys())
         | {record.tenant_id for record in all_records}
     )
+    moment = _auth_now()
     key_usage: dict[str, dict] = {}
     for tenant in sorted(usage_tenants):
-        status = tenant_rotation_status(tenant, now=_auth_now())
-        previous_requests = sum(
-            1
+        status = tenant_rotation_status(tenant, now=moment)
+        previous = [
+            record
             for record in all_records
             if record.tenant_id == tenant
             and record.auth_key_id == f"{tenant}:previous"
-        )
+        ]
+        previous_requests = len(previous)
         if status["previous_key_configured"] or previous_requests:
+            last_at = max(
+                (record.created_at for record in previous), default=None
+            )
             key_usage[tenant] = {
                 "previous_key_requests": previous_requests,
                 "grace_open": status["grace_open"],
+                "ready_to_close": rotation_close_readiness(
+                    tenant, last_previous_use_at=last_at, now=moment
+                )["ready_to_close"],
             }
     payload = render_prometheus(
         compute_metrics(records),
@@ -752,24 +761,33 @@ def key_rotation_status(
     configured, when the rotation happened, the grace deadline, and
     whether the window is still open — plus the previous key's
     recorded use from the store (how many stored analyses arrived
-    under it, and the most recent one's time): the signal that says
-    when the old key can be retired. Key material is never shown —
+    under it, and the most recent one's time), and the readiness
+    verdict over that evidence: ``ready_to_close`` when the old key
+    has recorded no use for ``TENANT_KEY_QUIET_HOURS`` inside its
+    window, with ``quiet_since`` naming when the quiet stretch
+    began. Readiness retires nothing — unsetting the old key stays
+    a human's configuration change. Key material is never shown —
     the view names generations, not secrets."""
-    from .config import tenant_rotation_status
+    from .config import rotation_close_readiness, tenant_rotation_status
     from .service import resolve_tenant_id
 
     tenant = resolve_tenant_id(x_tenant_id)
-    status = tenant_rotation_status(tenant, now=_auth_now())
+    moment = _auth_now()
+    status = tenant_rotation_status(tenant, now=moment)
     previous_id = f"{tenant}:previous"
     used = [
         record
         for record in service._get_store().records(tenant_id=tenant)
         if record.auth_key_id == previous_id
     ]
+    last_at = max((record.created_at for record in used), default=None)
     status["previous_key_requests"] = {
         "count": len(used),
-        "last_at": max((record.created_at for record in used), default=None),
+        "last_at": last_at,
     }
+    status.update(
+        rotation_close_readiness(tenant, last_previous_use_at=last_at, now=moment)
+    )
     return status
 
 
