@@ -50,6 +50,8 @@ from .prompts import (
     EXTRACT_USER_TEMPLATE,
     OPTIONS_SYSTEM_PROMPT,
     OPTIONS_USER_TEMPLATE,
+    REVIEWER_SYSTEM_PROMPT,
+    REVIEWER_USER_TEMPLATE,
     VERIFY_SYSTEM_PROMPT,
     VERIFY_USER_TEMPLATE,
 )
@@ -599,6 +601,61 @@ class _BaseLLMBackend:
             "grounded": bool(data["grounded"]),
             "issues": [str(issue)[:300] for issue in issues],
             "summary": str(data.get("summary", ""))[:300],
+        }
+
+    def review_draft(self, context: dict) -> dict | None:
+        """Independent LLM review (LLM backends only) — the critic half
+        of the generator/critic split, with its own persona prompt.
+
+        ``context`` is the plain dict built by ``reviewer.py``: verified
+        facts, the diagnosis, claim-packet contents, and the draft.
+        Returns ``{"verdict", "findings", "model"}`` or ``None`` when
+        the reply is unusable — the caller then runs the deterministic
+        checklist review and records the degradation. The reviewer may
+        run on a different model than the pipeline: ``REVIEWER_MODEL``
+        when set, else the run's own model.
+        """
+        packet = context.get("claim_packet") or {}
+        packet_diagnosis = packet.get("diagnosis")
+        user = REVIEWER_USER_TEMPLATE.format(
+            shipment_id=context["shipment_id"],
+            origin=context.get("origin") or "unknown",
+            destination=context.get("destination") or "unknown",
+            exception_type=context.get("exception_type") or "unknown",
+            severity=context.get("severity") or "unknown",
+            delay_hours=context.get("delay_hours"),
+            mismatches=context.get("mismatches") or "none",
+            policies=self._policy_block(context),
+            diagnosis_root_cause=context.get("diagnosis_root_cause") or "none recorded",
+            diagnosis_citations=", ".join(context.get("diagnosis_citations", [])) or "none",
+            packet_diagnosis=(
+                "present"
+                if isinstance(packet_diagnosis, dict) and packet_diagnosis.get("root_cause")
+                else "MISSING"
+            ),
+            packet_citations=", ".join(packet.get("policy_citations") or []) or "none",
+            packet_option_count=len(packet.get("recovery_options") or []),
+            packet_recommended=packet.get("recommended_option_id") or "none",
+            subject=context.get("subject", ""),
+            body=context.get("body", ""),
+        )
+        model = env_str("REVIEWER_MODEL") or None
+        text, _usage = self.complete_with_usage(
+            REVIEWER_SYSTEM_PROMPT, user, max_tokens=500, model=model
+        )
+        data = parse_json_object(text)
+        if data is None:
+            return None
+        verdict = str(data.get("verdict", "")).strip().lower()
+        if verdict not in {"pass", "concerns", "block"}:
+            return None
+        findings = data.get("findings") or []
+        if not isinstance(findings, list):
+            findings = [str(findings)]
+        return {
+            "verdict": verdict,
+            "findings": [str(finding)[:300] for finding in findings],
+            "model": model or self._model,
         }
 
 

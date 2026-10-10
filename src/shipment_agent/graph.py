@@ -3,7 +3,8 @@
 Pipeline — every step is a named, inspectable node:
 
     extract ──► ingest ──► classify ──► retrieve ──► diagnose ──► options
-        ──► draft ──► verify ──► validate ──► human_approval ──► END
+        ──► draft ──► verify ──► review ──► validate ──► human_approval
+        ──► END
 
 The graph deliberately has NO node that sends a message, files a claim, or
 touches an external system. It ends at the human-approval gate. Acting on an
@@ -32,12 +33,14 @@ from .guardrails import validate_draft
 from .model_backends import DraftContext, ModelBackend, MockModelBackend, estimate_cost_usd
 from .options import build_recovery_options
 from .retriever import KeywordRetriever, Retriever
+from .reviewer import review_draft
 from .config import env_int, env_str, load_dotenv
 from .schemas import (
     AgentResult,
     DocumentExtraction,
     DraftOutput,
     ExceptionType,
+    ReviewerResult,
     RunTelemetry,
     ShipmentInput,
     TraceStep,
@@ -155,6 +158,7 @@ def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
         "note": "",
     }
     autonomy = final.get("autonomy")
+    review = final.get("review")
     validation = final["validation"]
 
     extract_details: list[str] = []
@@ -300,6 +304,40 @@ def _build_trace(shipment: ShipmentInput, final: dict) -> list[TraceStep]:
             + ([f"note: {verification['note']}"] if verification.get("note") else []),
         ),
         TraceStep(
+            name="review",
+            title="Independent review — a second pair of eyes",
+            status=(
+                "failed"
+                if review and review["verdict"] == "block"
+                else "passed"
+                if review and review["verdict"] == "pass"
+                else "completed"
+            ),
+            summary=(
+                "Independent review disabled (REVIEWER=off) — no second read ran."
+                if review is None
+                else (
+                    f"A reviewer that did not draft this update read it adversarially "
+                    f"({'LLM reviewer' if review['source'] == 'llm' else 'deterministic checklist'}): "
+                    f"verdict {review['verdict'].upper()}."
+                    + (
+                        " A block flags the case and disqualifies auto-approval — "
+                        "the human still decides."
+                        if review["verdict"] == "block"
+                        else ""
+                    )
+                )
+            ),
+            details=(
+                ["reviewer: off — REVIEWER=off; no independent review ran"]
+                if review is None
+                else [f"verdict: {review['verdict']}"]
+                + ([f"model: {review['model']}"] if review.get("model") else [])
+                + [f"finding: {f}" for f in review.get("findings", [])]
+                + ([f"note: {review['note']}"] if review.get("note") else [])
+            ),
+        ),
+        TraceStep(
             name="validate",
             title="Guardrail validation",
             status="passed" if validation["passed"] else "failed",
@@ -387,6 +425,8 @@ class AgentState(TypedDict, total=False):
     recommended_option_id: str | None
     draft: dict
     verification: dict
+    review: dict | None
+    reviewer_blocked: bool
     validation: dict
     repair_attempted: bool
     repaired: bool
@@ -656,6 +696,39 @@ def build_graph(
         }
         return {"verification": verification.model_dump(), "draft": draft.model_dump()}
 
+    def _run_review(state: AgentState, draft: DraftOutput) -> ReviewerResult | None:
+        """The independent review of one draft version (review node +
+        the repair loop, which re-reviews every redraft)."""
+        return review_draft(
+            draft=draft,
+            classification=state["classification"],
+            diagnosis=state.get("diagnosis"),
+            delay_hours=state.get("delay_hours"),
+            mismatches=state.get("document_mismatches", []),
+            policies=state.get("policies", []),
+            backend=backend,
+        )
+
+    def review(state: AgentState) -> AgentState:
+        # Generator/critic split: a reviewer that did not draft the
+        # update reads it adversarially (reviewer.py). A block verdict
+        # flags the result and disqualifies auto-approval — it never
+        # rejects anything itself; the human still decides.
+        draft = DraftOutput.model_validate(state["draft"])
+        review_result = _run_review(state, draft)
+        if review_result is not None:
+            draft.claim_packet = {
+                **draft.claim_packet,
+                "review": review_result.model_dump(),
+            }
+        return {
+            "review": review_result.model_dump() if review_result else None,
+            "reviewer_blocked": bool(
+                review_result and review_result.verdict == "block"
+            ),
+            "draft": draft.model_dump(),
+        }
+
     def _run_guardrails(state: AgentState, draft: DraftOutput) -> ValidationResult:
         return validate_draft(
             body=draft.body,
@@ -706,6 +779,11 @@ def build_graph(
         original = validation
         attempts = 0
         working = dict(state)
+        review_result = (
+            ReviewerResult.model_validate(state["review"])
+            if state.get("review")
+            else None
+        )
         while attempts < max_attempts and not validation.passed:
             attempts += 1
             draft = _build_draft(working, repair_feedback=feedback)
@@ -722,6 +800,14 @@ def build_graph(
                 **draft.claim_packet,
                 "verification": verification.model_dump(),
             }
+            # The reviewer judges the draft the approver will actually
+            # see — so every redraft is re-reviewed, not just re-verified.
+            review_result = _run_review(state, draft)
+            if review_result is not None:
+                draft.claim_packet = {
+                    **draft.claim_packet,
+                    "review": review_result.model_dump(),
+                }
             validation = _run_guardrails(state, draft)
             working = {**working, "draft": draft.model_dump()}
         update.update(
@@ -729,6 +815,10 @@ def build_graph(
                 "validation": validation.model_dump(),
                 "draft": draft.model_dump(),
                 "verification": verification.model_dump() if verification else None,
+                "review": review_result.model_dump() if review_result else None,
+                "reviewer_blocked": bool(
+                    review_result and review_result.verdict == "block"
+                ),
                 "repair_attempted": attempts > 0,
                 "repaired": validation.passed,
                 "repair_attempts": attempts,
@@ -747,6 +837,7 @@ def build_graph(
             validation=state["validation"],
             cross_check=state.get("cross_check"),
             repair_attempted=bool(state.get("repair_attempted")),
+            reviewer_blocked=bool(state.get("reviewer_blocked")),
         )
         # Information-needed flow: an under-determined case (classification
         # "none" at low confidence, with concrete inputs missing) gets a
@@ -787,6 +878,7 @@ def build_graph(
     graph.add_node("options", options)
     graph.add_node("draft", draft)
     graph.add_node("verify", verify)
+    graph.add_node("review", review)
     graph.add_node("validate", validate)
     graph.add_node("human_approval", human_approval)
     graph.set_entry_point("extract")
@@ -798,7 +890,8 @@ def build_graph(
         ("diagnose", "options"),
         ("options", "draft"),
         ("draft", "verify"),
-        ("verify", "validate"),
+        ("verify", "review"),
+        ("review", "validate"),
         ("validate", "human_approval"),
         ("human_approval", END),
     ]:
@@ -856,6 +949,8 @@ def run_shipment(
         policies=final.get("policies", []),
         draft=final["draft"],
         verification=final.get("verification"),
+        review=final.get("review"),
+        reviewer_blocked=bool(final.get("reviewer_blocked")),
         validation=final["validation"],
         repair_attempted=bool(final.get("repair_attempted")),
         repaired=bool(final.get("repaired")),

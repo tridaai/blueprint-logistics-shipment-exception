@@ -10,7 +10,8 @@ eligible only when ALL of these hold:
 - the exception is ``none`` or the severity is ``low``;
 - the guardrails passed;
 - the rules/LLM cross-check did not disagree (when it ran);
-- no repair redraft was needed.
+- no repair redraft was needed;
+- the independent reviewer did not block the draft (when it ran).
 
 It is a RECOMMENDATION, printed on the result, the console, and the
 claim packet. It never acts: the human-approval gate is unchanged, and
@@ -32,6 +33,7 @@ def compute_autonomy(
     validation: dict,
     cross_check: dict | None,
     repair_attempted: bool,
+    reviewer_blocked: bool = False,
 ) -> AutonomyRecommendation:
     reasons: list[str] = []
     eligible = True
@@ -74,6 +76,14 @@ def compute_autonomy(
         reasons.append("the draft needed a repair redraft — a human should review it")
     else:
         reasons.append("no repair was needed")
+
+    if reviewer_blocked:
+        eligible = False
+        reasons.append(
+            "the independent reviewer blocked this draft — a human must decide"
+        )
+    else:
+        reasons.append("the independent reviewer did not block the draft")
 
     return AutonomyRecommendation(
         eligible_for_auto_approval=eligible, reasons=reasons

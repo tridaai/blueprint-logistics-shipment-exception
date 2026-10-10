@@ -111,12 +111,12 @@ def test_provider_telemetry_aggregates_the_whole_run(fake_openai):
     assert t is not None
     assert t.backend == "openai"
     assert t.model == "gpt-4o-mini"
-    # classify + diagnose + options + draft + verify = 5 model calls.
-    assert t.model_calls == 5
-    assert t.input_tokens == 500
-    assert t.output_tokens == 250
+    # classify + diagnose + options + draft + verify + review = 6 calls.
+    assert t.model_calls == 6
+    assert t.input_tokens == 600
+    assert t.output_tokens == 300
     # gpt-4o-mini at (0.15, 0.60) per 1M tokens.
-    assert t.estimated_cost_usd == pytest.approx(0.000225)
+    assert t.estimated_cost_usd == pytest.approx(0.00027)
     assert t.latency_seconds > 0
 
 
@@ -124,21 +124,21 @@ def test_telemetry_rides_inside_the_claim_packet(fake_openai):
     result = _run(OpenAIBackend())
     packet_telemetry = result.draft.claim_packet["telemetry"]
     assert packet_telemetry["model_calls"] == result.telemetry.model_calls
-    assert packet_telemetry["input_tokens"] == 500
+    assert packet_telemetry["input_tokens"] == 600
 
 
 def test_telemetry_is_a_delta_not_a_cumulative_total(fake_openai):
     backend = OpenAIBackend()
     first = _run(backend)
     second = _run(backend)  # same backend instance, second run
-    assert second.telemetry.model_calls == first.telemetry.model_calls == 5
-    assert second.telemetry.input_tokens == 500
+    assert second.telemetry.model_calls == first.telemetry.model_calls == 6
+    assert second.telemetry.input_tokens == 600
 
 
 def test_unknown_model_reports_cost_as_none_not_a_guess(fake_openai, monkeypatch):
     monkeypatch.setenv("OPENAI_MODEL", "mystery-model-9000")
     result = _run(OpenAIBackend())
-    assert result.telemetry.input_tokens == 500
+    assert result.telemetry.input_tokens == 600
     assert result.telemetry.estimated_cost_usd is None
 
 

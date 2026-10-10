@@ -317,6 +317,27 @@ class ValidationResult(BaseModel):
     checks: list[GuardrailCheck] = Field(default_factory=list)
 
 
+class ReviewerResult(BaseModel):
+    """The independent reviewer's verdict on the draft (see ``reviewer.py``).
+
+    A generator/critic split: the reviewer did not draft the update and
+    reads it adversarially — grounding, policy compliance, tone, and
+    whether the approver has everything they need. Two producers, one
+    shape: an LLM reviewer in provider mode (``source="llm"``, possibly
+    on its own model — ``REVIEWER_MODEL``), or a deterministic second
+    checklist in the default/mock mode (``source="checklist"``) running
+    *different* checks than self-verification. A ``block`` verdict never
+    auto-rejects: it flags the result (``reviewer_blocked``) and forces
+    the autonomy recommendation to ineligible, and the human decides.
+    """
+
+    verdict: str  # pass | concerns | block
+    findings: list[str] = Field(default_factory=list)
+    source: str  # llm | checklist
+    model: str | None = None
+    note: str = ""  # set when the LLM review failed and the checklist ran
+
+
 class InformationRequest(BaseModel):
     """A composed clarification request for an under-determined case.
 
@@ -375,7 +396,7 @@ class TraceStep(BaseModel):
     can inspect what each node really did, including its tool calls.
     """
 
-    name: str  # extract | ingest | classify | retrieve | diagnose | options | draft | verify | validate | human_approval
+    name: str  # extract | ingest | classify | retrieve | diagnose | options | draft | verify | review | validate | human_approval
     title: str
     status: str = "completed"  # completed | passed | failed | awaiting
     summary: str = ""
@@ -397,6 +418,8 @@ class AgentResult(BaseModel):
     policies: list[RetrievedPolicy] = Field(default_factory=list)
     draft: DraftOutput
     verification: VerificationResult | None = None
+    review: ReviewerResult | None = None
+    reviewer_blocked: bool = False
     validation: ValidationResult
     repair_attempted: bool = False
     repaired: bool = False

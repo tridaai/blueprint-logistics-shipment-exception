@@ -136,7 +136,7 @@ def test_verify_step_sits_between_draft_and_validate_in_the_trace():
     names = [s.name for s in result.trace]
     assert names == [
         "extract", "ingest", "classify", "retrieve", "diagnose",
-        "options", "draft", "verify", "validate", "human_approval",
+        "options", "draft", "verify", "review", "validate", "human_approval",
     ]
     verify_step = next(s for s in result.trace if s.name == "verify")
     assert verify_step.status == "passed"

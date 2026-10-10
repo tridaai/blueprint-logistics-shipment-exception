@@ -326,6 +326,15 @@ function render(result) {
       + (v.issues && v.issues.length ? ' — ' + v.issues.join('; ') : '')
       + (v.note ? ` <small>(${v.note})</small>` : ''));
   }
+  if (result.review) {
+    const r = result.review;
+    facts.push(`Independent review: <strong>${r.verdict.toUpperCase()}</strong> (${r.source === 'llm' ? 'LLM reviewer' : 'deterministic checklist'}${r.model ? ' · ' + r.model : ''})`
+      + (r.findings && r.findings.length ? ' — ' + r.findings.join('; ') : '')
+      + (r.note ? ` <small>(${r.note})</small>` : ''));
+  }
+  if (result.reviewer_blocked) {
+    facts.push(`⛔ <strong>Reviewer blocked this draft</strong> — flagged for the approver and disqualified from auto-approval; the human still decides.`);
+  }
   if (result.repair_attempted) {
     facts.push(`Bounded repair: <strong>${result.repaired ? 'redraft passed the guardrails' : 'attempted — redraft still failed'}</strong> (${result.repair_attempts} attempt(s))`
       + (result.original_validation && result.original_validation.errors && result.original_validation.errors.length

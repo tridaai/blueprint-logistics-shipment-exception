@@ -128,7 +128,25 @@ def print_trace(
         if result.verification.note:
             print(f"    note: {result.verification.note}")
 
-    print("\n[9] GUARDRAIL CHECKS")
+    print("\n[9] INDEPENDENT REVIEW — a second pair of eyes (not the drafter)")
+    if result.review is not None:
+        r = result.review
+        source = (
+            f"LLM reviewer{(' · ' + r.model) if r.model else ''}"
+            if r.source == "llm"
+            else "deterministic checklist"
+        )
+        print(f"    verdict: {r.verdict.upper()} ({source})")
+        for finding in r.findings:
+            print(f"    finding: {finding}")
+        if r.note:
+            print(f"    note: {r.note}")
+        if result.reviewer_blocked:
+            print("    ⛔ REVIEWER BLOCKED this draft — flagged for the approver; the human still decides.")
+    else:
+        print("    (disabled — REVIEWER=off)")
+
+    print("\n[10] GUARDRAIL CHECKS")
     for check in result.validation.checks:
         mark = "PASS" if check.passed else "FAIL"
         print(f"    [{mark}] {check.name} — {check.detail}")
@@ -142,7 +160,7 @@ def print_trace(
             for error in result.original_validation.errors:
                 print(f"    Original failure: {error}")
 
-    print("\n[10] FINAL STATE")
+    print("\n[11] FINAL STATE")
     print("    PENDING_HUMAN_APPROVAL" if result.approval_status == "awaiting_approval" else f"    {result.approval_status}")
     print(f"    approval_status = {result.approval_status} · external_action_taken = {result.external_action_taken}")
     if result.autonomy is not None:

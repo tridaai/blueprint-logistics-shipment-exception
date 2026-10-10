@@ -74,7 +74,7 @@ def test_analyze_returns_pipeline_trace():
     trace = body["trace"]
     assert [s["name"] for s in trace] == [
         "extract", "ingest", "classify", "retrieve", "diagnose", "options",
-        "draft", "verify", "validate", "human_approval",
+        "draft", "verify", "review", "validate", "human_approval",
     ]
     classify = trace[2]
     assert body["classification"]["exception_type"] in classify["summary"]
@@ -82,10 +82,13 @@ def test_analyze_returns_pipeline_trace():
     verify = trace[7]
     assert verify["status"] == "passed"
     assert body["verification"]["source"] == "checklist"
-    validate = trace[8]
+    review = trace[8]
+    assert review["status"] == "passed"
+    assert body["review"]["source"] == "checklist"
+    validate = trace[9]
     assert validate["status"] == "passed"
     assert any("references_shipment_id" in d for d in validate["details"])
-    assert trace[9]["status"] == "awaiting"
+    assert trace[10]["status"] == "awaiting"
 
 
 def test_evals_results_endpoint():

@@ -175,6 +175,49 @@ Subject: {subject}
 Is every claim in this draft grounded in the facts above?
 """
 
+REVIEWER_SYSTEM_PROMPT = """\
+You are an independent operations reviewer for a logistics team — a
+second pair of eyes who did NOT write the draft under review. Read it
+adversarially, the way a senior reviewer who will be blamed for a bad
+send would: Is every factual claim grounded in the verified facts? Does
+the draft comply with the cited policies — no promised compensation,
+refunds, or guaranteed times? Is the tone right for a customer whose
+shipment went wrong? Does it say what happens next and when the next
+update arrives? And is the claim packet complete enough for a human
+to decide — diagnosis present, policies cited, a recommended recovery
+option named?
+
+Respond with a single JSON object and nothing else:
+{{"verdict": "pass" when the draft is fit to show an approver as-is,
+"concerns" when it is usable but has findings the approver must see,
+"block" when it must not be approved in this form,
+"findings": ["one finding per string — empty when the verdict is pass"]}}
+Judge only against the facts and packet contents given. Do not rewrite
+the draft, and do not invent facts of your own.
+"""
+
+REVIEWER_USER_TEMPLATE = """\
+Verified facts:
+- Shipment: {shipment_id} — {origin} -> {destination}
+- Exception: {exception_type} / severity {severity}
+- Computed delay: {delay_hours} hours
+- Document mismatches (computed): {mismatches}
+- Policies the draft may cite: {policies}
+- Diagnosis (root cause): {diagnosis_root_cause}
+- Diagnosis cites policies: {diagnosis_citations}
+
+Claim packet contents: diagnosis {packet_diagnosis}, policy citations
+{packet_citations}, recovery options {packet_option_count}, recommended
+option {packet_recommended}.
+
+Draft under review:
+Subject: {subject}
+
+{body}
+
+Review this draft now, as JSON only.
+"""
+
 JUDGE_SYSTEM_PROMPT = """\
 You are judging whether a drafted customer update is grounded in the
 verified facts it was given. You see the verified facts (computed by

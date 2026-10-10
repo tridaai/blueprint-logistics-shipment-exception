@@ -70,7 +70,7 @@ BASE = {
 def test_eligible_baseline():
     rec = compute_autonomy(**BASE)
     assert rec.eligible_for_auto_approval is True
-    assert len(rec.reasons) == 4
+    assert len(rec.reasons) == 5
 
 
 def test_disqualifier_severity():
