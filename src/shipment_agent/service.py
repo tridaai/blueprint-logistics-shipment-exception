@@ -7,9 +7,10 @@ API call). The one opt-in exception is output routing: when
 that endpoint — the customer's system of choice — and the outcome is
 recorded on the result (see ``dispatch_approval_webhook``).
 
-Records live in an approval store (``store.py``): SQLite on disk by
-default, so analyses and human decisions survive restarts; the
-in-memory store remains available as a test double.
+Records live in an approval store (``store.py``): PostgreSQL when
+``DATABASE_URL`` is configured, so analyses and human decisions
+survive restarts and are shared across replicas; the SQLite and
+in-memory stores remain available as test doubles.
 
 The approval gate is checkpointed (``checkpoints.py``, on unless
 ``CHECKPOINTS=off``): an analysis pauses its graph at the gate with
@@ -38,6 +39,13 @@ from .schemas import AgentResult, ShipmentInput
 from .store import ApprovalRecord, ApprovalStore, carrier_summary, default_store
 
 __all__ = ["ApprovalRecord", "BatchItem", "ShipmentService"]
+
+
+def _now_iso() -> str:
+    """Current UTC time as an ISO-8601 string (record timestamps)."""
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
 
 
 @dataclass
@@ -185,7 +193,11 @@ class ShipmentService:
             thread_id=model.shipment_id,
         )
         self._get_store().save(
-            ApprovalRecord(result=result, shipment=model.model_dump(mode="json"))
+            ApprovalRecord(
+                result=result,
+                shipment=model.model_dump(mode="json"),
+                created_at=_now_iso(),
+            )
         )
         return result
 
@@ -352,6 +364,7 @@ class ShipmentService:
         record.approved = True
         record.approver = approver
         record.approve_reason = reason
+        record.decided_at = _now_iso()
         record.result.approval_status = "approved"
         record.result.decided_by = approver
         record.result.decision_reason = reason or None
@@ -385,6 +398,7 @@ class ShipmentService:
             )
         record.rejected_by = reviewer
         record.reject_reason = reason
+        record.decided_at = _now_iso()
         record.result.approval_status = "rejected"
         record.result.decided_by = reviewer
         record.result.decision_reason = reason or None

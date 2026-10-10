@@ -1,4 +1,9 @@
-"""Checkpointed approval gate: LangGraph state persistence over SQLite.
+"""Checkpointed approval gate: LangGraph state persistence.
+
+Two savers (see :func:`get_checkpointer`): the official LangGraph
+Postgres saver when ``DATABASE_URL`` is set (production — graph state
+in the same PostgreSQL as the decision record), and the stdlib
+SQLite saver below (test double / offline default).
 
 The approval gate is a real pause in the graph, not a status flag:
 with a checkpointer attached, a run executes up to the gate and its
@@ -15,10 +20,10 @@ The split of responsibilities, kept deliberately:
 - the **checkpointer** (this module) holds graph state — where the
   run paused and what it carried. It never decides anything.
 
-Implementation: the pinned LangGraph ships the checkpoint base +
-in-memory saver only (the SQLite saver is a separate package), so
-:class:`SqliteCheckpointSaver` implements that base over stdlib
-``sqlite3`` — one connection per call, opened and closed per call
+Implementation of the SQLite double: the pinned LangGraph ships the
+checkpoint base + in-memory saver only (the SQLite saver is a
+separate package), so :class:`SqliteCheckpointSaver` implements that
+base over stdlib ``sqlite3`` — one connection per call, opened and closed per call
 (thread-safe by construction, like ``SQLiteStore``), checkpoint blobs
 serialised with LangGraph's own serde, channel values in a side
 table exactly as the reference savers lay them out. The database
@@ -409,15 +414,68 @@ def default_checkpoint_path() -> Path:
     return Path(__file__).resolve().parents[2] / ".data" / "checkpoints.db"
 
 
-def get_checkpointer() -> SqliteCheckpointSaver | None:
+_POSTGRES_SAVERS: dict[str, object] = {}
+
+
+def _postgres_checkpointer(url: str):
+    """The official LangGraph Postgres saver over a shared pool.
+
+    One saver (and pool) per database URL per process: surfaces that
+    rebuild their service share the pool instead of leaking a new one
+    per construction. A saver whose pool was closed (the API lifespan
+    closes it at shutdown) is rebuilt, never handed out dead. The
+    pool carries the settings the saver requires (autocommit, no
+    prepared statements, dict rows); the saver's ``setup()`` creates
+    its checkpoint tables on first use.
+    """
+    existing = _POSTGRES_SAVERS.get(url)
+    if existing is not None:
+        pool = getattr(existing, "conn", None)
+        if pool is None or not getattr(pool, "closed", False):
+            return existing
+        _POSTGRES_SAVERS.pop(url, None)
+    from langgraph.checkpoint.postgres import PostgresSaver
+    from psycopg.rows import dict_row
+    from psycopg_pool import ConnectionPool
+
+    from .db import ensure_migrated
+
+    ensure_migrated(url)
+    pool = ConnectionPool(
+        url,
+        min_size=1,
+        max_size=8,
+        open=True,
+        kwargs={
+            "autocommit": True,
+            "prepare_threshold": 0,
+            "row_factory": dict_row,
+        },
+    )
+    saver = PostgresSaver(pool)
+    saver.setup()
+    _POSTGRES_SAVERS[url] = saver
+    return saver
+
+
+def get_checkpointer():
     """The configured checkpointer, or None when CHECKPOINTS=off.
 
-    ``CHECKPOINT_DB_PATH`` overrides the database location (the
-    default is the git-ignored ``.data/`` directory, next to the
-    approval store's database).
+    ``DATABASE_URL`` set → the **official LangGraph Postgres saver**
+    (``langgraph-checkpoint-postgres``) over a psycopg 3 pool, in the
+    same PostgreSQL as the store — the production configuration.
+    Unset → :class:`SqliteCheckpointSaver` (``CHECKPOINT_DB_PATH``
+    overrides its location; the default is the git-ignored ``.data/``
+    directory) — a test double that keeps the gate's pause/resume
+    exercisable offline; production runs use the Postgres saver.
     """
     if not checkpoints_enabled():
         return None
+    from .db import database_url
+
+    url = database_url()
+    if url:
+        return _postgres_checkpointer(url)
     load_dotenv()
     configured = env_str("CHECKPOINT_DB_PATH")
     return SqliteCheckpointSaver(configured if configured else default_checkpoint_path())

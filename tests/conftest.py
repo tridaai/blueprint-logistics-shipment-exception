@@ -36,7 +36,10 @@ _SCRUB_EXACT = {
     "CHECKPOINT_DB_PATH",
     "NODE_TIMEOUT_SECONDS",
     "ACTION_WEBHOOK_URL",
+    "ACTION_WEBHOOK_SECRET",
     "ACTION_WEBHOOK_TIMEOUT_SECONDS",
+    "DATABASE_URL",
+    "MIGRATIONS_DIR",
     "API_KEY",
     "GUARDRAIL_REPAIR",
     "GUARDRAIL_REPAIR_MAX_ATTEMPTS",
@@ -45,7 +48,16 @@ _SCRUB_EXACT = {
 }
 
 # Variable families scrubbed by prefix / suffix.
-_SCRUB_PREFIXES = ("OPENAI_", "ANTHROPIC_", "OLLAMA_", "LLM_", "REVIEWER", "CHROMA_")
+_SCRUB_PREFIXES = (
+    "OPENAI_",
+    "ANTHROPIC_",
+    "OLLAMA_",
+    "LLM_",
+    "REVIEWER",
+    "CHROMA_",
+    "S3_",
+    "AWS_",
+)
 _SCRUB_SUFFIXES = ("_API_KEY", "_MODEL", "_BASE_URL")
 
 

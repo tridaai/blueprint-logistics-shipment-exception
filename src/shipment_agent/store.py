@@ -1,24 +1,22 @@
 """Approval persistence: where analysis results and human decisions live.
 
-Two implementations behind one small interface:
+PostgreSQL is the system of record: with ``DATABASE_URL`` set, records
+live in the ``approvals`` table (migration ``0002``) via
+:class:`PostgresStore`, so a human decision — and the diagnosis memory
+built from earlier shipments — survives restarts and is shared across
+service replicas. The SQLite and in-memory implementations remain as
+**test doubles only**: the hermetic test suite injects them explicitly
+(``STATE_DB_PATH`` still selects the SQLite double, for the persistence
+tests and throwaway local files), and a run with neither variable set
+falls back to the in-memory double — nothing persists, and the docs
+say so wherever that mode is mentioned.
 
-- ``SQLiteStore`` — the real one. Stdlib ``sqlite3``, one local file.
-  Results (as JSON) plus the decision columns (approver, approved,
-  approve_reason, rejected_by, reject_reason) survive process
-  restarts: an approval queue that evaporates when the server restarts
-  is not a product.
-- ``InMemoryStore`` — the test double. Same interface, no file; this
-  was the only store before v2 and remains what most unit tests use.
-
-Both stores also serve the reviewer feedback loop
+All stores also serve the reviewer feedback loop
 (``decision_feedback``): decided records with non-empty reasons,
 newest first, for the diagnosis of the next matching case.
 
-Selection (``default_store``): ``STATE_DB_PATH`` env var — a file path
-for SQLite, or ``:memory:`` for the in-memory store. Unset, it defaults
-to ``<repo>/.data/state.db`` (git-ignored). Re-analyzing a shipment
-replaces its record and resets the decision, matching the service's
-long-standing behaviour.
+Re-analyzing a shipment replaces its record and resets the decision,
+matching the service's long-standing behaviour.
 """
 
 from __future__ import annotations
@@ -43,6 +41,10 @@ class ApprovalRecord:
     rejected_by: str | None = None
     reject_reason: str = ""
     dispatch_status: str | None = None  # outbound webhook outcome, when configured
+    # ISO-8601 UTC timestamps, stamped by the service ("" until set —
+    # older rows simply have none). The audit export reads them.
+    created_at: str = ""  # when the analysis was recorded
+    decided_at: str = ""  # when the human decision was recorded
 
 
 def history_entry(record: ApprovalRecord) -> dict | None:
@@ -144,6 +146,38 @@ def format_type_counts(type_counts: dict[str, int]) -> str:
 from .ports import Store as ApprovalStore  # noqa: E402,F401
 
 
+def _record_to_dict(record: ApprovalRecord) -> dict:
+    """The whole record as one JSON-ready dict — the Postgres payload
+    shape (JSONB), and the shape the SQLite double's columns mirror."""
+    return {
+        "result": record.result.model_dump(mode="json"),
+        "shipment": record.shipment,
+        "approver": record.approver,
+        "approved": record.approved,
+        "approve_reason": record.approve_reason,
+        "rejected_by": record.rejected_by,
+        "reject_reason": record.reject_reason,
+        "dispatch_status": record.dispatch_status,
+        "created_at": record.created_at,
+        "decided_at": record.decided_at,
+    }
+
+
+def _record_from_dict(data: dict) -> ApprovalRecord:
+    return ApprovalRecord(
+        result=AgentResult.model_validate(data["result"]),
+        shipment=data.get("shipment"),
+        approver=data.get("approver"),
+        approved=data.get("approved", False),
+        approve_reason=data.get("approve_reason", ""),
+        rejected_by=data.get("rejected_by"),
+        reject_reason=data.get("reject_reason", ""),
+        dispatch_status=data.get("dispatch_status"),
+        created_at=data.get("created_at", ""),
+        decided_at=data.get("decided_at", ""),
+    )
+
+
 class InMemoryStore:
     """Test double: records in a dict, gone when the process ends.
 
@@ -165,6 +199,11 @@ class InMemoryStore:
     def get(self, shipment_id: str) -> ApprovalRecord | None:
         with self._lock:
             return self._records.get(shipment_id)
+
+    def records(self) -> list[ApprovalRecord]:
+        """Every stored record, newest first (metrics / audit read)."""
+        with self._lock:
+            return list(reversed(list(self._records.values())))
 
     def prior_shipments(self, exclude_shipment_id: str | None = None) -> list[dict]:
         with self._lock:
@@ -225,6 +264,14 @@ class SQLiteStore:
                 conn.execute(
                     "ALTER TABLE approvals ADD COLUMN approve_reason TEXT NOT NULL DEFAULT ''"
                 )
+            if "created_at" not in columns:
+                conn.execute(
+                    "ALTER TABLE approvals ADD COLUMN created_at TEXT NOT NULL DEFAULT ''"
+                )
+            if "decided_at" not in columns:
+                conn.execute(
+                    "ALTER TABLE approvals ADD COLUMN decided_at TEXT NOT NULL DEFAULT ''"
+                )
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._path)
@@ -239,8 +286,9 @@ class SQLiteStore:
                 """
                 INSERT OR REPLACE INTO approvals
                     (shipment_id, result_json, shipment_json, approver, approved,
-                     rejected_by, reject_reason, dispatch_status, approve_reason)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     rejected_by, reject_reason, dispatch_status, approve_reason,
+                     created_at, decided_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.result.shipment_id,
@@ -252,6 +300,8 @@ class SQLiteStore:
                     record.reject_reason,
                     record.dispatch_status,
                     record.approve_reason,
+                    record.created_at,
+                    record.decided_at,
                 ),
             )
 
@@ -272,6 +322,8 @@ class SQLiteStore:
             rejected_by=row["rejected_by"],
             reject_reason=row["reject_reason"],
             dispatch_status=row["dispatch_status"] if "dispatch_status" in keys else None,
+            created_at=row["created_at"] if "created_at" in keys else "",
+            decided_at=row["decided_at"] if "decided_at" in keys else "",
         )
 
     def get(self, shipment_id: str) -> ApprovalRecord | None:
@@ -282,6 +334,14 @@ class SQLiteStore:
         if row is None:
             return None
         return self._row_to_record(row)
+
+    def records(self) -> list[ApprovalRecord]:
+        """Every stored record, newest first (metrics / audit read)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM approvals ORDER BY rowid DESC"
+            ).fetchall()
+        return [self._row_to_record(row) for row in rows]
 
     def prior_shipments(self, exclude_shipment_id: str | None = None) -> list[dict]:
         with self._connect() as conn:
@@ -314,12 +374,106 @@ class SQLiteStore:
         return entries
 
 
+class PostgresStore:
+    """PostgreSQL-backed store — the production system of record.
+
+    One short-lived psycopg connection per call (the same shape as
+    the SQLite double), payload as JSONB, ordering by the identity
+    ``seq`` column so history reads match insertion order. Schema is
+    owned by the migrations (``db.ensure_migrated`` runs them before
+    the first query); this class never issues DDL.
+    """
+
+    def __init__(self, url: str) -> None:
+        from .db import ensure_migrated
+
+        self._url = url
+        ensure_migrated(url)
+
+    def _connect(self):
+        from .db import connect
+
+        return connect(self._url)
+
+    def save(self, record: ApprovalRecord) -> None:
+        from psycopg.types.json import Jsonb
+
+        decided = record.result.approval_status in ("approved", "rejected")
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO approvals (shipment_id, payload, decided) "
+                "VALUES (%s, %s, %s) "
+                "ON CONFLICT (shipment_id) DO UPDATE SET "
+                "payload = EXCLUDED.payload, decided = EXCLUDED.decided, "
+                "updated_at = now()",
+                (
+                    record.result.shipment_id,
+                    Jsonb(_record_to_dict(record)),
+                    decided,
+                ),
+            )
+            conn.commit()
+
+    def get(self, shipment_id: str) -> ApprovalRecord | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT payload FROM approvals WHERE shipment_id = %s",
+                (shipment_id,),
+            ).fetchone()
+        return _record_from_dict(row[0]) if row else None
+
+    def _all_records(self) -> list[ApprovalRecord]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT payload FROM approvals ORDER BY seq"
+            ).fetchall()
+        return [_record_from_dict(row[0]) for row in rows]
+
+    def records(self) -> list[ApprovalRecord]:
+        """Every stored record, newest first (metrics / audit read)."""
+        return list(reversed(self._all_records()))
+
+    def prior_shipments(self, exclude_shipment_id: str | None = None) -> list[dict]:
+        entries = []
+        for record in reversed(self._all_records()):
+            if record.result.shipment_id == exclude_shipment_id:
+                continue
+            entry = history_entry(record)
+            if entry is not None:
+                entries.append(entry)
+        return entries
+
+    def decision_feedback(self, exclude_shipment_id: str | None = None) -> list[dict]:
+        entries = []
+        for record in reversed(self._all_records()):
+            if record.result.shipment_id == exclude_shipment_id:
+                continue
+            entry = feedback_entry(record)
+            if entry is not None:
+                entries.append(entry)
+        return entries
+
+
 def default_store() -> ApprovalStore:
-    """Resolve the store from the environment (see module docstring)."""
+    """Resolve the store from the environment (see module docstring).
+
+    ``DATABASE_URL`` set → :class:`PostgresStore` (the production
+    system of record). ``STATE_DB_PATH`` set → the SQLite test double
+    at that path (``:memory:`` → the in-memory double). Neither →
+    :class:`InMemoryStore`: analyses and decisions live for the
+    process only. There is deliberately no file-backed default any
+    more — local files are not a runtime story (see
+    ``docs/architecture.md``).
+    """
+    from .db import database_url
+
+    url = database_url()
+    if url:
+        return PostgresStore(url)
     load_dotenv()
     configured = env_str("STATE_DB_PATH")
     if configured == ":memory:":
         return InMemoryStore()
     if configured:
         return SQLiteStore(configured)
-    return SQLiteStore(Path(__file__).resolve().parents[2] / ".data" / "state.db")
+    return InMemoryStore()

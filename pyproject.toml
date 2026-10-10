@@ -15,6 +15,16 @@ requires-python = ">=3.10,<3.13"
 #   pip install -e ".[dev]" -c constraints.txt
 dependencies = [
     "langgraph==0.6.11",
+    # The production system of record is PostgreSQL: the official
+    # LangGraph Postgres checkpointer over psycopg 3 (see db.py /
+    # store.py / checkpoints.py). DATABASE_URL configures it; without
+    # one the service runs on in-memory test doubles.
+    "langgraph-checkpoint-postgres==3.0.5",
+    "psycopg[binary]==3.3.6",
+    # Shipment documents live in object storage behind a port
+    # (object_store.py): boto3 against any S3-compatible endpoint
+    # (AWS S3, MinIO in the compose stack).
+    "boto3==1.43.111",
     "fastapi==0.143.0",
     "pydantic==2.14.0",
     "uvicorn==0.54.0",

@@ -1,5 +1,11 @@
-"""Persistence tests: approvals survive across service instances when
-the store is the SQLite file — the in-memory store stays the double.
+"""Persistence tests: approvals survive across service instances on a
+durable store.
+
+PostgreSQL is the production store — its live contract (including the
+same reopen behaviour exercised here) is covered by the gated
+integration tests in ``test_postgres_integration.py``. The SQLite file
+double carries the store contract in this hermetic suite, and the
+in-memory store stays the ephemeral double.
 """
 
 from __future__ import annotations
@@ -9,7 +15,12 @@ import pytest
 from shipment_agent.model_backends import MockModelBackend
 from shipment_agent.retriever import KeywordRetriever
 from shipment_agent.service import ShipmentService
-from shipment_agent.store import InMemoryStore, SQLiteStore, default_store
+from shipment_agent.store import (
+    InMemoryStore,
+    PostgresStore,
+    SQLiteStore,
+    default_store,
+)
 
 DELAY_SHIPMENT = {
     "shipment_id": "PER-1",
@@ -86,6 +97,12 @@ def test_in_memory_store_is_still_a_working_double():
 
 def test_default_store_selection(monkeypatch, tmp_path):
     monkeypatch.setattr("shipment_agent.store.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setattr("shipment_agent.db.load_dotenv", lambda *a, **k: None)
+    # Neither variable: the in-memory double — there is no file-backed
+    # default any more.
+    monkeypatch.delenv("STATE_DB_PATH", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    assert isinstance(default_store(), InMemoryStore)
     monkeypatch.setenv("STATE_DB_PATH", ":memory:")
     assert isinstance(default_store(), InMemoryStore)
     db_file = tmp_path / "chosen.db"
@@ -93,3 +110,13 @@ def test_default_store_selection(monkeypatch, tmp_path):
     store = default_store()
     assert isinstance(store, SQLiteStore)
     assert db_file.exists()  # created eagerly with its schema
+
+
+def test_default_store_prefers_postgres_when_database_url_set(monkeypatch):
+    monkeypatch.setattr("shipment_agent.store.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setattr("shipment_agent.db.load_dotenv", lambda *a, **k: None)
+    # Migrations are the only connection a PostgresStore construction
+    # makes; stub the runner so the selection is testable offline.
+    monkeypatch.setattr("shipment_agent.db.ensure_migrated", lambda url=None: None)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@db.internal:5432/app")
+    assert isinstance(default_store(), PostgresStore)

@@ -11,8 +11,11 @@ having the methods, not by inheriting):
 - :class:`Retriever` — policy retrieval (keyword / semantic / hybrid).
   Implementations live in ``retriever.py``.
 - :class:`Store` — where analysis records and human decisions live
-  (SQLite by default, in-memory as a test double). Implementations
-  live in ``store.py`` (which calls this protocol ``ApprovalStore``).
+  (PostgreSQL in production, SQLite/in-memory as test doubles).
+  Implementations live in ``store.py`` (which calls this protocol
+  ``ApprovalStore``).
+- :class:`ObjectStore` — shipment documents as objects in an
+  S3-compatible bucket. Implementations live in ``object_store.py``.
 - :class:`EventSink` — where structured run events go (streaming,
   tracing). Implementations live in ``events.py``.
 - :class:`Checkpointer` — LangGraph graph-state persistence behind
@@ -69,9 +72,27 @@ class Store(Protocol):
 
     def get(self, shipment_id: str) -> "ApprovalRecord | None": ...
 
+    def records(self) -> list["ApprovalRecord"]: ...
+
     def prior_shipments(self, exclude_shipment_id: str | None = None) -> list[dict]: ...
 
     def decision_feedback(self, exclude_shipment_id: str | None = None) -> list[dict]: ...
+
+
+class ObjectStore(Protocol):
+    """The document-storage seam: shipment documents as objects.
+
+    Keys are opaque strings the intake side chooses (the service's
+    archive path uses ``shipments/<id>/documents/<doc>.txt``).
+    Implementations live in ``object_store.py``: S3-compatible
+    (boto3) for production, in-memory for tests.
+    """
+
+    def put(self, key: str, data: bytes, content_type: str = "text/plain") -> str: ...
+
+    def get(self, key: str) -> bytes: ...
+
+    def exists(self, key: str) -> bool: ...
 
 
 class EventSink(Protocol):
