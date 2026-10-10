@@ -4,8 +4,12 @@ Approving a draft records the decision and marks the claim packet
 ready. By default it performs NO external action (no email, no carrier
 API call). The one opt-in exception is output routing: when
 ``ACTION_WEBHOOK_URL`` is configured, the approved packet is POSTed to
-that endpoint — the customer's system of choice — and the outcome is
-recorded on the result (see ``dispatch_approval_webhook``).
+that endpoint — the customer's system of choice. Every delivery
+attempt is written to the record's **delivery ledger** (timestamp,
+HTTP status, signature id, error, next-retry due time), and a failed
+delivery can be retried under a bounded attempt budget with
+exponential backoff (see ``dispatch_approval_webhook``,
+``retry_dispatch``, ``due_dispatch_retries``).
 
 Records live in an approval store (``store.py``): PostgreSQL when
 ``DATABASE_URL`` is configured, so analyses and human decisions
@@ -27,12 +31,13 @@ import hashlib
 import hmac
 import json
 import threading
+import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from .checkpoints import get_checkpointer
-from .config import env_float, env_str, load_dotenv
+from .config import env_float, env_int, env_str, load_dotenv
 from .graph import resume_approval, run_shipment
 from .model_backends import ModelBackend, get_backend
 from .object_store import get_object_store
@@ -74,21 +79,71 @@ def sign_webhook_body(body: bytes, secret: str) -> str:
     return f"sha256={digest}"
 
 
-def dispatch_approval_webhook(record: ApprovalRecord) -> str | None:
-    """POST the approved packet to ``ACTION_WEBHOOK_URL`` (off by default).
+@dataclass
+class DispatchOutcome:
+    """One webhook delivery attempt's result, in ledger detail.
 
-    This is the output-routing seam — the thin adapter between an
-    approval and the customer's system of choice (their TMS, a ticket
-    queue, an automation endpoint). Returns ``None`` when no URL is
-    configured (the default: no external action at all), ``"sent"`` on
-    a 2xx response, and ``"failed"`` on any error or non-2xx — a failed
-    dispatch never undoes the approval; it is recorded on the result
-    for follow-up. Short timeout on purpose: an approval must not hang
-    on a downstream system.
+    ``http_status`` is the response code when the endpoint answered
+    at all (including an error status — a 500 is a *failed* delivery
+    with a status, not a mystery); ``error`` names what went wrong
+    (``"HTTP 500"``, or the transport exception). ``signature_id`` is
+    the ``X-Trida-Signature`` value the delivery carried, when
+    signing is configured — the identifier a receiver quotes when
+    reporting a delivery, and the value it verifies against.
+    """
 
-    When ``ACTION_WEBHOOK_SECRET`` is set, the delivery is signed
-    (``X-Trida-Signature``, see :func:`sign_webhook_body`); unset,
-    deliveries are unsigned, exactly as before.
+    status: str  # sent | failed
+    http_status: int | None = None
+    signature_id: str | None = None
+    error: str | None = None
+
+
+def webhook_max_attempts() -> int:
+    """Total dispatch attempts per approval (first try + retries).
+
+    ``ACTION_WEBHOOK_MAX_ATTEMPTS``, default 3, minimum 1 — the bound
+    that keeps a dead endpoint from being retried forever.
+    """
+    load_dotenv()
+    return max(1, env_int("ACTION_WEBHOOK_MAX_ATTEMPTS", 3))
+
+
+def webhook_retry_delay(attempt_number: int) -> float:
+    """Seconds to wait after attempt ``attempt_number`` fails.
+
+    Exponential backoff on ``ACTION_WEBHOOK_RETRY_BASE_SECONDS``
+    (default 30): attempt 1 → base, attempt 2 → 2×base, and so on.
+    The schedule is bookkeeping, recorded on the ledger entry as
+    ``next_retry_at``; who acts on it (an operator pressing retry,
+    a scheduler polling :meth:`ShipmentService.due_dispatch_retries`)
+    is the deployment's choice.
+    """
+    load_dotenv()
+    base = env_float("ACTION_WEBHOOK_RETRY_BASE_SECONDS", 30.0)
+    return base * (2 ** max(0, attempt_number - 1))
+
+
+def _parse_iso(value: str | None):
+    """Parse an ISO-8601 timestamp this codebase wrote, or None."""
+    if not value:
+        return None
+    from datetime import datetime
+
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def attempt_webhook_dispatch(record: ApprovalRecord) -> DispatchOutcome | None:
+    """Make ONE approval-webhook delivery attempt.
+
+    Returns ``None`` when no URL is configured (the default: no
+    external action at all) — no attempt happened, so nothing is
+    ledgered. Otherwise returns the outcome in full: a 2xx is
+    ``sent``; a non-2xx or any transport error is ``failed`` with
+    the status/error recorded — a failed dispatch never raises and
+    never undoes the approval it follows.
     """
     load_dotenv()
     url = env_str("ACTION_WEBHOOK_URL")
@@ -105,9 +160,11 @@ def dispatch_approval_webhook(record: ApprovalRecord) -> str | None:
     }
     body = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json"}
+    signature_id = None
     secret = env_str("ACTION_WEBHOOK_SECRET")
     if secret:
-        headers["X-Trida-Signature"] = sign_webhook_body(body, secret)
+        signature_id = sign_webhook_body(body, secret)
+        headers["X-Trida-Signature"] = signature_id
     request = urllib.request.Request(
         url,
         data=body,
@@ -117,9 +174,92 @@ def dispatch_approval_webhook(record: ApprovalRecord) -> str | None:
     timeout = env_float("ACTION_WEBHOOK_TIMEOUT_SECONDS", 5.0)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return "sent" if 200 <= response.status < 300 else "failed"
-    except Exception:  # dispatch failure is recorded, never raised
-        return "failed"
+            status = int(response.status)
+            if 200 <= status < 300:
+                return DispatchOutcome(
+                    status="sent", http_status=status, signature_id=signature_id
+                )
+            return DispatchOutcome(
+                status="failed",
+                http_status=status,
+                signature_id=signature_id,
+                error=f"HTTP {status}",
+            )
+    except urllib.error.HTTPError as exc:  # the endpoint answered, with an error
+        return DispatchOutcome(
+            status="failed",
+            http_status=int(exc.code),
+            signature_id=signature_id,
+            error=f"HTTP {exc.code}",
+        )
+    except Exception as exc:  # transport failure: recorded, never raised
+        return DispatchOutcome(
+            status="failed",
+            signature_id=signature_id,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+
+
+def record_dispatch_attempt(record: ApprovalRecord, outcome: DispatchOutcome) -> dict:
+    """Append one attempt to the record's delivery ledger.
+
+    The ledger entry is the delivery's audit record: which attempt,
+    when, the outcome, the HTTP status and signature id when there
+    are any, the error when it failed, and — for a failure with
+    attempts remaining — when the next retry falls due under the
+    backoff schedule. The record's ``dispatch_status`` (and its echo
+    on the result, plus ``external_action_taken``) follows the
+    latest attempt. Returns the entry.
+    """
+    from datetime import timedelta, timezone, datetime
+
+    attempt_number = len(record.dispatch_attempts) + 1
+    now = datetime.now(timezone.utc)
+    next_retry_at = None
+    if outcome.status == "failed" and attempt_number < webhook_max_attempts():
+        due = now + timedelta(seconds=webhook_retry_delay(attempt_number))
+        next_retry_at = due.isoformat()
+    entry = {
+        "attempt": attempt_number,
+        "at": now.isoformat(),
+        "outcome": outcome.status,
+        "http_status": outcome.http_status,
+        "signature_id": outcome.signature_id,
+        "error": outcome.error,
+        "next_retry_at": next_retry_at,
+    }
+    record.dispatch_attempts.append(entry)
+    record.dispatch_status = outcome.status
+    record.result.dispatch_status = outcome.status
+    record.result.external_action_taken = outcome.status == "sent"
+    return entry
+
+
+def dispatch_approval_webhook(record: ApprovalRecord) -> str | None:
+    """POST the approved packet to ``ACTION_WEBHOOK_URL`` (off by default).
+
+    This is the output-routing seam — the thin adapter between an
+    approval and the customer's system of choice (their TMS, a ticket
+    queue, an automation endpoint). Returns ``None`` when no URL is
+    configured (the default: no external action at all), ``"sent"`` on
+    a 2xx response, and ``"failed"`` on any error or non-2xx — a failed
+    dispatch never undoes the approval; it is recorded on the result
+    for follow-up. Short timeout on purpose: an approval must not hang
+    on a downstream system.
+
+    When ``ACTION_WEBHOOK_SECRET`` is set, the delivery is signed
+    (``X-Trida-Signature``, see :func:`sign_webhook_body`); unset,
+    deliveries are unsigned, exactly as before.
+
+    The attempt is also written to the record's delivery ledger
+    (:func:`record_dispatch_attempt`) — that ledger, not this return
+    value, is the durable account of the delivery.
+    """
+    outcome = attempt_webhook_dispatch(record)
+    if outcome is None:
+        return None
+    record_dispatch_attempt(record, outcome)
+    return outcome.status
 
 
 @dataclass
@@ -471,15 +611,11 @@ class ShipmentService:
         # Output routing: by default there is NO external action. When
         # the operator configures ACTION_WEBHOOK_URL, the approved
         # packet is POSTed to that endpoint (the customer's system of
-        # choice) and the outcome is recorded — a failed dispatch leaves
-        # the approval standing and says so on the result.
+        # choice) and the attempt is written to the record's delivery
+        # ledger — a failed dispatch leaves the approval standing,
+        # says so on the result, and can be retried (retry_dispatch).
         record.result.external_action_taken = False
-        dispatch = dispatch_approval_webhook(record)
-        if dispatch is not None:
-            record.dispatch_status = dispatch
-            record.result.dispatch_status = dispatch
-            if dispatch == "sent":
-                record.result.external_action_taken = True
+        dispatch_approval_webhook(record)
         store.save(record)
         self._resume_thread(
             shipment_id,
@@ -509,6 +645,115 @@ class ShipmentService:
             {"decision": "rejected", "actor": reviewer, "reason": reason},
         )
         return record.result
+
+    def dispatch_ledger(self, shipment_id: str) -> dict | None:
+        """The webhook delivery ledger for one shipment, or None.
+
+        The durable account of the approval's output routing: every
+        attempt (when, outcome, HTTP status, signature id, error),
+        the current status, and the retry bookkeeping (attempts used
+        / remaining, when the next retry falls due). ``None`` for an
+        unknown shipment; a known shipment with no webhook configured
+        reports an empty ledger, not an error.
+        """
+        record = self._get_store().get(shipment_id)
+        if record is None:
+            return None
+        attempts = record.dispatch_attempts
+        latest = attempts[-1] if attempts else None
+        return {
+            "shipment_id": shipment_id,
+            "dispatch_status": record.dispatch_status,
+            "attempts": attempts,
+            "attempts_used": len(attempts),
+            "attempts_max": webhook_max_attempts(),
+            "attempts_remaining": max(0, webhook_max_attempts() - len(attempts)),
+            "next_retry_at": latest.get("next_retry_at") if latest else None,
+        }
+
+    def retry_dispatch(
+        self, shipment_id: str, *, force: bool = False, now=None
+    ) -> AgentResult:
+        """Retry a failed approval-webhook delivery, once.
+
+        The retry is bounded and honest about its bounds: the record
+        must exist and be approved, a webhook must be configured, the
+        delivery must not already be ``sent``, the attempt budget
+        (``ACTION_WEBHOOK_MAX_ATTEMPTS`` total attempts) must have
+        room, and the backoff recorded on the last failed attempt
+        must have elapsed — unless ``force`` is set, the operator
+        override for "I fixed the endpoint, send it now". The new
+        attempt joins the ledger either way it lands; a retry never
+        re-records the decision and never resumes the graph thread —
+        the approval happened once, this is only its delivery.
+        """
+        from datetime import datetime, timezone
+
+        store = self._get_store()
+        record = store.get(shipment_id)
+        if record is None:
+            raise KeyError(f"Unknown shipment_id: {shipment_id} (analyze it first)")
+        if record.result.approval_status != "approved":
+            raise ValueError(
+                f"Shipment {shipment_id} is not approved (status: "
+                f"{record.result.approval_status}) — only an approval dispatches"
+            )
+        load_dotenv()
+        if not env_str("ACTION_WEBHOOK_URL"):
+            raise ValueError(
+                "ACTION_WEBHOOK_URL is not configured — there is no delivery to retry"
+            )
+        if record.dispatch_status == "sent":
+            raise ValueError(
+                f"Shipment {shipment_id}'s packet was already delivered (dispatch_status: sent)"
+            )
+        attempts_used = len(record.dispatch_attempts)
+        if attempts_used >= webhook_max_attempts():
+            raise ValueError(
+                f"Dispatch retry budget exhausted for {shipment_id}: "
+                f"{attempts_used} attempt(s) already made "
+                f"(ACTION_WEBHOOK_MAX_ATTEMPTS={webhook_max_attempts()})"
+            )
+        if attempts_used and not force:
+            due_at = _parse_iso(record.dispatch_attempts[-1].get("next_retry_at"))
+            moment = now or datetime.now(timezone.utc)
+            if due_at is not None and moment < due_at:
+                raise ValueError(
+                    f"Backoff has not elapsed for {shipment_id}: next retry is due "
+                    f"at {record.dispatch_attempts[-1]['next_retry_at']} "
+                    "(pass force to retry now)"
+                )
+        outcome = attempt_webhook_dispatch(record)
+        if outcome is None:  # URL vanished between the check and the call
+            raise ValueError(
+                "ACTION_WEBHOOK_URL is not configured — there is no delivery to retry"
+            )
+        record_dispatch_attempt(record, outcome)
+        store.save(record)
+        return record.result
+
+    def due_dispatch_retries(self, now=None) -> list[str]:
+        """Shipment ids whose failed delivery is due a retry now.
+
+        A record qualifies when its latest dispatch failed, attempts
+        remain in the budget, and the recorded backoff has elapsed.
+        This is the poll a scheduler/worker loop calls; performing
+        the retries stays with :meth:`retry_dispatch`, one bounded
+        attempt per call.
+        """
+        from datetime import datetime, timezone
+
+        moment = now or datetime.now(timezone.utc)
+        due: list[str] = []
+        for record in self._get_store().records():
+            if record.dispatch_status != "failed" or not record.dispatch_attempts:
+                continue
+            if len(record.dispatch_attempts) >= webhook_max_attempts():
+                continue
+            due_at = _parse_iso(record.dispatch_attempts[-1].get("next_retry_at"))
+            if due_at is None or moment >= due_at:
+                due.append(record.result.shipment_id)
+        return due
 
     def get(self, shipment_id: str) -> AgentResult | None:
         record = self._get_store().get(shipment_id)

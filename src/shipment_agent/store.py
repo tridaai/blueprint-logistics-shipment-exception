@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import env_str, load_dotenv
@@ -41,6 +41,11 @@ class ApprovalRecord:
     rejected_by: str | None = None
     reject_reason: str = ""
     dispatch_status: str | None = None  # outbound webhook outcome, when configured
+    # The webhook delivery ledger: one entry per dispatch attempt
+    # (see service.record_dispatch_attempt) — {attempt, at, outcome,
+    # http_status, signature_id, error, next_retry_at}. Empty when no
+    # webhook is configured or no approval has dispatched yet.
+    dispatch_attempts: list[dict] = field(default_factory=list)
     # ISO-8601 UTC timestamps, stamped by the service ("" until set —
     # older rows simply have none). The audit export reads them.
     created_at: str = ""  # when the analysis was recorded
@@ -158,6 +163,7 @@ def _record_to_dict(record: ApprovalRecord) -> dict:
         "rejected_by": record.rejected_by,
         "reject_reason": record.reject_reason,
         "dispatch_status": record.dispatch_status,
+        "dispatch_attempts": record.dispatch_attempts,
         "created_at": record.created_at,
         "decided_at": record.decided_at,
     }
@@ -173,6 +179,7 @@ def _record_from_dict(data: dict) -> ApprovalRecord:
         rejected_by=data.get("rejected_by"),
         reject_reason=data.get("reject_reason", ""),
         dispatch_status=data.get("dispatch_status"),
+        dispatch_attempts=data.get("dispatch_attempts") or [],
         created_at=data.get("created_at", ""),
         decided_at=data.get("decided_at", ""),
     )
@@ -272,6 +279,10 @@ class SQLiteStore:
                 conn.execute(
                     "ALTER TABLE approvals ADD COLUMN decided_at TEXT NOT NULL DEFAULT ''"
                 )
+            if "dispatch_attempts_json" not in columns:
+                conn.execute(
+                    "ALTER TABLE approvals ADD COLUMN dispatch_attempts_json TEXT NOT NULL DEFAULT '[]'"
+                )
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._path)
@@ -287,8 +298,8 @@ class SQLiteStore:
                 INSERT OR REPLACE INTO approvals
                     (shipment_id, result_json, shipment_json, approver, approved,
                      rejected_by, reject_reason, dispatch_status, approve_reason,
-                     created_at, decided_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     created_at, decided_at, dispatch_attempts_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.result.shipment_id,
@@ -302,6 +313,7 @@ class SQLiteStore:
                     record.approve_reason,
                     record.created_at,
                     record.decided_at,
+                    json.dumps(record.dispatch_attempts),
                 ),
             )
 
@@ -313,6 +325,12 @@ class SQLiteStore:
         shipment = None
         if "shipment_json" in keys and row["shipment_json"]:
             shipment = json.loads(row["shipment_json"])
+        attempts: list[dict] = []
+        if "dispatch_attempts_json" in keys and row["dispatch_attempts_json"]:
+            try:
+                attempts = json.loads(row["dispatch_attempts_json"]) or []
+            except json.JSONDecodeError:
+                attempts = []
         return ApprovalRecord(
             result=AgentResult.model_validate_json(row["result_json"]),
             shipment=shipment,
@@ -322,6 +340,7 @@ class SQLiteStore:
             rejected_by=row["rejected_by"],
             reject_reason=row["reject_reason"],
             dispatch_status=row["dispatch_status"] if "dispatch_status" in keys else None,
+            dispatch_attempts=attempts,
             created_at=row["created_at"] if "created_at" in keys else "",
             decided_at=row["decided_at"] if "decided_at" in keys else "",
         )

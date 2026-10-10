@@ -381,3 +381,43 @@ def reject(shipment_id: str, request: RejectRequest) -> AgentResult:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/shipments/{shipment_id}/dispatch", dependencies=_AUTH)
+def dispatch_ledger(shipment_id: str) -> dict:
+    """The approval webhook's delivery ledger for one shipment:
+    every attempt (timestamp, outcome, HTTP status, signature id,
+    error), the current dispatch status, and the retry bookkeeping
+    (attempts used/remaining, next-retry due time). Empty attempts
+    when no webhook is configured — the default no-external-action
+    mode ledgers nothing because nothing was attempted."""
+    ledger = service.dispatch_ledger(shipment_id)
+    if ledger is None:
+        raise HTTPException(status_code=404, detail="Shipment not analyzed yet.")
+    return ledger
+
+
+class DispatchRetryRequest(BaseModel):
+    # Operator override: retry now even though the recorded backoff
+    # has not elapsed (the endpoint was down, it is fixed, send it).
+    force: bool = False
+
+
+@app.post(
+    "/shipments/{shipment_id}/dispatch/retry",
+    response_model=AgentResult,
+    dependencies=_AUTH,
+)
+def retry_dispatch(shipment_id: str, request: DispatchRetryRequest) -> AgentResult:
+    """Retry a failed approval-webhook delivery — one bounded attempt.
+
+    Refused (422) when the shipment is not approved, no webhook is
+    configured, the delivery already succeeded, the attempt budget
+    is exhausted, or the backoff has not elapsed and ``force`` is
+    not set. The attempt joins the delivery ledger either way."""
+    try:
+        return service.retry_dispatch(shipment_id, force=request.force)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
