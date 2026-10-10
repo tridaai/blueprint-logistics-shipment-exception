@@ -263,7 +263,22 @@ class InMemoryStore:
         # the pair, so two tenants' SYN-1001s coexist without ever
         # shadowing each other.
         self._records: dict[tuple[str, str], ApprovalRecord] = {}
+        self._worker_status: dict[str, dict] = {}
         self._lock = threading.Lock()
+
+    # Worker status rows (see ports.Store): one summary per worker
+    # name, replaced wholesale on each recorded sweep.
+    def save_worker_status(self, worker: str, summary: dict) -> None:
+        with self._lock:
+            self._worker_status[worker] = summary
+
+    def worker_status(self, worker: str) -> dict | None:
+        with self._lock:
+            return self._worker_status.get(worker)
+
+    def all_worker_status(self) -> dict[str, dict]:
+        with self._lock:
+            return dict(self._worker_status)
 
     def save(self, record: ApprovalRecord) -> None:
         with self._lock:
@@ -488,6 +503,45 @@ class SQLiteStore:
         conn = sqlite3.connect(self._path)
         conn.row_factory = sqlite3.Row
         return conn
+
+    # Worker status rows (see ports.Store): a side table the store
+    # owns its DDL for, like the approvals table above.
+    def _ensure_worker_status_table(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS worker_status (
+                worker TEXT PRIMARY KEY,
+                summary_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+
+    def save_worker_status(self, worker: str, summary: dict) -> None:
+        with self._connect() as conn:
+            self._ensure_worker_status_table(conn)
+            conn.execute(
+                "INSERT OR REPLACE INTO worker_status "
+                "(worker, summary_json, updated_at) VALUES (?, ?, ?)",
+                (worker, json.dumps(summary), summary.get("updated_at", "")),
+            )
+
+    def worker_status(self, worker: str) -> dict | None:
+        with self._connect() as conn:
+            self._ensure_worker_status_table(conn)
+            row = conn.execute(
+                "SELECT summary_json FROM worker_status WHERE worker = ?",
+                (worker,),
+            ).fetchone()
+        return json.loads(row["summary_json"]) if row else None
+
+    def all_worker_status(self) -> dict[str, dict]:
+        with self._connect() as conn:
+            self._ensure_worker_status_table(conn)
+            rows = conn.execute(
+                "SELECT worker, summary_json FROM worker_status"
+            ).fetchall()
+        return {row["worker"]: json.loads(row["summary_json"]) for row in rows}
 
     def save(self, record: ApprovalRecord) -> None:
 
@@ -750,6 +804,35 @@ class PostgresStore:
                     (shipment_id, key),
                 ).fetchone()
         return _record_from_dict(row[0]) if row else None
+
+    # Worker status rows (see ports.Store): the worker_status table
+    # is migration 0006's; this class issues no DDL, as everywhere.
+    def save_worker_status(self, worker: str, summary: dict) -> None:
+        from psycopg.types.json import Jsonb
+
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO worker_status (worker, summary) VALUES (%s, %s) "
+                "ON CONFLICT (worker) DO UPDATE SET "
+                "summary = EXCLUDED.summary, updated_at = now()",
+                (worker, Jsonb(summary)),
+            )
+            conn.commit()
+
+    def worker_status(self, worker: str) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT summary FROM worker_status WHERE worker = %s",
+                (worker,),
+            ).fetchone()
+        return row[0] if row else None
+
+    def all_worker_status(self) -> dict[str, dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT worker, summary FROM worker_status"
+            ).fetchall()
+        return {row[0]: row[1] for row in rows}
 
     def _all_records(self, tenant_id: str | None = None) -> list[ApprovalRecord]:
         with self._connect() as conn:

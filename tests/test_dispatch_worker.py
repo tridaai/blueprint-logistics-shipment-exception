@@ -107,7 +107,11 @@ def test_one_sweep_performs_the_due_retry(sink, monkeypatch):
     _failed_delivery(service, sink, monkeypatch)  # base 0: due at once
 
     outcomes = service.run_dispatch_retries_once()
-    assert outcomes == [{"shipment_id": "WRK-1", "outcome": "sent"}]
+    # Round 6: entries also carry the record's tenant — the worker's
+    # status row accounts outcomes per tenant (worker observability).
+    assert outcomes == [
+        {"shipment_id": "WRK-1", "tenant_id": "default", "outcome": "sent"}
+    ]
     ledger = service.dispatch_ledger("WRK-1")
     assert ledger["attempts_used"] == 2
     assert ledger["dispatch_status"] == "sent"

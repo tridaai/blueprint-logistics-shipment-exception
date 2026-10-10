@@ -103,6 +103,21 @@ class Store(Protocol):
         self, exclude_shipment_id: str | None = None, tenant_id: str | None = None
     ) -> list[dict]: ...
 
+    # Worker status rows: the background processes' (dispatch-retry
+    # worker, SLA sweep) recorded run summaries — one row per worker
+    # name, replaced on each recorded sweep. Not records: they carry
+    # no shipment content, are not tenant-partitioned (the workers
+    # serve every tenant; their summaries carry per-tenant outcome
+    # counts inside), and the API's /metrics reads them so a silent
+    # worker is visible instead of indistinguishable from a healthy
+    # one. See service._record_worker_status.
+
+    def save_worker_status(self, worker: str, summary: dict) -> None: ...
+
+    def worker_status(self, worker: str) -> dict | None: ...
+
+    def all_worker_status(self) -> dict[str, dict]: ...
+
 
 class ObjectStore(Protocol):
     """The document-storage seam: shipment documents as objects.

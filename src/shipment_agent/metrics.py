@@ -13,11 +13,52 @@ Honesty rules, same as the per-run telemetry: token and cost totals
 sum only the runs that report them (provider mode) and say how many
 runs that was — a mock run's tokens are unknown, never zero-filled
 into a fake total.
+
+The same exposition also carries the **worker families** when the
+store holds worker status rows: the background processes (the
+dispatch-retry worker, the SLA sweep) record a run summary per
+sweep, and :func:`worker_metrics` projects those rows — last sweep
+time, sweep counts, cumulative outcomes per tenant — so a worker
+that stopped sweeping is visible on the same scrape as the record
+aggregates instead of failing silently in another process.
 """
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from .store import ApprovalRecord
+
+
+def worker_metrics(status_by_worker: dict[str, dict]) -> dict:
+    """Project the workers' status rows into metric shape.
+
+    The background processes (the dispatch-retry worker, the SLA
+    sweep) record a summary row per sweep in the store (see
+    ``service._record_worker_status``); this turns the rows into
+    what /metrics renders: when each worker last swept, how many
+    sweeps it has run, and its cumulative outcome counts per tenant.
+    Rows are operator data, not record data — the projection is a
+    pass over summaries, never over shipments.
+    """
+    workers: dict[str, dict] = {}
+    for name in sorted(status_by_worker):
+        summary = status_by_worker[name] or {}
+        last = summary.get("last_sweep_at")
+        timestamp = None
+        if last:
+            try:
+                timestamp = datetime.fromisoformat(
+                    str(last).replace("Z", "+00:00")
+                ).timestamp()
+            except ValueError:
+                timestamp = None
+        workers[name] = {
+            "last_sweep_timestamp": timestamp,
+            "sweeps_total": int(summary.get("sweeps", 0)),
+            "by_tenant": summary.get("by_tenant") or {},
+        }
+    return workers
 
 
 def compute_metrics(records: list[ApprovalRecord]) -> dict:
@@ -79,11 +120,14 @@ def _escape_label(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
-def render_prometheus(metrics: dict) -> str:
+def render_prometheus(metrics: dict, worker_status: dict | None = None) -> str:
     """The metrics payload as Prometheus text exposition.
 
     One HELP/TYPE header per metric family, then one sample line per
-    label set — the shape strict parsers expect.
+    label set — the shape strict parsers expect. ``worker_status``
+    (the store's worker rows, keyed by worker name) adds the worker
+    families when given: the background processes' heartbeat beside
+    the record aggregates.
     """
     lines: list[str] = []
 
@@ -154,4 +198,40 @@ def render_prometheus(metrics: dict) -> str:
         "Summed estimated provider cost over runs that report it.",
         [(None, metrics["estimated_cost_usd_total"])],
     )
+    if worker_status:
+        workers = worker_metrics(worker_status)
+        family(
+            "shipment_agent_worker_last_sweep_timestamp",
+            "When each background worker last completed a sweep (unix seconds). "
+            "A stale value is a worker that has stopped sweeping.",
+            [
+                ({"worker": name}, round(w["last_sweep_timestamp"], 3))
+                for name, w in workers.items()
+                if w["last_sweep_timestamp"] is not None
+            ],
+        )
+        family(
+            "shipment_agent_worker_sweeps_total",
+            "Sweeps completed by each background worker, recorded in the store.",
+            [({"worker": name}, w["sweeps_total"]) for name, w in workers.items()],
+        )
+        outcome_samples: list[tuple[dict | None, object]] = []
+        for name, w in workers.items():
+            for tenant in sorted(w["by_tenant"]):
+                for outcome in sorted(w["by_tenant"][tenant]):
+                    outcome_samples.append(
+                        (
+                            {
+                                "worker": name,
+                                "tenant": tenant,
+                                "outcome": outcome,
+                            },
+                            w["by_tenant"][tenant][outcome],
+                        )
+                    )
+        family(
+            "shipment_agent_worker_outcomes_total",
+            "Cumulative outcomes recorded by each background worker, per tenant.",
+            outcome_samples,
+        )
     return "\n".join(lines) + "\n"

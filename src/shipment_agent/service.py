@@ -1321,12 +1321,87 @@ class ShipmentService:
                     shipment_id, now=moment, tenant_id=record.tenant_id
                 )
             except (KeyError, ValueError) as exc:
-                outcomes.append({"shipment_id": shipment_id, "error": str(exc)})
+                outcomes.append(
+                    {
+                        "shipment_id": shipment_id,
+                        "tenant_id": record.tenant_id,
+                        "error": str(exc),
+                    }
+                )
                 continue
             outcomes.append(
-                {"shipment_id": shipment_id, "outcome": result.dispatch_status}
+                {
+                    "shipment_id": shipment_id,
+                    "tenant_id": record.tenant_id,
+                    "outcome": result.dispatch_status,
+                }
             )
         return outcomes
+
+    # ------------------------------------------------------------------
+    # Worker observability: the sweeps report themselves
+    # ------------------------------------------------------------------
+
+    def _record_worker_status(
+        self, worker: str, sweep: dict, by_tenant: dict[str, dict]
+    ) -> None:
+        """Fold one sweep's outcome into the worker's status row.
+
+        The retry worker and the SLA sweep run as their own
+        processes; the store is the one place they and the API all
+        reach, so each sweep leaves its summary there (see
+        ``ports.Store``): when it ran, how many sweeps have run,
+        cumulative outcome counts overall and per tenant, and the
+        last sweep's own numbers. ``/metrics`` renders the rows —
+        a worker that has gone silent shows a stale last-sweep time
+        instead of looking identical to a healthy one.
+
+        Bookkeeping must never break the work it observes: a store
+        double without the status methods, or a failed write, is
+        skipped silently (the same posture as thread resumption).
+        """
+        try:
+            store = self._get_store()
+            save = getattr(store, "save_worker_status", None)
+            if not callable(save):
+                return
+            read = getattr(store, "worker_status", None)
+            existing = read(worker) if callable(read) else None
+            at = _now_iso()
+            summary = dict(existing) if existing else {}
+            summary["worker"] = worker
+            summary["sweeps"] = int(summary.get("sweeps", 0)) + 1
+            totals = dict(summary.get("totals") or {})
+            for outcome, count in sweep.items():
+                totals[outcome] = int(totals.get(outcome, 0)) + count
+            summary["totals"] = totals
+            merged_by_tenant = dict(summary.get("by_tenant") or {})
+            for tenant, outcomes in by_tenant.items():
+                tenant_totals = dict(merged_by_tenant.get(tenant) or {})
+                for outcome, count in outcomes.items():
+                    tenant_totals[outcome] = int(tenant_totals.get(outcome, 0)) + count
+                merged_by_tenant[tenant] = tenant_totals
+            summary["by_tenant"] = merged_by_tenant
+            summary["last_sweep"] = {"at": at, **sweep, "by_tenant": by_tenant}
+            summary["last_sweep_at"] = at
+            summary["updated_at"] = at
+            save(worker, summary)
+        except Exception:  # observability observes; it never gates the work
+            pass
+
+    def worker_status(self) -> dict[str, dict]:
+        """Every worker's recorded status row, keyed by worker name.
+
+        Empty when no sweep has recorded one yet — or when the
+        store is a double that does not keep them, in which case
+        /metrics simply carries no worker families."""
+        all_status = getattr(self._get_store(), "all_worker_status", None)
+        if not callable(all_status):
+            return {}
+        try:
+            return all_status()
+        except Exception:
+            return {}
 
     def dispatch_retry_worker(
         self,
@@ -1352,7 +1427,10 @@ class ShipmentService:
         Run it as its own process (``shipment-agent dispatch-retries``)
         next to the API — a sidecar, a systemd unit, or a cron-invoked
         ``--once`` — never inside the request path: an approval must
-        not wait on a downstream endpoint's backoff schedule.
+        not wait on a downstream endpoint's backoff schedule. Every
+        sweep also folds its outcome into the worker's status row
+        (see :meth:`_record_worker_status`), which is what makes the
+        loop observable between exits.
         """
         from datetime import datetime, timezone
 
@@ -1361,13 +1439,28 @@ class ShipmentService:
         while not stop_event.is_set():
             if max_sweeps is not None and totals["sweeps"] >= max_sweeps:
                 break
+            sweep_counts = {"attempted": 0, "sent": 0, "failed": 0, "errors": 0}
+            sweep_by_tenant: dict[str, dict] = {}
             for entry in self.run_dispatch_retries_once(now=clock()):
                 totals["attempted"] += 1
-                if entry.get("outcome") == "sent":
-                    totals["sent"] += 1
-                elif entry.get("outcome") == "failed":
-                    totals["failed"] += 1
+                sweep_counts["attempted"] += 1
+                outcome = entry.get("outcome")
+                bucket = outcome if outcome in ("sent", "failed") else "errors"
+                if bucket != "errors":
+                    totals[bucket] += 1
+                sweep_counts[bucket] += 1
+                tenant_counts = sweep_by_tenant.setdefault(
+                    entry.get("tenant_id", ""), {}
+                )
+                tenant_counts["attempted"] = tenant_counts.get("attempted", 0) + 1
+                tenant_counts[bucket] = tenant_counts.get(bucket, 0) + 1
             totals["sweeps"] += 1
+            # The heartbeat: every sweep leaves its summary on the
+            # worker's status row, so /metrics can show the worker
+            # alive (and what it did) between process exits.
+            self._record_worker_status(
+                "dispatch_retries", sweep_counts, sweep_by_tenant
+            )
             if max_sweeps is not None and totals["sweeps"] >= max_sweeps:
                 break
             stop_event.wait(interval_seconds)
@@ -1570,6 +1663,21 @@ class ShipmentService:
                         "attempt": entry["attempt"],
                     }
                 )
+        # The heartbeat: the sweep reports itself on the worker
+        # status row (observed rungs by outcome, per tenant), even
+        # when it observed nothing — a sweep that ran and found no
+        # breaches is exactly the signal that distinguishes a
+        # healthy quiet worker from a dead one.
+        sweep_counts = {"observed": len(entries), "sent": 0, "failed": 0,
+                        "disabled": 0, "not_configured": 0}
+        sweep_by_tenant: dict[str, dict] = {}
+        for entry in entries:
+            outcome = entry["outcome"]
+            if outcome in sweep_counts:
+                sweep_counts[outcome] += 1
+            tenant_counts = sweep_by_tenant.setdefault(entry["tenant_id"], {})
+            tenant_counts[outcome] = tenant_counts.get(outcome, 0) + 1
+        self._record_worker_status("sla_sweep", sweep_counts, sweep_by_tenant)
         return entries
 
     def carrier_scorecards(self, tenant_id: str | None = None) -> list[dict]:

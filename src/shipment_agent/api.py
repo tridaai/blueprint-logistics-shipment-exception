@@ -317,13 +317,20 @@ def metrics(
     runs, decisions, guardrail failures, latency, tokens, estimated
     cost (see ``metrics.py``). Open like /health — aggregates only,
     no shipment content; scrapers live on a trusted network segment
-    in any real deployment. The aggregates cover the resolved
-    tenant's partition (``X-Tenant-ID``), so a multi-tenant
-    deployment scrapes per tenant."""
+    in any real deployment. The record aggregates cover the
+    resolved tenant's partition (``X-Tenant-ID``), so a multi-tenant
+    deployment scrapes per tenant. The worker families (the
+    dispatch-retry worker's and SLA sweep's recorded run summaries:
+    last sweep time, sweeps, outcomes per tenant) are the exception
+    — the workers serve every tenant from one process, so their
+    rows are deployment-wide by nature and labelled per tenant
+    inside."""
     from .service import resolve_tenant_id
 
     records = service._get_store().records(tenant_id=resolve_tenant_id(x_tenant_id))
-    payload = render_prometheus(compute_metrics(records))
+    payload = render_prometheus(
+        compute_metrics(records), worker_status=service.worker_status()
+    )
     return PlainTextResponse(payload, media_type="text/plain; version=0.0.4")
 
 
