@@ -408,7 +408,10 @@ renders the store's aggregates (runs, decisions, guardrail failures,
 latency, tokens, estimated cost) as Prometheus text — plus the worker
 families projected from the store's worker-status rows (migration
 `0006`: the retry worker's and SLA sweep's recorded run summaries),
-so the background processes share the API's scrape.
+so the background processes share the API's scrape. The store also
+holds each tenant's runtime-managed policy documents (migration
+`0007`), merged over the bundled corpus per run (§4's corpus
+scoping reads them through the same tenant tag).
 Shipment documents live behind the same kind of seam: the
 `ObjectStore` port (`object_store.py`) — S3-compatible in production
 (`S3_BUCKET`, MinIO in the compose stack) — with key-only intake
@@ -799,7 +802,13 @@ Ordered by value when adapting this blueprint to your own operation:
    run summary per sweep in the store's worker-status rows
    (migration `0006`), rendered as worker families (last sweep time,
    sweep counts, outcomes per tenant) — a silent worker reads as a
-   stale heartbeat, not as health. Production adds distributed
+   stale heartbeat, not as health. Watched workers are alerted,
+   not just visible: a `WORKER_STALE_SECONDS` threshold (per worker
+   or global) turns an over-old last sweep — or a worker that has
+   never swept — into a stale flag on `/readiness` and `/metrics`,
+   and the SLA sweep fires one signed `worker_stale` event per
+   staleness episode, ledgered on the worker's own row until a
+   fresh sweep closes the episode. Production adds distributed
    tracing (e.g. Langfuse / OpenTelemetry) across the customer's
    systems and classification drift dashboards.
 6. **Evals as a regression gate:** the golden dataset grows from real
@@ -813,9 +822,20 @@ Ordered by value when adapting this blueprint to your own operation:
    (shared documents plus the tenant's own SOPs), and per-tenant
    keys bind the partition to the caller's credential, so under
    that configuration the `X-Tenant-ID` header is authenticated,
-   not trusted. What production still adds: per-user identity on
-   top of the shipped keys (a key is a tenant's shared secret, not
-   a person), and PII handling per the client's policy.
+   not trusted. Keys rotate without a hard cutover: a tenant's
+   outgoing key stays valid through a bounded grace window
+   (`TENANT_KEY_ROTATED_AT` + `TENANT_KEY_GRACE_HOURS`), every
+   record names the key generation that authenticated it (an id,
+   never the secret — carried into the audit export), and
+   `GET /auth/rotation` shows the old key's remaining use. The
+   corpus is operator-managed as well as code-managed: tenants
+   add/replace/remove their own documents at runtime through the
+   API (store-persisted, migration `0007`, object-store archived),
+   merged over the bundled corpus per run with provenance
+   (`shared` / `bundled` / `tenant`). What production still adds:
+   per-user identity on top of the shipped keys (a key is a
+   tenant's shared secret, not a person), and PII handling per the
+   client's policy.
 
 ## 10. Limitations of this prototype
 

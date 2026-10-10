@@ -37,7 +37,7 @@ the offline smoke-test backend. The primary workflow is
 ```bash
 uv sync --extra dev              # 1 · install the locked set (uv.lock)
 uv run shipment-agent-demo       # 2 · one shipment, end to end, with a trace
-uv run pytest -q                 # 3 · the full test suite (517 tests)
+uv run pytest -q                 # 3 · the full test suite (553 tests)
 ```
 
 No uv? Create a virtual environment and use pip. The direct dependencies
@@ -256,9 +256,13 @@ keeps aging past it re-fires on a later sweep as a signed
 `sla_escalation` event carrying the wait duration — its own
 ledger, its own dedupe marker, one rung per record per sweep —
 because a breach nobody acted on is a worse problem than a fresh
-one. Queue items carry their ladder stage (`sla_stage`:
-within_budget / breach / escalated) and the summary counts
-escalations beside breaches.
+one. The factor is per-severity tunable
+(`QUEUE_SLA_ESCALATION_FACTOR_<SEVERITY>` over the global value) —
+a critical case escalates at 1.5× its budget while a low one waits
+for 3× — and each item reports the factor that applied to it; the
+escalation payload names it. Queue items carry their ladder stage
+(`sla_stage`: within_budget / breach / escalated) and the summary
+counts escalations beside breaches.
 **Idempotency** closes the integration loop: send an
 `Idempotency-Key` header with `POST /shipments/analyze` (or the
 streaming variant) and a retry of the same submission returns the
@@ -296,6 +300,28 @@ another tenant's documents are absent from its corpus entirely
 `GET /policies` lists the caller's corpus; `python -m
 shipment_agent demo --tenant-demo` shows one case citing acme's
 SOP only when analysed as acme.
+
+Round 7 hardens both closures. **Key rotation with a grace
+window**: a tenant mid-rotation holds a current key plus the
+outgoing previous one (`TENANT_PREVIOUS_API_KEYS` /
+`API_KEY_PREVIOUS_<TENANT>`), which keeps authenticating until
+`TENANT_KEY_ROTATED_AT` + `TENANT_KEY_GRACE_HOURS` (per-tenant
+override, default 72h) and then earns a precise 401. Every
+analysis records which generation authenticated it — a key id
+like `acme:previous`, never the secret — in the audit export, and
+`GET /auth/rotation` plus the `/metrics` rotation families show
+the old key's remaining use, so an operator knows when the window
+can close. And a **tenant corpus management surface**: operators
+add, replace, and remove their own documents at runtime
+(`POST`/`DELETE /policies`), persisted through the store
+(migration `0007`), archived through the object-store port, and
+merged over the bundled corpus per run — retrieval picks a new
+document up with no restart, scoped to its tenant exactly like
+the bundled SOPs. The listing names each document's provenance
+(`shared` / `bundled` / `tenant`); a stored document may override
+the tenant's own bundled SOP (removing the override resurfaces
+the original), while redefining a shared document is refused.
+The console carries a panel for the caller's corpus.
 
 **The classification resolution policy** (implemented in
 `crosscheck.py`, shown in the result and the trace): rules are
@@ -538,10 +564,15 @@ API, CLI, and traced demo — read the same variables.**
 | `ACTION_WEBHOOK_RETRY_BASE_SECONDS` | `30` | Backoff base between delivery retries; the delay doubles per failed attempt and the next due time is recorded on the ledger |
 | `QUEUE_SLA_HOURS_CRITICAL` / `_HIGH` / `_MEDIUM` / `_LOW` | `4` / `24` / `48` / `96` | Approval-queue SLA budgets: hours a case of that severity may await a decision before `GET /queue` flags it `sla_breach` |
 | `QUEUE_SLA_ESCALATION_FACTOR` | `2` | The SLA ladder's second rung, as a multiple of the budget: a breach reported below this multiple that ages past it re-fires as a signed `sla_escalation` event with the wait duration, deduped per rung |
+| `QUEUE_SLA_ESCALATION_FACTOR_CRITICAL` / `_HIGH` / `_MEDIUM` / `_LOW` | the global factor | Per-severity escalation factors: override the global multiple for one severity (a critical case escalates faster, a low one slower); each item reports its own factor and the escalation payload names it. Every value clamps to at least `1` |
+| `WORKER_STALE_SECONDS` / `WORKER_STALE_SECONDS_<WORKER>` | — (unset) | Worker staleness thresholds: a watched worker whose last recorded sweep is older than its threshold (or which has never swept) flags stale on `/readiness` and `/metrics`, and the SLA sweep fires one signed `worker_stale` event per staleness episode. Unset = the worker is not watched |
 | `SLA_BREACH_WEBHOOK` | — (unset, off) | SLA breach events: `on` makes the sweep (`shipment-agent sla-sweep` / `POST /queue/sla-sweep`) fire one signed `sla_breach` webhook event per newly-breaching shipment — and the `sla_escalation` second rung past the escalation factor — deduped per rung per record |
 | `SLA_BREACH_WEBHOOK_URL` | `ACTION_WEBHOOK_URL` | Where SLA breach events are delivered when set; falls back to the approval webhook URL |
 | `TENANT_ID` | `default` | The tenant partition this process serves when a request carries no `X-Tenant-ID` header; every record and read is tenant-scoped (migration `0004`) |
 | `TENANT_API_KEYS` | — (unset) | Per-tenant API keys as comma-separated `tenant:key` pairs (or one `API_KEY_<TENANT>` variable per tenant). Once any per-tenant key is configured, a key opens only its own tenant: another tenant's key is a `403`, a missing/unknown key a `401`, and the shared `API_KEY` works for the `default` tenant only. Unset = the shared-key model, where `X-Tenant-ID` is a trusted claim |
+| `TENANT_PREVIOUS_API_KEYS` | — (unset) | A tenant's outgoing key during rotation, as `tenant:key` pairs (or one `API_KEY_PREVIOUS_<TENANT>` per tenant): accepted beside the current key until the grace deadline, then a precise `401` |
+| `TENANT_KEY_ROTATED_AT` | — (unset) | When each tenant's key last rotated, as `tenant:<ISO-8601>` pairs (or `TENANT_KEY_ROTATED_AT_<TENANT>`). No timestamp = no grace window: the previous key never validates |
+| `TENANT_KEY_GRACE_HOURS` | `72` | How long the previous key keeps working after rotation (per-tenant `TENANT_KEY_GRACE_HOURS_<TENANT>` wins). `GET /auth/rotation` shows the window and the old key's recorded use |
 
 To run the demo against a real model (Anthropic shown; OpenAI is the
 same shape, and Ollama needs no key at all):
@@ -613,7 +644,14 @@ Notes that matter:
   store — last sweep time, sweep count, cumulative outcomes per
   tenant — and `/metrics` renders the rows as worker families, so
   a worker that stopped sweeping shows a stale heartbeat instead
-  of looking like a healthy one with nothing to do. Unset
+  of looking like a healthy one with nothing to do. Watched
+  workers go further: with a `WORKER_STALE_SECONDS` threshold
+  configured (per worker or global), a worker whose last sweep is
+  older than it — or which has never swept — flags stale on
+  `/readiness` and in the `/metrics` worker families, and the SLA
+  sweep fires one signed `worker_stale` event per staleness
+  episode on the SLA channel, ledgered on the worker's own row
+  until a fresh sweep closes the episode. Unset
   (the default), approval performs no external action at all and the
   ledger stays empty. Decisions take
   one name everywhere: approve and reject both accept `actor` (the
@@ -749,7 +787,7 @@ the verified facts (invented ETAs and prohibited promises fail the pack),
 with per-case tokens, latency, and estimated cost. It fails loudly
 without a real provider and is never part of the default gate or CI.
 
-Test suite: **517 tests** (`pytest -q`: 512 passing, 5 Postgres
+Test suite: **553 tests** (`pytest -q`: 548 passing, 5 Postgres
 integration tests gated on `DATABASE_URL`) — classifier, tools,
 retriever (keyword, semantic, hybrid + rerank, Chroma path with a faked
 client, pgvector SQL formatting + a gated live round-trip), the retrieval query built from shipment content, intake
@@ -798,7 +836,18 @@ connection, the tenant SOP end to end), the SLA escalation ladder
 (stages and thresholds in the projection, rung order, per-rung
 dedupe, the first-observed-late case), worker observability
 (the status-row store contract, sweep folding, per-tenant
-outcomes, the /metrics worker families), decision
+outcomes, the /metrics worker families), key rotation (the
+previous key inside and outside its grace window, the precise
+post-deadline 401, the key id on the record and in the audit
+export, the rotation operator view), tenant corpus management
+(the store contract on both doubles, merge and provenance,
+retrieval without restart and its tenant scoping, the write
+path's refusals, object-store archiving), per-severity
+escalation factors (parsing and clamping, the item's own factor,
+only the critical case escalating under its faster factor),
+worker staleness (threshold parsing, the projection, one signed
+worker_stale event per episode, recovery and re-alert, the
+readiness and metrics flags), decision
 idempotency (replay without re-dispatch or duplicated feedback,
 the spent-key conflict, the surviving 422s), and lane-conditioned
 reliability (lane dominance, the thin-lane fallback to the
@@ -846,7 +895,8 @@ src/shipment_agent/   agent graph (11 traced steps + evidence fan-out
                       bundled samples (data/)
 migrations/           numbered SQL schema (approvals, pgvector
                       embeddings with the tenant axis, worker
-                      status), applied at startup by db.py
+                      status, tenant policy documents), applied
+                      at startup by db.py
 docs/architecture.md  full architecture and productionisation notes
 data/sample/          synthetic shipments (14) + policy corpus mirror
 evals/                golden dataset (32 cases) + run_evals.py +
