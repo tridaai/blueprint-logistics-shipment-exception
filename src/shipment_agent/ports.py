@@ -134,6 +134,23 @@ class Store(Protocol):
 
     def summary(self, key: str) -> dict | None: ...
 
+    # Key-use counters: one row per (tenant, key id) — how many
+    # authenticated requests that key generation has served, when
+    # the first and last were, and the same facts scoped to the
+    # current rotation window (see service.record_key_use). The
+    # evidence a key rotation closes on: readiness used to read
+    # stored analyses only, so an outgoing key used solely for
+    # reads left no trace and the quiet verdict overstated.
+    # Counters, not a log — one row per key, updated in place —
+    # and key ids name generations (`acme:previous`, `shared`):
+    # key material is never stored, here or anywhere.
+
+    def key_use_counter(self, tenant_id: str, key_id: str) -> dict | None: ...
+
+    def save_key_use_counter(
+        self, tenant_id: str, key_id: str, counter: dict
+    ) -> None: ...
+
     # Tenant policy documents: the runtime-managed slice of a
     # tenant's retrieval corpus (see service.upsert_tenant_policy).
     # The bundled corpora in policies_data.py are code; these rows
@@ -153,8 +170,8 @@ class Store(Protocol):
 
     # The tenant policy change ledger: one append-only entry per
     # add / replace / remove of a stored document (actor key id,
-    # timestamps, text hashes, the corpus_changed webhook's
-    # outcome — never document text). The audit trail for the
+    # timestamps, text hashes, a line-diff summary, the
+    # corpus_changed webhook's outcome). The audit trail for the
     # knowledge base, in the same ledger idiom as the delivery
     # ledgers on the records. Partitioned by tenant exactly like
     # the documents themselves: a tenant's history read sees only
@@ -164,6 +181,16 @@ class Store(Protocol):
 
     def tenant_policy_history(
         self, tenant_id: str, policy_id: str
+    ) -> list[dict]: ...
+
+    # The same ledger read across documents: one tenant's changes,
+    # oldest first, behind the recent-changes feed
+    # (GET /policies/history). ``limit`` keeps the newest that
+    # many entries, still oldest first — the digest-snapshot read's
+    # convention.
+
+    def tenant_policy_changes(
+        self, tenant_id: str, limit: int | None = None
     ) -> list[dict]: ...
 
     # Digest snapshots: the escalation digest's dated series. The

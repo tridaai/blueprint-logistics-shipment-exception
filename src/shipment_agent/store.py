@@ -282,7 +282,11 @@ class InMemoryStore:
         self._worker_status: dict[str, dict] = {}
         self._summaries: dict[str, dict] = {}
         self._tenant_policies: dict[tuple[str, str], dict] = {}
-        self._tenant_policy_history: dict[tuple[str, str], list[dict]] = {}
+        # One append-only list per tenant, in change order: the
+        # per-document history is a filter over it, so the ledger
+        # has a single source of truth in this double too.
+        self._tenant_policy_changes: dict[str, list[dict]] = {}
+        self._key_use_counters: dict[tuple[str, str], dict] = {}
         self._digest_history: dict[str, list[dict]] = {}
         self._lock = threading.Lock()
 
@@ -334,20 +338,43 @@ class InMemoryStore:
             return self._tenant_policies.pop((tenant_id, policy_id), None) is not None
 
     # The tenant policy change ledger (see ports.Store): append-only
-    # entries per (tenant, policy), read back oldest first.
+    # entries per tenant in change order; the per-document history
+    # and the corpus-wide feed are two reads over the one list.
     def record_tenant_policy_change(self, tenant_id: str, entry: dict) -> None:
         with self._lock:
-            key = (tenant_id, entry["policy_id"])
-            self._tenant_policy_history.setdefault(key, []).append(dict(entry))
+            self._tenant_policy_changes.setdefault(tenant_id, []).append(
+                dict(entry)
+            )
 
     def tenant_policy_history(self, tenant_id: str, policy_id: str) -> list[dict]:
         with self._lock:
             return [
                 dict(entry)
-                for entry in self._tenant_policy_history.get(
-                    (tenant_id, policy_id), []
-                )
+                for entry in self._tenant_policy_changes.get(tenant_id, [])
+                if entry["policy_id"] == policy_id
             ]
+
+    def tenant_policy_changes(
+        self, tenant_id: str, limit: int | None = None
+    ) -> list[dict]:
+        with self._lock:
+            entries = self._tenant_policy_changes.get(tenant_id, [])
+            if limit is not None:
+                entries = entries[-limit:] if limit > 0 else []
+            return [dict(entry) for entry in entries]
+
+    # Key-use counters (see ports.Store): one row per
+    # (tenant, key id), replaced on each recorded request.
+    def key_use_counter(self, tenant_id: str, key_id: str) -> dict | None:
+        with self._lock:
+            counter = self._key_use_counters.get((tenant_id, key_id))
+            return dict(counter) if counter is not None else None
+
+    def save_key_use_counter(
+        self, tenant_id: str, key_id: str, counter: dict
+    ) -> None:
+        with self._lock:
+            self._key_use_counters[(tenant_id, key_id)] = dict(counter)
 
     # Digest snapshots (see ports.Store): append-only per tenant,
     # pruned to the retention window on write, read oldest first.
@@ -749,6 +776,61 @@ class SQLiteStore:
                 (tenant_id, policy_id),
             ).fetchall()
         return [json.loads(row["payload_json"]) for row in rows]
+
+    def tenant_policy_changes(
+        self, tenant_id: str, limit: int | None = None
+    ) -> list[dict]:
+        with self._connect() as conn:
+            self._ensure_tenant_policy_history_table(conn)
+            if limit is None:
+                rows = conn.execute(
+                    "SELECT payload_json FROM tenant_policy_history "
+                    "WHERE tenant_id = ? ORDER BY seq",
+                    (tenant_id,),
+                ).fetchall()
+                return [json.loads(row["payload_json"]) for row in rows]
+            rows = conn.execute(
+                "SELECT payload_json FROM tenant_policy_history "
+                "WHERE tenant_id = ? ORDER BY seq DESC LIMIT ?",
+                (tenant_id, max(0, limit)),
+            ).fetchall()
+        return [json.loads(row["payload_json"]) for row in reversed(rows)]
+
+    # Key-use counters (see ports.Store): a side table this store
+    # owns its DDL for, like tenant_policy_history above — one row
+    # per (tenant, key id), replaced on each recorded request.
+    def _ensure_key_use_counters_table(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS key_use_counters (
+                tenant_id TEXT NOT NULL,
+                key_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, key_id)
+            )
+            """
+        )
+
+    def key_use_counter(self, tenant_id: str, key_id: str) -> dict | None:
+        with self._connect() as conn:
+            self._ensure_key_use_counters_table(conn)
+            row = conn.execute(
+                "SELECT payload_json FROM key_use_counters "
+                "WHERE tenant_id = ? AND key_id = ?",
+                (tenant_id, key_id),
+            ).fetchone()
+        return json.loads(row["payload_json"]) if row else None
+
+    def save_key_use_counter(
+        self, tenant_id: str, key_id: str, counter: dict
+    ) -> None:
+        with self._connect() as conn:
+            self._ensure_key_use_counters_table(conn)
+            conn.execute(
+                "INSERT OR REPLACE INTO key_use_counters "
+                "(tenant_id, key_id, payload_json) VALUES (?, ?, ?)",
+                (tenant_id, key_id, json.dumps(counter)),
+            )
 
     # Digest snapshots (see ports.Store): a side table the store
     # owns its DDL for, like tenant_policy_history above.
@@ -1189,6 +1271,52 @@ class PostgresStore:
                 (tenant_id, policy_id),
             ).fetchall()
         return [row[0] for row in rows]
+
+    def tenant_policy_changes(
+        self, tenant_id: str, limit: int | None = None
+    ) -> list[dict]:
+        with self._connect() as conn:
+            if limit is None:
+                rows = conn.execute(
+                    "SELECT payload FROM tenant_policy_history "
+                    "WHERE tenant_id = %s ORDER BY seq",
+                    (tenant_id,),
+                ).fetchall()
+                return [row[0] for row in rows]
+            rows = conn.execute(
+                "SELECT payload FROM tenant_policy_history "
+                "WHERE tenant_id = %s ORDER BY seq DESC LIMIT %s",
+                (tenant_id, max(0, limit)),
+            ).fetchall()
+        return [row[0] for row in reversed(rows)]
+
+    # Key-use counters (see ports.Store): the key_use_counters
+    # table is migration 0011's; this class issues no DDL, as
+    # everywhere. One row per (tenant, key id), upserted on each
+    # recorded request.
+    def key_use_counter(self, tenant_id: str, key_id: str) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT payload FROM key_use_counters "
+                "WHERE tenant_id = %s AND key_id = %s",
+                (tenant_id, key_id),
+            ).fetchone()
+        return row[0] if row else None
+
+    def save_key_use_counter(
+        self, tenant_id: str, key_id: str, counter: dict
+    ) -> None:
+        from psycopg.types.json import Jsonb
+
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO key_use_counters (tenant_id, key_id, payload) "
+                "VALUES (%s, %s, %s) "
+                "ON CONFLICT (tenant_id, key_id) DO UPDATE SET "
+                "payload = EXCLUDED.payload, updated_at = now()",
+                (tenant_id, key_id, Jsonb(counter)),
+            )
+            conn.commit()
 
     # Digest snapshots (see ports.Store): the digest_history table
     # is migration 0010's; this class issues no DDL, as everywhere.
