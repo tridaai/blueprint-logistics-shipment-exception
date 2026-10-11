@@ -387,6 +387,27 @@ every provider span had been landing as a disconnected root;
 the timed call now inherits the context, and a real run
 exports one tree.
 
+The audit surfaces deepen further. **Ledger entries now say
+what changed**: beside the actor, the time, and the text hashes,
+every corpus change carries a line-diff summary — exact
+added/removed counts and, on adds and replaces, the changed
+lines themselves, capped at 10 lines of 200 characters a side
+(a removal records counts and the final hash only, so erased
+text stays erased; the `corpus_changed` webhook stays
+hashes-only). The same entries read across the whole corpus at
+`GET /policies/history` — a recent-changes feed, newest first —
+and the console shows it beside the corpus. Bundled documents
+still fabricate no history: the ledger begins at the first
+operator write. And **key-use evidence covers the whole API**:
+readiness used to read stored analyses only, so an outgoing key
+used solely for reads looked quiet when it was not. The auth
+gate now stamps every authenticated request on a per-key
+counter (migration `0011` — totals, first/last use, and a count
+scoped to the current rotation window), and `/auth/rotation`,
+`/metrics`, and the digest read the merged evidence, so the
+window closes on proof: previous-key requests in the window,
+and when the last one was.
+
 **The classification resolution policy** (implemented in
 `crosscheck.py`, shown in the result and the trace): rules are
 authoritative on disagreement — **except** when the rules land on

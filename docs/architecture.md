@@ -519,7 +519,21 @@ change itself is ledgered in an append-only `tenant_policy_history`
 table (migration `0009`) — actor key id, timestamps, and the
 SHA-256 of the text before and after — served at
 `GET /policies/{id}/history`, so the knowledge base has the same
-audit trail as the deliveries it informs.
+audit trail as the deliveries it informs. Each entry also
+carries a **line-diff summary**: exact added/removed line
+counts and — on adds and replaces — the changed lines
+themselves, capped at 10 lines of 200 characters per side so
+one entry can never carry a whole document. A removal is the
+deliberate exception: counts and the final hash only, so a
+document an operator erased does not survive inside its own
+ledger entry. The webhook body stays hashes-only regardless —
+the diff rides the authenticated ledger reads, never the event
+channel. The same entries read across documents at
+`GET /policies/history` (newest first, `limit` defaulted to 50
+and clamped at 200): the corpus's recent-changes feed. The
+bundled corpus is code, not rows, and fabricates no history —
+a fresh tenant's feed is empty, and a bundled document enters
+the ledger only as the prior hash of its first override.
 
 Every attempt is also written to the record's **delivery ledger**
 (`ApprovalRecord.dispatch_attempts`, persisted with the record):
@@ -905,7 +919,22 @@ Ordered by value when adapting this blueprint to your own operation:
    (`TENANT_KEY_ROTATED_AT` + `TENANT_KEY_GRACE_HOURS`), every
    record names the key generation that authenticated it (an id,
    never the secret — carried into the audit export), and
-   `GET /auth/rotation` shows the old key's remaining use. The
+   `GET /auth/rotation` shows the old key's remaining use. That
+   use is counted on **every** authenticated request, not only
+   on analyses: the auth gate stamps a per-key counter
+   (`key_use_counters`, migration `0011` — one row per tenant +
+   key id holding totals, first/last use, the last request's
+   method and endpoint class, and a count scoped to the current
+   rotation window, which resets when a new rotation moment is
+   configured). Rotation readiness — `ready_to_close` on
+   `GET /auth/rotation`, in `/metrics`, and in the digest —
+   reads the merged evidence, the later of the analysis trail
+   and the request counter, so an outgoing key used only for
+   reads can no longer look quiet. The scrape carries both
+   counts side by side
+   (`…_previous_key_requests_total` for analyses,
+   `…_previous_key_authenticated_requests_total` for the
+   window's whole-API count). The
    corpus is operator-managed as well as code-managed: tenants
    add/replace/remove their own documents at runtime through the
    API (store-persisted, migration `0007`, object-store archived),
