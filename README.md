@@ -1,16 +1,12 @@
 <p align="center">
-  <img alt="Trida AI" src="assets/tridaai-logo.png" width="280">
+  <img alt="Trida AI" src="https://trida.ai/logos-rounded/trida-rounded.png" width="96">
 </p>
 
-# Trida AI
-
-## Blueprint — Logistics Shipment Exception Agent
+# Blueprint — Logistics Shipment Exception Agent
 
 It turns one shipment record into a classified exception, a policy-cited
 customer-update draft, and a claim-packet draft — then waits for a human
 decision.
-
-**Deep-dive:** [Shipment Exception Agent Blueprint](https://trida.ai/blog/shipment-exception-agent-blueprint) — how the agent works, where it stops, and what the evals actually prove.
 
 <p>
   <img alt="Python 3.10–3.12" src="https://img.shields.io/badge/python-3.10--3.12-4F46E5">
@@ -25,6 +21,14 @@ decision.
 > exception: an approval webhook you configure yourself — see
 > Configuration). It is not a production system and does not describe
 > any client engagement.
+
+<p align="center">
+  <a href="https://trida.ai/blog/shipment-exception-agent-blueprint">
+    <img src="https://geeytzpdwvjojoie.public.blob.vercel-storage.com/blog/1791673476977-cover.webp" alt="Shipment Exception Agent Blueprint" width="600">
+  </a>
+</p>
+
+**Deep-dive:** [Shipment Exception Agent Blueprint](https://trida.ai/blog/shipment-exception-agent-blueprint) — how the agent works, where it stops, and what the evals actually prove.
 
 ## Try it in 3 commands
 
