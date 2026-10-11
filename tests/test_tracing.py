@@ -100,6 +100,101 @@ def test_run_span_parents_every_node_span(exporter):
         assert node.attributes["node"] in SEQUENTIAL_NODES
 
 
+class _FakeCompletions:
+    """A fake OpenAI transport, in the test_llm_backends idiom:
+    the classify prompt gets a JSON suggestion, every other
+    completion gets a clean draft, and usage rides along so the
+    provider spans carry token counts."""
+
+    def create(self, model=None, max_tokens=None, messages=None):
+        system = " ".join(messages[0]["content"].split())
+        if "classifying a shipment exception" in system:
+            text = (
+                '{"exception_type": "delay", "severity": "high",'
+                ' "confidence": 0.9, "rationale": "Weather hold."}'
+            )
+        else:
+            text = (
+                "Subject: Update on shipment TRACE-1: delay\n\n"
+                "Dear Qwerty Konsignments LLC,\n\n"
+                "Your shipment is delayed by a weather hold. "
+                "The next update will arrive within one business day."
+            )
+        usage = SimpleNamespace(prompt_tokens=13, completion_tokens=5)
+        message = SimpleNamespace(content=text)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=message)], usage=usage
+        )
+
+
+def test_full_run_tree_nests_provider_spans_under_their_nodes(
+    exporter, monkeypatch
+):
+    """A provider-mode run, end to end: the same run span and the
+    same ordered node spans as the offline tree, plus a provider
+    span for the provider calls, each parented to the node that
+    made it — the tree a customer's tracing stack would show."""
+    from shipment_agent.model_backends import OpenAIBackend
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=_FakeCompletions())
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "openai",
+        SimpleNamespace(OpenAI=lambda **kwargs: fake_client),
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "shipment_agent.model_backends.load_dotenv", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        "shipment_agent.retriever.load_dotenv", lambda *a, **k: None
+    )
+    backend = OpenAIBackend()
+
+    exporter.clear()
+    result = run_shipment(
+        DELAY_SHIPMENT, backend=backend, evidence_mode="sequential"
+    )
+    assert result.shipment_id == "TRACE-1"
+    spans = exporter.get_finished_spans()
+    runs = [s for s in spans if s.name == "shipment.run"]
+    assert len(runs) == 1
+    run = runs[0]
+    nodes = [s for s in spans if s.name.startswith("node.")]
+    assert [s.name for s in nodes] == [f"node.{name}" for name in SEQUENTIAL_NODES]
+    node_ids = {s.context.span_id: s.name for s in nodes}
+
+    providers = [s for s in spans if s.name == "provider.openai"]
+    assert len(providers) >= 2
+    for call in providers:
+        assert call.context.trace_id == run.context.trace_id
+        # Nested: the parent is one of this run's node spans —
+        # never the run span itself, never a disconnected root.
+        assert call.parent is not None
+        assert call.parent.span_id in node_ids
+        assert call.attributes["backend"] == "openai"
+        assert call.attributes["operation"] == "chat_completion"
+    parents = {node_ids[call.parent.span_id] for call in providers}
+    # The classification cross-check and the draft are the two
+    # calls every provider-mode run makes.
+    assert "node.classify" in parents
+    assert "node.draft" in parents
+    # The plain completion calls stamp the usage the provider
+    # reported onto their spans. (The diagnosis tool loop's
+    # transport spans carry ids only — the loop accounts its
+    # usage as a whole, so no per-call counts are claimed there.)
+    for node_name in ("node.classify", "node.draft"):
+        stamped = [
+            c for c in providers if node_ids[c.parent.span_id] == node_name
+        ]
+        assert stamped, node_name
+        for call in stamped:
+            assert call.attributes["input_tokens"] == 13
+            assert call.attributes["output_tokens"] == 5
+
+
 def test_span_attributes_carry_ids_and_counts_never_content(exporter):
     exporter.clear()
     run_shipment(
