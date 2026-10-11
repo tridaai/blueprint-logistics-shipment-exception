@@ -146,6 +146,11 @@
     analysis retrieves it — no restart. Removing a tenant document that overrode a bundled one resurfaces the
     bundled original. Another tenant's documents never appear here.</p>
     <div id="corpus-list"><p class="note">Loading…</p></div>
+    <h3>Recent corpus changes</h3>
+    <p class="note">The change ledger across this tenant's documents (<code>GET /policies/history</code>),
+    newest first — who changed the knowledge base, when, and how the text moved. The bundled corpus is code:
+    its history begins at the first operator write, so a fresh tenant's feed is honestly empty.</p>
+    <div id="corpus-changes"><p class="note">Loading…</p></div>
     <h3>Add / replace a document</h3>
     <label for="policy-id">Policy ID</label>
     <input id="policy-id" type="text" placeholder="e.g. SOP-ACME-RETURNS" style="max-width:320px" autocomplete="off">
@@ -639,7 +644,29 @@ async function loadRetrieval() {
   }
 }
 
+async function loadCorpusChanges() {
+  const feed = $('corpus-changes');
+  try {
+    const res = await fetch('/policies/history?limit=10', {headers: apiHeaders()});
+    if (!res.ok) throw new Error('history failed (' + res.status + ')');
+    const body = await res.json();
+    feed.innerHTML = '';
+    if (!body.changes.length) {
+      feed.innerHTML = '<p class="note">No recorded changes yet — history begins at the first operator write.</p>';
+      return;
+    }
+    body.changes.forEach(ch => {
+      const line = document.createElement('div');
+      line.textContent = `${ch.at} — ${ch.action} ${ch.policy_id} by ${ch.actor_key_id || 'an unauthenticated caller'}${ch.diff ? ` · +${ch.diff.added_count}/−${ch.diff.removed_count} lines (${ch.diff.lines_before} → ${ch.diff.lines_after})` : ''}`;
+      feed.appendChild(line);
+    });
+  } catch (e) {
+    feed.innerHTML = '<p class="note">Change feed unavailable — ' + e.message + '</p>';
+  }
+}
+
 async function loadCorpus() {
+  loadCorpusChanges();
   const list = $('corpus-list');
   try {
     const res = await fetch('/policies', {headers: apiHeaders()});
@@ -697,7 +724,7 @@ async function loadCorpus() {
             } else {
               h.changes.forEach(ch => {
                 const line = document.createElement('div');
-                line.textContent = `${ch.at} — ${ch.action} by ${ch.actor_key_id || 'an unauthenticated caller'} · text ${(ch.text_hash || '—').slice(0, 12)}… (was ${(ch.prior_text_hash || '—').slice(0, 12)}…) · corpus_changed webhook: ${ch.webhook ? ch.webhook.outcome : '—'}`;
+                line.textContent = `${ch.at} — ${ch.action} by ${ch.actor_key_id || 'an unauthenticated caller'} · text ${(ch.text_hash || '—').slice(0, 12)}… (was ${(ch.prior_text_hash || '—').slice(0, 12)}…)${ch.diff ? ` · +${ch.diff.added_count}/−${ch.diff.removed_count} lines` : ''} · corpus_changed webhook: ${ch.webhook ? ch.webhook.outcome : '—'}`;
                 histDiv.appendChild(line);
               });
             }
@@ -770,7 +797,9 @@ async function loadOps() {
     } else {
       rbody.innerHTML = `<p style="font-size:14px">Key rotation for <strong>${r.tenant_id}</strong>: ` +
         `grace window ${r.grace_open ? 'open' : 'closed'} until ${r.grace_deadline || '—'} · ` +
-        `previous key used ${r.previous_key_requests.count}× (last ${r.previous_key_requests.last_at || 'never'}) · ` +
+        `previous key analysed ${r.previous_key_requests.count}× (last ${r.previous_key_requests.last_at || 'never'})` +
+        (r.previous_key_use ? ` · all requests under it: ${r.previous_key_use.in_window}× in this window (last ${r.previous_key_use.last_at || 'never'}${r.previous_key_use.last_endpoint ? ', via /' + r.previous_key_use.last_endpoint : ''})` : '') +
+        ` · ` +
         (r.ready_to_close
           ? '<strong>ready to close</strong> — quiet since ' + (r.quiet_since || '—')
           : 'not ready to close — quiet since ' + (r.quiet_since || '—') + ' (budget ' + r.quiet_hours + 'h)') +

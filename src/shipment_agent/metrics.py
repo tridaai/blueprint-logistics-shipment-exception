@@ -234,8 +234,9 @@ def render_prometheus(
     (the store's worker rows, keyed by worker name) adds the worker
     families when given: the background processes' heartbeat beside
     the record aggregates. ``key_usage`` (per tenant:
-    ``previous_key_requests`` / ``grace_open``, computed by the API
-    from the records' key ids and the rotation configuration) adds
+    ``previous_key_requests`` / ``window_requests`` / ``grace_open``,
+    computed by the API from the records' key ids, the key-use
+    counters, and the rotation configuration) adds
     the key-rotation families — the "old key still in use" signal an
     operator watches before closing a rotation grace window.
     ``worker_tenants`` (see :func:`worker_tenant_staleness`) adds
@@ -401,6 +402,21 @@ def render_prometheus(
                 for tenant, usage in sorted(key_usage.items())
             ],
         )
+        if any("window_requests" in usage for usage in key_usage.values()):
+            family(
+                "shipment_agent_tenant_previous_key_authenticated_requests_total",
+                "Authenticated requests (any endpoint, reads "
+                "included) served under a tenant's previous API key "
+                "inside its current rotation window, from the "
+                "key-use counters. The analyses family above counts "
+                "only the requests that stored a record; this one "
+                "is the whole-API evidence the rotation closes on.",
+                [
+                    ({"tenant": tenant}, usage["window_requests"])
+                    for tenant, usage in sorted(key_usage.items())
+                    if "window_requests" in usage
+                ],
+            )
         family(
             "shipment_agent_tenant_key_grace_open",
             "Whether a tenant's key-rotation grace window is still open "

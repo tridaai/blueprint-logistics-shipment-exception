@@ -58,6 +58,39 @@ def _auth_now():
     return datetime.now(timezone.utc)
 
 
+def _stamp_key_use(request: Request) -> None:
+    """Record this request on the counter of the key that served it.
+
+    The auth gate's evidence stamp (see
+    :meth:`ShipmentService.record_key_use`): rotation readiness
+    reads these counters, so an outgoing key's use is visible
+    whichever endpoint it touched — reads included, not just the
+    analyses that land on stored records. The stamp names the
+    endpoint *class* (the path's first segment) and the key's id
+    — never the secret, never a full path. Bookkeeping only: a
+    failed stamp never fails the request it describes.
+    """
+    info = getattr(request.state, "auth_info", None)
+    if not info:
+        return
+    try:
+        from .config import tenant_key_rotated_at
+
+        tenant = info["tenant_id"]
+        rotated = tenant_key_rotated_at(tenant)
+        path = request.url.path.strip("/")
+        service.record_key_use(
+            tenant,
+            info["key_id"],
+            at=_auth_now().isoformat(),
+            method=request.method,
+            endpoint=path.split("/")[0] if path else "root",
+            rotated_at=rotated.isoformat() if rotated else None,
+        )
+    except Exception:  # the counter records; it never gates a request
+        pass
+
+
 def require_api_key(
     request: Request,
     x_api_key: str | None = Header(default=None),
@@ -98,7 +131,10 @@ def require_api_key(
     secret. The analyze endpoint stamps it on the stored record, so
     the audit export shows which generation each analysis arrived
     under and an operator can watch the old key's use die out before
-    closing the window (``GET /auth/rotation``).
+    closing the window (``GET /auth/rotation``). Every authenticated
+    request — reads included — also stamps its key's use counter
+    (:func:`_stamp_key_use`), so that watch covers the whole API,
+    not only the requests that store a record.
 
     The console page and /health stay open either way; the console
     carries API-key and tenant fields for the gated calls.
@@ -127,6 +163,7 @@ def require_api_key(
             "key_id": "shared",
             "generation": "shared",
         }
+        _stamp_key_use(request)
         return
     tenant = resolve_tenant_id(x_tenant_id)
     generation = tenant_key_generation(tenant, x_api_key, now=_auth_now())
@@ -136,6 +173,7 @@ def require_api_key(
             "key_id": f"{tenant}:{generation}",
             "generation": generation,
         }
+        _stamp_key_use(request)
         return
     expected = tenant_api_key(tenant)
     if (
@@ -149,6 +187,7 @@ def require_api_key(
             "key_id": "shared",
             "generation": "shared",
         }
+        _stamp_key_use(request)
         return  # the shared key's one remaining home: the default tenant
     previous = tenant_previous_api_key(tenant)
     if x_api_key and previous is not None and x_api_key == previous:
@@ -454,22 +493,27 @@ def metrics(
     key_usage: dict[str, dict] = {}
     for tenant in sorted(usage_tenants):
         status = tenant_rotation_status(tenant, now=moment)
-        previous = [
-            record
-            for record in all_records
-            if record.tenant_id == tenant
-            and record.auth_key_id == f"{tenant}:previous"
-        ]
-        previous_requests = len(previous)
-        if status["previous_key_configured"] or previous_requests:
-            last_at = max(
-                (record.created_at for record in previous), default=None
-            )
+        # Both evidence trails, merged by the service: the stored
+        # analyses under the outgoing key (the requests family
+        # below) and the auth gate's request counter, reads
+        # included (the window family). Readiness reads the merged
+        # last use, exactly as /auth/rotation does, so the scrape
+        # and the view never disagree about quiet.
+        use = service.previous_key_use(tenant, rotated_at=status["rotated_at"])
+        previous_requests = use["analyses"]["count"]
+        if (
+            status["previous_key_configured"]
+            or previous_requests
+            or use["requests"]["total"]
+        ):
             key_usage[tenant] = {
                 "previous_key_requests": previous_requests,
+                "window_requests": use["requests"]["in_window"],
                 "grace_open": status["grace_open"],
                 "ready_to_close": rotation_close_readiness(
-                    tenant, last_previous_use_at=last_at, now=moment
+                    tenant,
+                    last_previous_use_at=use["last_used_at"],
+                    now=moment,
                 )["ready_to_close"],
             }
     payload = render_prometheus(
@@ -737,6 +781,36 @@ def delete_policy(
     )
 
 
+@app.get("/policies/history", dependencies=_AUTH)
+def policy_changes_feed(
+    limit: int | None = None,
+    x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
+) -> dict:
+    """The caller's tenant corpus, as a recent-changes feed.
+
+    Every recorded change across the tenant's stored documents,
+    newest first: the same ledger entries the per-document
+    history serves (actor key id, time, text hashes, the capped
+    line diff, the ``corpus_changed`` webhook's outcome), read
+    across the corpus so "what changed in the knowledge base
+    lately" is one call instead of a walk over documents.
+    ``limit`` defaults to 50 and clamps at 200. Tenant-scoped
+    like every corpus read: another tenant's changes are not
+    listed, exactly as its documents are not. The bundled corpus
+    is code and accrues no entries — history begins at the first
+    operator write, so a fresh tenant's feed is honestly empty."""
+    from .service import resolve_tenant_id
+
+    tenant = resolve_tenant_id(x_tenant_id)
+    effective = 50 if limit is None else max(0, min(limit, 200))
+    changes = service.tenant_policy_changes(tenant, limit=effective)
+    return {
+        "tenant_id": tenant,
+        "count": len(changes),
+        "changes": list(reversed(changes)),
+    }
+
+
 @app.get("/policies/{policy_id}/history", dependencies=_AUTH)
 def policy_history(
     policy_id: str,
@@ -747,8 +821,13 @@ def policy_history(
     Every add / replace / remove of a stored document in the
     caller's tenant partition, oldest first: the actor's key id
     (never the secret), the change time, the SHA-256 of the text
-    before and after (hashes, never text), and the
-    ``corpus_changed`` webhook's delivery outcome. A 404 means this
+    before and after, a line-diff summary (exact counts; the
+    changed lines themselves, capped, on adds and replaces — a
+    removal records counts and the final hash only, so erased
+    text stays erased), and the ``corpus_changed`` webhook's
+    delivery outcome. Entries recorded before diffs existed
+    carry no ``diff`` — "not recorded", never an invented empty
+    diff. A 404 means this
     partition holds neither the document nor any change to it —
     another tenant's history is invisible here, exactly as its
     documents are."""
@@ -800,33 +879,36 @@ def key_rotation_status(
     Non-secret facts only: whether a current and a previous key are
     configured, when the rotation happened, the grace deadline, and
     whether the window is still open — plus the previous key's
-    recorded use from the store (how many stored analyses arrived
-    under it, and the most recent one's time), and the readiness
-    verdict over that evidence: ``ready_to_close`` when the old key
+    recorded use from both evidence trails: ``previous_key_requests``
+    (the stored analyses that arrived under it, count and most
+    recent time) and ``previous_key_use`` (the auth gate's request
+    counter: every authenticated request it served, reads
+    included — the total, the count inside this rotation window,
+    the last request's time, method, and endpoint class). The
+    readiness verdict reads the merged evidence — the later of
+    the two trails' last uses — so ``ready_to_close`` (the old key
     has recorded no use for ``TENANT_KEY_QUIET_HOURS`` inside its
-    window, with ``quiet_since`` naming when the quiet stretch
-    began. Readiness retires nothing — unsetting the old key stays
-    a human's configuration change. Key material is never shown —
-    the view names generations, not secrets."""
+    window, ``quiet_since`` naming when the quiet stretch began)
+    cannot be earned by an old key that merely stopped analysing
+    while it kept reading. Readiness retires nothing — unsetting
+    the old key stays a human's configuration change. Key material
+    is never shown — the view names generations, not secrets."""
     from .config import rotation_close_readiness, tenant_rotation_status
     from .service import resolve_tenant_id
 
     tenant = resolve_tenant_id(x_tenant_id)
     moment = _auth_now()
     status = tenant_rotation_status(tenant, now=moment)
-    previous_id = f"{tenant}:previous"
-    used = [
-        record
-        for record in service._get_store().records(tenant_id=tenant)
-        if record.auth_key_id == previous_id
-    ]
-    last_at = max((record.created_at for record in used), default=None)
+    use = service.previous_key_use(tenant, rotated_at=status["rotated_at"])
     status["previous_key_requests"] = {
-        "count": len(used),
-        "last_at": last_at,
+        "count": use["analyses"]["count"],
+        "last_at": use["analyses"]["last_at"],
     }
+    status["previous_key_use"] = use["requests"]
     status.update(
-        rotation_close_readiness(tenant, last_previous_use_at=last_at, now=moment)
+        rotation_close_readiness(
+            tenant, last_previous_use_at=use["last_used_at"], now=moment
+        )
     )
     return status
 
