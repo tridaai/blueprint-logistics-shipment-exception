@@ -800,9 +800,12 @@ Ordered by value when adapting this blueprint to your own operation:
    LlamaIndex + a managed vector store over real SOPs,
    carrier claim rules, and customer contracts. Retrieval ranking is
    already measured, not assumed: `evals/run_retrieval_evals.py`
-   scores a labelled query→policy set (recall@3 for keyword and
-   hybrid); production grows that set from real approver corrections
-   and runs the hybrid number over the real embedding model.
+   scores a labelled query→policy set (recall@3 per ranking —
+   keyword, semantic, hybrid — with tenant-isolation and
+   stored-document lifecycle cases whose violation fails the pack
+   outright, whatever the means say); production grows that set
+   from real approver corrections and runs the embedding numbers
+   over the real embedding model.
 3. **Approval UX:** the queue ships — `GET /queue` (severity, then
    age, with cross-check/repair/reviewer/guardrail flags, age
    buckets, and a per-severity SLA view that flags waits past their

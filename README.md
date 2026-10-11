@@ -845,14 +845,21 @@ text, in the graph's query shape — with the policies that should land
 in the top-3 the diagnosis cites, and reports **recall@3** per ranking.
 It includes the customer-simulation case: a customer's own operational
 SOP must rank first for the damage case it describes. Current
-measurement: **keyword 98.8%, hybrid 100.0%** (gate: keyword ≥ 85%) —
-the one known partial is RQ-22 under keyword-only retrieval, at 0.5,
+measurement: **keyword 98.8%, semantic 92.9%, hybrid 100.0%**
+(gate: keyword ≥ 85% — and a forbidden hit, another tenant's
+document surfacing or a stored document still retrievable after
+its delete, fails the pack outright, whatever the means say).
+The known partials: RQ-22 under keyword-only retrieval, at 0.5,
 whose query is the damage policy's own sentence and whose
-claim-packet expectation shares only trailer vocabulary with it; the
-hybrid merge resolves it.
-Offline, the hybrid number runs over a labelled stand-in embedder
-(hashed bag-of-words) and measures the RRF merge, not embedding
-quality; `--real` measures the configured embeddings instead.
+claim-packet expectation shares only trailer vocabulary with it;
+the hybrid merge resolves it. The semantic ranking alone misses
+the three "no exception" cases (RQ-17/21/34) — the merge with
+keyword carries them, which is what the per-mode scoreboard in
+the console exists to show.
+Offline, the semantic and hybrid numbers run over a labelled
+stand-in embedder (hashed bag-of-words) and measure the ranking
+paths and the RRF merge, not embedding quality; `--real` measures
+the configured embeddings instead.
 
 **LLM-judge eval pack (opt-in).** `uv run python evals/run_llm_evals.py`
 (or `make llm-evals`) runs the golden set through a configured provider
@@ -862,7 +869,7 @@ the verified facts (invented ETAs and prohibited promises fail the pack),
 with per-case tokens, latency, and estimated cost. It fails loudly
 without a real provider and is never part of the default gate or CI.
 
-Test suite: **639 tests** (`pytest -q`: 634 passing, 5 Postgres
+Test suite: **644 tests** (`pytest -q`: 639 passing, 5 Postgres
 integration tests gated on `DATABASE_URL`) — classifier, tools,
 retriever (keyword, semantic, hybrid + rerank, Chroma path with a faked
 client, pgvector SQL formatting + a gated live round-trip), the retrieval query built from shipment content, intake

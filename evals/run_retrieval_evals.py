@@ -34,19 +34,21 @@ Three corpora shapes are measured:
   it is removed (the DELETE path) it must vanish from the ranking.
 
 Metric: recall@3 per case (|retrieved ∩ expected| / |expected|,
-with the forbidden rule above), averaged. Two rankings are
+with the forbidden rule above), averaged. Three rankings are
 reported:
 
 - ``keyword`` — the deterministic default retriever. This is the
   gated number (threshold below): it runs offline, always.
+- ``semantic`` — the embedding ranking on its own, so the console
+  scoreboard shows what each half of the merge contributes.
 - ``hybrid`` — keyword + semantic merged by the production RRF
-  rerank. Offline it runs over a **stand-in embedder** (hashed
-  bag-of-words vectors, in this file): that measures the merge and
-  the harness, NOT real embedding quality — the output says so.
-  The semantic half is the shipped code path end to end, including
-  its polarity strike (denied signal phrases struck from the query
-  before embedding — the stand-in replaces only the client that
-  turns text into vectors).
+  rerank. Offline both embedding rankings run over a **stand-in
+  embedder** (hashed bag-of-words vectors, in this file): that
+  measures the ranking paths and the merge, NOT real embedding
+  quality — the output says so. The semantic code is the shipped
+  path end to end, including its polarity strike (denied signal
+  phrases struck from the query before embedding — the stand-in
+  replaces only the client that turns text into vectors).
   Pass ``--real`` to measure the configured embeddings instead
   (``RETRIEVER=hybrid`` stack: OpenAI/Ollama per the environment);
   that fails loudly when no embeddings are configured.
@@ -55,7 +57,12 @@ Run from the repo root:
 
     python evals/run_retrieval_evals.py [--real]
 
-Exit code is 0 when keyword mean recall@3 >= 0.85, 1 otherwise.
+Exit code is 0 when keyword mean recall@3 >= 0.85 AND no ranking
+on any case surfaced a forbidden document or left a stored
+document retrievable after its delete: an isolation or lifecycle
+violation fails the pack outright, whatever the means say —
+a cross-tenant leak must not be able to hide inside a healthy
+average. 1 otherwise.
 """
 
 from __future__ import annotations
@@ -177,12 +184,17 @@ class _StandinHybrid:
 
 
 def build_retrievers(policies: list[dict], *, real: bool) -> dict:
-    """The two rankings under measurement, for one corpus."""
+    """The three rankings under measurement, for one corpus:
+    keyword (the gated default), semantic on its own, and the
+    hybrid merge the production stack serves."""
     retrievers = {"keyword": KeywordRetriever(policies)}
     if real:
-        hybrid = HybridRetriever(policies)
-        retrievers["hybrid (configured embeddings)"] = hybrid
+        retrievers["semantic (configured embeddings)"] = SemanticRetriever(policies)
+        retrievers["hybrid (configured embeddings)"] = HybridRetriever(policies)
     else:
+        retrievers["semantic (stand-in embeddings)"] = _StandinSemanticRetriever(
+            policies
+        )
         retrievers[_StandinHybrid.name] = _StandinHybrid(policies)
     return retrievers
 
@@ -227,6 +239,7 @@ def _evaluate_stored(case: dict, *, real: bool) -> dict:
     )
     row: dict = {
         "case_id": case["case_id"],
+        "document_id": document["policy_id"],
         "expected": list(case["expected"]),
         "results": {},
     }
@@ -287,6 +300,32 @@ def evaluate(cases: list[dict], *, real: bool = False) -> dict:
         }
         for name, values in totals.items()
     }
+    # Gate violations are collected separately from the recall
+    # means: a forbidden hit (another tenant's document in this
+    # tenant's ranking) or a stored document still retrievable
+    # after its delete fails the pack outright, below — it must
+    # not be able to average away inside 40-odd healthy cases.
+    violations: list[dict] = []
+    for row in rows:
+        for name, result in row["results"].items():
+            if result.get("forbidden_hits"):
+                violations.append(
+                    {
+                        "case_id": row["case_id"],
+                        "ranking": name,
+                        "kind": "forbidden_hit",
+                        "documents": result["forbidden_hits"],
+                    }
+                )
+            if result.get("after_delete_clear") is False:
+                violations.append(
+                    {
+                        "case_id": row["case_id"],
+                        "ranking": name,
+                        "kind": "retrievable_after_delete",
+                        "documents": [row.get("document_id")],
+                    }
+                )
     return {
         "dataset": "retrieval_golden.jsonl (synthetic, labelled)",
         "top_k": TOP_K,
@@ -294,11 +333,18 @@ def evaluate(cases: list[dict], *, real: bool = False) -> dict:
         "summary": summary,
         "cases": rows,
         "keyword_threshold": KEYWORD_THRESHOLD,
-        "passed": summary["keyword"]["mean_recall_at_3"] >= KEYWORD_THRESHOLD,
+        "violations": violations,
+        "passed": (
+            summary["keyword"]["mean_recall_at_3"] >= KEYWORD_THRESHOLD
+            and not violations
+        ),
         "framing": (
             "Labelled relevance set used as a regression gate for retrieval "
-            "ranking. Offline hybrid numbers use stand-in embeddings and "
-            "measure the merge, not embedding quality."
+            "ranking. Offline semantic and hybrid numbers use stand-in "
+            "embeddings and measure the ranking paths and the merge, not "
+            "embedding quality. A forbidden hit — another tenant's document "
+            "surfacing, or a stored document still retrievable after its "
+            "delete — fails the pack outright, whatever the means say."
         ),
     }
 
@@ -358,9 +404,20 @@ def main() -> int:
                     f"  {row['case_id']} [{name}]: recall {result['recall_at_3']:.2f} "
                     f"— {detail}"
                 )
-    print(
-        "PASS" if report["passed"] else f"FAIL (keyword threshold {KEYWORD_THRESHOLD:.0%})"
-    )
+    for violation in report["violations"]:
+        print(
+            f"  GATE VIOLATION {violation['case_id']} [{violation['ranking']}]: "
+            f"{violation['kind']} {violation['documents']}"
+        )
+    if report["passed"]:
+        print("PASS")
+    elif report["violations"]:
+        print(
+            "FAIL (gate violations above — a forbidden hit or a document "
+            "retrievable after its delete fails the pack outright)"
+        )
+    else:
+        print(f"FAIL (keyword threshold {KEYWORD_THRESHOLD:.0%})")
     return 0 if report["passed"] else 1
 
 
