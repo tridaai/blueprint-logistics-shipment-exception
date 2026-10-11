@@ -125,6 +125,76 @@ def _text_hash(text: str | None) -> str | None:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+# The ledger's diff summary is capped on both axes: at most this
+# many changed lines per side, each at most this many characters.
+# The counts beside the lines are always exact — the cap bounds
+# how much corpus text one entry carries, never what it reports.
+DIFF_MAX_LINES = 10
+DIFF_MAX_LINE_CHARS = 200
+
+
+def _cap_diff_lines(lines: list[str]) -> tuple[list[str], bool]:
+    """Cap one side of a diff for ledger storage.
+
+    Returns the stored lines and whether anything was cut — a line
+    over the character cap counts as cut, as does a list over the
+    line cap."""
+    truncated = len(lines) > DIFF_MAX_LINES
+    capped: list[str] = []
+    for line in lines[:DIFF_MAX_LINES]:
+        if len(line) > DIFF_MAX_LINE_CHARS:
+            truncated = True
+            line = line[:DIFF_MAX_LINE_CHARS]
+        capped.append(line)
+    return capped, truncated
+
+
+def _text_diff_summary(
+    prior_text: str | None, new_text: str | None, *, include_lines: bool = True
+) -> dict:
+    """Summarise a corpus text change for the change ledger.
+
+    Line-level diff (``difflib`` over ``splitlines``): how many
+    lines each side holds, how many were added and removed, and —
+    capped, see :data:`DIFF_MAX_LINES` — the changed lines
+    themselves, so an auditor reads what a replace actually did
+    without opening the object archive. ``include_lines=False``
+    (a removal) stores counts only: a removed document's content
+    is gone by the operator's intent, and the ledger must not
+    become the place erased text survives — its final hash is on
+    the entry beside this summary. Entries written before diffs
+    existed carry no ``diff`` key at all; readers treat that as
+    "not recorded", never as an empty diff.
+    """
+    import difflib
+
+    before = prior_text.splitlines() if prior_text else []
+    after = new_text.splitlines() if new_text else []
+    added: list[str] = []
+    removed: list[str] = []
+    matcher = difflib.SequenceMatcher(a=before, b=after, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag in ("replace", "delete"):
+            removed.extend(before[i1:i2])
+        if tag in ("replace", "insert"):
+            added.extend(after[j1:j2])
+    if include_lines:
+        added_lines, added_cut = _cap_diff_lines(added)
+        removed_lines, removed_cut = _cap_diff_lines(removed)
+        truncated = added_cut or removed_cut
+    else:
+        added_lines, removed_lines, truncated = [], [], False
+    return {
+        "lines_before": len(before),
+        "lines_after": len(after),
+        "added_count": len(added),
+        "removed_count": len(removed),
+        "added": added_lines,
+        "removed": removed_lines,
+        "truncated": truncated,
+    }
+
+
 def resolve_tenant_id(tenant_id: str | None = None) -> str:
     """Resolve the tenant a call operates on.
 
@@ -1862,15 +1932,13 @@ class ShipmentService:
             status = tenant_rotation_status(tenant, now=moment)
             # The readiness verdict rides on the same evidence
             # /auth/rotation reads: this tenant's recorded
-            # previous-key use, from its own partition.
-            last_use = max(
-                (
-                    record.created_at
-                    for record in partitions.get(tenant, [])
-                    if record.auth_key_id == f"{tenant}:previous"
-                ),
-                default=None,
-            )
+            # previous-key use, merged from both trails — the
+            # stored analyses and the auth gate's request counter
+            # (reads included), so a read-only old key cannot look
+            # quiet here either.
+            last_use = self.previous_key_use(
+                tenant, rotated_at=status["rotated_at"]
+            )["last_used_at"]
             status.update(
                 rotation_close_readiness(
                     tenant, last_previous_use_at=last_use, now=moment
@@ -2395,15 +2463,18 @@ class ShipmentService:
         """Ledger one corpus change and fire its event.
 
         The change has already landed in the store when this runs;
-        the entry (action, actor key id, time, text hashes — never
-        text) is appended to the tenant's change ledger through the
+        the entry (action, actor key id, time, text hashes, and a
+        capped line-diff summary — see :func:`_text_diff_summary`)
+        is appended to the tenant's change ledger through the
         store port, and the signed ``corpus_changed`` event is
         delivered on the SLA event channel under its opt-in, its
         outcome recorded on the entry itself (``disabled`` /
         ``not_configured`` when the channel is off — observed, like
-        every event family here, not silently dropped). A store
-        double without the ledger methods simply keeps no history;
-        bookkeeping never undoes the change it records.
+        every event family here, not silently dropped). The webhook
+        body stays hashes-only: the diff rides the ledger, never
+        the event channel. A store double without the ledger
+        methods simply keeps no history; bookkeeping never undoes
+        the change it records.
         """
         entry = {
             "policy_id": policy_id,
@@ -2413,6 +2484,9 @@ class ShipmentService:
             "at": _now_iso(),
             "prior_text_hash": _text_hash(prior_text),
             "text_hash": _text_hash(new_text),
+            "diff": _text_diff_summary(
+                prior_text, new_text, include_lines=action != "remove"
+            ),
         }
         if not sla_breach_webhook_enabled():
             entry["webhook"] = {"outcome": "disabled", "http_status": None, "error": None}
@@ -2457,6 +2531,196 @@ class ShipmentService:
             return read(tenant, policy_id)
         except Exception:
             return []
+
+    def tenant_policy_changes(
+        self, tenant_id: str | None, limit: int | None = None
+    ) -> list[dict]:
+        """One tenant's corpus changes across documents, oldest first.
+
+        The recent-changes feed behind ``GET /policies/history``:
+        the same ledger entries the per-document history serves,
+        read across the tenant's whole corpus so an operator sees
+        "what changed in the knowledge base lately" without
+        walking documents. Scoped to the resolved tenant's
+        partition, like every corpus read; ``limit`` keeps the
+        newest that many entries (still oldest first). A store
+        double without the read has no feed.
+        """
+        tenant = resolve_tenant_id(tenant_id)
+        read = getattr(self._get_store(), "tenant_policy_changes", None)
+        if not callable(read):
+            return []
+        try:
+            return read(tenant, limit)
+        except Exception:
+            return []
+
+    # ------------------------------------------------------------------
+    # Key-use evidence: what each API key generation has served
+    # ------------------------------------------------------------------
+
+    def key_use_counter(self, tenant_id: str, key_id: str) -> dict | None:
+        """One key's use counter, or None when nothing is recorded.
+
+        Read through the store port; a store double without the
+        counter methods keeps no evidence (the pre-counter
+        behaviour: rotation readiness reads analyses only)."""
+        read = getattr(self._get_store(), "key_use_counter", None)
+        if not callable(read):
+            return None
+        try:
+            return read(resolve_tenant_id(tenant_id), key_id)
+        except Exception:
+            return None
+
+    def record_key_use(
+        self,
+        tenant_id: str,
+        key_id: str | None,
+        *,
+        at: str,
+        method: str | None = None,
+        endpoint: str | None = None,
+        rotated_at: str | None = None,
+    ) -> dict | None:
+        """Stamp one authenticated request on its key's counter.
+
+        Called by the API's auth gate for every request a key
+        authenticated — analyses and reads alike, because rotation
+        readiness used to see analyses only and a read-only old key
+        looked quiet when it was not. The counter (one row per
+        tenant + key id) totals the requests, remembers the first
+        and last, names the last request's method and endpoint
+        class (the path's first segment — never a full path, never
+        content), and keeps a window slice keyed by the rotation
+        moment it belongs to: when ``rotated_at`` moves, the next
+        stamp opens a fresh window count while the totals keep
+        counting. Bookkeeping never gates a request: a store
+        without the counter methods, or a failed write, records
+        nothing and returns None.
+        """
+        if not key_id:
+            return None
+        tenant = resolve_tenant_id(tenant_id)
+        store = self._get_store()
+        read = getattr(store, "key_use_counter", None)
+        save = getattr(store, "save_key_use_counter", None)
+        if not callable(read) or not callable(save):
+            return None
+        try:
+            counter = read(tenant, key_id) or {
+                "tenant_id": tenant,
+                "key_id": key_id,
+                "requests": 0,
+                "first_used_at": None,
+                "last_used_at": None,
+                "last_method": None,
+                "last_endpoint": None,
+                "window": {
+                    "rotated_at": rotated_at,
+                    "requests": 0,
+                    "last_used_at": None,
+                },
+            }
+            counter["requests"] = int(counter.get("requests") or 0) + 1
+            if not counter.get("first_used_at"):
+                counter["first_used_at"] = at
+            counter["last_used_at"] = at
+            counter["last_method"] = method
+            counter["last_endpoint"] = endpoint
+            window = counter.get("window") or {}
+            if window.get("rotated_at") != rotated_at:
+                window = {
+                    "rotated_at": rotated_at,
+                    "requests": 0,
+                    "last_used_at": None,
+                }
+            window["requests"] = int(window.get("requests") or 0) + 1
+            window["last_used_at"] = at
+            counter["window"] = window
+            save(tenant, key_id, counter)
+            return counter
+        except Exception:  # the counter records; it never gates a request
+            return None
+
+    def previous_key_use(
+        self, tenant_id: str | None, *, rotated_at: str | None = None
+    ) -> dict:
+        """The outgoing key's recorded use, from both evidence trails.
+
+        Two trails name a previous key's use: the stored analyses
+        that arrived under it (``<tenant>:previous`` stamped on the
+        record — the original evidence), and the key-use counter
+        the auth gate stamps on *every* authenticated request,
+        reads included. This merges them: per-trail counts and last
+        times, the counter's count inside the current rotation
+        window (zero when the counter's window belongs to an older
+        rotation than ``rotated_at`` names, or no rotation is
+        recorded), and ``last_used_at`` — the later of the two
+        trails' last uses, the moment rotation readiness measures
+        quiet from. The merge is deliberately conservative: a
+        verdict built on it can understate quiet, never overstate
+        it.
+        """
+        from datetime import datetime, timezone
+
+        def _as_moment(value) -> datetime | None:
+            if value is None:
+                return None
+            if isinstance(value, datetime):
+                moment = value
+            else:
+                try:
+                    moment = datetime.fromisoformat(
+                        str(value).replace("Z", "+00:00")
+                    )
+                except ValueError:
+                    return None
+            if moment.tzinfo is None:
+                moment = moment.replace(tzinfo=timezone.utc)
+            return moment
+
+        tenant = resolve_tenant_id(tenant_id)
+        key_id = f"{tenant}:previous"
+        analyses = [
+            record
+            for record in self._get_store().records(tenant_id=tenant)
+            if record.auth_key_id == key_id
+        ]
+        analysis_moments = [
+            moment
+            for moment in (_as_moment(record.created_at) for record in analyses)
+            if moment is not None
+        ]
+        analysis_last = max(analysis_moments, default=None)
+        counter = self.key_use_counter(tenant, key_id) or {}
+        window = counter.get("window") or {}
+        in_window = (
+            int(window.get("requests") or 0)
+            if rotated_at is not None and window.get("rotated_at") == rotated_at
+            else 0
+        )
+        counter_last = _as_moment(counter.get("last_used_at"))
+        lasts = [m for m in (analysis_last, counter_last) if m is not None]
+        return {
+            "key_id": key_id,
+            "analyses": {
+                "count": len(analyses),
+                "last_at": (
+                    analysis_last.isoformat() if analysis_last else None
+                ),
+            },
+            "requests": {
+                "total": int(counter.get("requests") or 0),
+                "in_window": in_window,
+                "last_at": counter_last.isoformat() if counter_last else None,
+                "last_method": counter.get("last_method"),
+                "last_endpoint": counter.get("last_endpoint"),
+            },
+            "last_used_at": (
+                max(lasts).isoformat() if lasts else None
+            ),
+        }
 
     def upsert_tenant_policy(
         self,
