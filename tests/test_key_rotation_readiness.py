@@ -169,11 +169,18 @@ def test_rotation_view_and_metrics_speak_readiness(
     assert 'shipment_agent_tenant_key_rotation_closing{tenant="acme"} 1' in text
 
     # A use six hours ago restarts the quiet stretch: not ready.
+    # The recorded analysis is backdated to 06:00, but the request
+    # itself was stamped on the key-use counter at the pinned API
+    # clock (IN_WINDOW, 12:00) — and readiness reads the later of
+    # the two trails, so the quiet stretch honestly runs from the
+    # request, not from the record's rewritten timestamp.
     _use_previous_key(api_client, service, "2026-10-02T06:00:00+00:00")
     body = api_client.get("/auth/rotation", headers=headers).json()
     assert body["ready_to_close"] is False
-    assert body["quiet_since"] == "2026-10-02T06:00:00+00:00"
-    assert body["last_previous_key_request_at"] == "2026-10-02T06:00:00+00:00"
+    assert body["quiet_since"] == "2026-10-02T12:00:00+00:00"
+    assert body["last_previous_key_request_at"] == "2026-10-02T12:00:00+00:00"
+    assert body["previous_key_use"]["in_window"] == 1
+    assert body["previous_key_use"]["last_at"] == "2026-10-02T12:00:00+00:00"
     text = api_client.get("/metrics").text
     assert 'shipment_agent_tenant_key_rotation_closing{tenant="acme"} 0' in text
     # And the previous key still authenticates — readiness changed

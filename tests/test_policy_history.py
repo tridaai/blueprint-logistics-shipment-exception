@@ -5,7 +5,9 @@ Stored tenant documents are mutable rows; until this round an
 operator who replaced an SOP left no trace of what changed, when,
 or under whose key. Now every add / replace / remove lands an
 append-only ledger entry beside the document (actor key id, time,
-SHA-256 text hashes — never text), served at
+SHA-256 text hashes — and, since the diff round, a capped line
+diff on adds and replaces; a removal keeps counts and the final
+hash only), served at
 ``GET /policies/{id}/history``, and fires a signed
 ``corpus_changed`` webhook through the same receiver path as the
 other four families. These tests pin the ledger on both hermetic
@@ -102,9 +104,12 @@ def test_ledger_records_add_replace_remove_with_hashes(backend, tmp_path):
     # removed text's, and there is no after-text.
     assert remove["prior_text_hash"] == _hash(DOC_V2["text"])
     assert remove["text_hash"] is None
-    # Hashes and ids only — the document text itself is never ledgered.
+    # The hashes pin the texts. Add/replace entries also carry the
+    # capped line diff (see test_policy_diff.py) — but a removal
+    # ledgers no content at all: erased text stays erased.
+    assert DOC["text"] not in json.dumps(remove)
+    assert DOC_V2["text"] not in json.dumps(remove)
     for entry in history:
-        assert DOC["text"] not in json.dumps(entry)
         assert entry["webhook"]["outcome"] == "disabled"
 
 

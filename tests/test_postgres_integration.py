@@ -74,6 +74,68 @@ def test_migrations_are_idempotent(pg_env):
     assert set(first) <= {"0001", "0002", "0003", "0004", "0005", "0006"}
 
 
+@pytest.fixture()
+def clean_round3_rows(pg_env):
+    """Start (and end) with no ledger/counter rows for the test tenant."""
+    from shipment_agent.db import connect, run_migrations
+
+    run_migrations(pg_env)  # migrations 0009 + 0011 must exist to clean
+    tenant = "pg-round3"
+    with connect(pg_env) as conn:
+        conn.execute(
+            "DELETE FROM tenant_policy_history WHERE tenant_id = %s", (tenant,)
+        )
+        conn.execute("DELETE FROM key_use_counters WHERE tenant_id = %s", (tenant,))
+        conn.commit()
+    yield tenant
+    with connect(pg_env) as conn:
+        conn.execute(
+            "DELETE FROM tenant_policy_history WHERE tenant_id = %s", (tenant,)
+        )
+        conn.execute("DELETE FROM key_use_counters WHERE tenant_id = %s", (tenant,))
+        conn.commit()
+
+
+def test_postgres_ledger_feed_and_key_use_counter(clean_round3_rows):
+    """The rotation-3 store surfaces on the production store: the
+    corpus ledger's whole-tenant read (diff included, as stored)
+    and the key-use counter's upsert."""
+    from shipment_agent.store import PostgresStore
+
+    tenant = clean_round3_rows
+    store = PostgresStore(_DATABASE_URL)
+    entry = {
+        "policy_id": "SOP-PG",
+        "tenant_id": tenant,
+        "action": "add",
+        "actor_key_id": f"{tenant}:current",
+        "at": "2026-10-11T00:00:00+00:00",
+        "prior_text_hash": None,
+        "text_hash": "a" * 64,
+        "diff": {
+            "lines_before": 0,
+            "lines_after": 1,
+            "added_count": 1,
+            "removed_count": 0,
+            "added": ["the line"],
+            "removed": [],
+            "truncated": False,
+        },
+        "webhook": {"outcome": "disabled", "http_status": None, "error": None},
+    }
+    store.record_tenant_policy_change(tenant, entry)
+    assert store.tenant_policy_history(tenant, "SOP-PG") == [entry]
+    assert store.tenant_policy_changes(tenant) == [entry]
+    assert store.tenant_policy_changes(tenant, limit=1) == [entry]
+
+    assert store.key_use_counter(tenant, f"{tenant}:previous") is None
+    counter = {"tenant_id": tenant, "key_id": f"{tenant}:previous", "requests": 1}
+    store.save_key_use_counter(tenant, f"{tenant}:previous", counter)
+    counter["requests"] = 2
+    store.save_key_use_counter(tenant, f"{tenant}:previous", counter)
+    assert store.key_use_counter(tenant, f"{tenant}:previous")["requests"] == 2
+
+
 def test_postgres_store_survives_reopen(clean_approvals):
     from shipment_agent.model_backends import MockModelBackend
     from shipment_agent.retriever import KeywordRetriever
