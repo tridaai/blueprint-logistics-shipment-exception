@@ -7,7 +7,7 @@ in ways the sender's ledger cannot diagnose. This file pins the
 shipped receiver path end to end: the reference receiver in
 ``docs/webhook-receiver.py`` (stdlib only, imported here as a
 module and served for real), the receiver-side helpers in
-``webhooks.py``, and the ``verify-webhook`` CLI — over all four
+``webhooks.py``, and the ``verify-webhook`` CLI — over all five
 event families through one code path.
 """
 
@@ -125,6 +125,23 @@ def _sla_escalation_body() -> bytes:
     return json.dumps(payload).encode("utf-8")
 
 
+def _corpus_changed_body() -> bytes:
+    from shipment_agent.service import build_corpus_changed_payload
+
+    payload = build_corpus_changed_payload(
+        {
+            "tenant_id": "acme",
+            "policy_id": "SOP-ACME-01",
+            "action": "replace",
+            "actor_key_id": "acme:current",
+            "prior_text_hash": "a" * 64,
+            "text_hash": "b" * 64,
+            "at": "2026-10-10T12:00:00+00:00",
+        }
+    )
+    return json.dumps(payload).encode("utf-8")
+
+
 def _worker_stale_body() -> bytes:
     from shipment_agent.service import build_worker_stale_payload
 
@@ -145,6 +162,7 @@ FAMILY_BODIES = {
     "sla_breach": _sla_breach_body,
     "sla_escalation": _sla_escalation_body,
     "worker_stale": _worker_stale_body,
+    "corpus_changed": _corpus_changed_body,
 }
 
 
@@ -184,6 +202,7 @@ def test_event_family_recognition():
     assert event_family({"event": "sla_breach"}) == "sla_breach"
     assert event_family({"event": "sla_escalation"}) == "sla_escalation"
     assert event_family({"event": "worker_stale"}) == "worker_stale"
+    assert event_family({"event": "corpus_changed"}) == "corpus_changed"
     assert (
         event_family({"shipment_id": "X", "approval_status": "approved"})
         == "approval"
