@@ -113,6 +113,7 @@
     <input id="tenant" type="text" placeholder="e.g. acme" style="max-width:320px" autocomplete="off">
     <div class="row" style="margin-top:12px">
       <button class="primary" id="analyze">Analyze shipment</button>
+      <span class="note" id="analyze-status"></span>
       <span id="error"></span>
     </div>
   </section>
@@ -489,12 +490,20 @@ $('analyze').addEventListener('click', async () => {
   let payload;
   try { payload = JSON.parse($('json').value); }
   catch (e) { $('error').textContent = 'That JSON does not parse: ' + e.message; return; }
-  const res = await fetch('/shipments/analyze', {
-    method: 'POST', headers: {'Content-Type': 'application/json', ...apiHeaders()}, body: JSON.stringify(payload)
-  });
-  if (!res.ok) { $('error').textContent = 'Analyze failed (' + res.status + '): ' + await res.text(); return; }
-  render(await res.json());
-  loadQueue();
+  const btn = $('analyze');
+  btn.disabled = true;
+  $('analyze-status').textContent = 'Analyzing… this can take up to 30s (multiple LLM calls)';
+  try {
+    const res = await fetch('/shipments/analyze', {
+      method: 'POST', headers: {'Content-Type': 'application/json', ...apiHeaders()}, body: JSON.stringify(payload)
+    });
+    if (!res.ok) { $('error').textContent = 'Analyze failed (' + res.status + '): ' + await res.text(); return; }
+    render(await res.json());
+    loadQueue();
+  } finally {
+    btn.disabled = false;
+    $('analyze-status').textContent = '';
+  }
 });
 
 async function decide(path) {
