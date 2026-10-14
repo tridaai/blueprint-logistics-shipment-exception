@@ -16,8 +16,8 @@ decision.
 
 > **Reference prototype.** An open blueprint from Trida AI showing how a
 > forward-deployed engineering team builds an AI agent for a real
-> operational workflow. It runs on **synthetic data only**, stops at a
-> human-approval gate, and takes **no external action** (one opt-in
+> operational workflow. It stops at a human-approval gate and takes
+> **no external action** (one opt-in
 > exception: an approval webhook you configure yourself — see
 > Configuration). It is not a production system and does not describe
 > any client engagement.
